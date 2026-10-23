@@ -102,6 +102,17 @@ func TestReadSecret(t *testing.T) {
 	}
 }
 
+// The example in the README must stay valid.
+func TestExampleConfig(t *testing.T) {
+	c, err := Load(filepath.Join("..", "examples", "gateway.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.ModelGroups) != 2 || c.Pools[0].Capacity != 256 || c.TeamShare("etabB") != 0.1875 {
+		t.Fatalf("%+v", c)
+	}
+}
+
 func TestLoad(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "c.yaml")
 	if err := os.WriteFile(p, []byte(valid), 0o600); err != nil {
