@@ -91,10 +91,20 @@ func TestExport(t *testing.T) {
 	if err != nil || !strings.HasPrefix(out, "from,to,team,pool,requests") {
 		t.Fatalf("%q %v", out, err)
 	}
+	out, err = run(t, "export", "-c", cfg, "--from", "2026-10-01", "--to", "2026-11-01", "--group-by", "org,tag", "--format", "parsable2")
+	if err != nil || !strings.HasPrefix(out, "from|to|org|tag|requests") {
+		t.Fatalf("parsable2: %q %v", out, err)
+	}
+	out, err = run(t, "export", "-c", cfg, "--from", "2026-10-01", "--to", "2026-11-01", "--format", "json")
+	if err != nil || !strings.Contains(out, `"rows":[]`) {
+		t.Fatalf("json: %q %v", out, err)
+	}
 	for _, args := range [][]string{
 		{"--from", "bad", "--to", "2026-11-01"},
 		{"--from", "2026-10-01", "--to", "bad"},
 		{"--from", "2026-11-01", "--to", "2026-10-01"},
+		{"--from", "2026-10-01", "--to", "2026-11-01", "--group-by", "user"},
+		{"--from", "2026-10-01", "--to", "2026-11-01", "--format", "xml"},
 	} {
 		if _, err := run(t, append([]string{"export", "-c", cfg}, args...)...); err == nil {
 			t.Fatalf("accepted %v", args)

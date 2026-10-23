@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"io"
@@ -55,6 +54,7 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	h("PUT /admin/budgets", s.setBudget)
 	h("POST /admin/budgets/increase", s.increaseBudget)
 	h("DELETE /admin/budgets", s.deleteBudget)
+	h("GET /admin/spend", s.spendReport)
 	h("GET /admin/usage.csv", s.usageCSV)
 	h("GET /admin/fairshare", s.fairshareState)
 }
@@ -866,54 +866,6 @@ func ParseDay(v string) (time.Time, error) {
 		return t, nil
 	}
 	return time.Parse("2006-01-02", v)
-}
-
-func (s *Server) usageCSV(w http.ResponseWriter, r *http.Request, p *principal) {
-	from, err1 := ParseDay(r.URL.Query().Get("from"))
-	to, err2 := ParseDay(r.URL.Query().Get("to"))
-	if err1 != nil || err2 != nil || !from.Before(to) {
-		apiError(w, http.StatusBadRequest, "invalid_request_error", "from and to are required (RFC 3339 or YYYY-MM-DD), from < to")
-		return
-	}
-	us, err := s.st.Usage(r.Context(), from, to)
-	if err != nil {
-		storeError(w, err)
-		return
-	}
-	if !p.proxyView() {
-		teams, err := s.teamsByName(r)
-		if err != nil {
-			storeError(w, err)
-			return
-		}
-		kept := us[:0]
-		for _, u := range us {
-			if t, ok := teams[u.Team]; ok && p.teamView(t) {
-				kept = append(kept, u)
-			}
-		}
-		us = kept
-	}
-	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	_ = WriteUsageCSV(w, from, to, us)
-}
-
-// WriteUsageCSV writes the per-team GPU-hour export. Fields are written by
-// encoding/csv; a team name cannot start a spreadsheet formula because
-// names are restricted to [A-Za-z0-9_.-].
-func WriteUsageCSV(w io.Writer, from, to time.Time, us []store.TeamUsage) error {
-	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{"from", "to", "team", "pool", "requests", "prompt_tokens", "completion_tokens", "cached_tokens", "gpu_hours", "estimated_requests"})
-	for _, u := range us {
-		_ = cw.Write([]string{
-			from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339), u.Team, u.Pool,
-			strconv.FormatInt(u.Requests, 10), strconv.FormatInt(u.PromptTokens, 10),
-			strconv.FormatInt(u.CompletionTokens, 10), strconv.FormatInt(u.CachedTokens, 10),
-			strconv.FormatFloat(u.GPUHours, 'f', 6, 64), strconv.FormatInt(u.EstimatedRequests, 10),
-		})
-	}
-	cw.Flush()
-	return cw.Error()
 }
 
 func (s *Server) fairshareState(w http.ResponseWriter, _ *http.Request, p *principal) {

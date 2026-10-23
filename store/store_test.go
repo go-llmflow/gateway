@@ -203,12 +203,36 @@ func contract(t *testing.T, s Store) {
 	if len(rows) != 3 || sum["etabA"] != 0.5 || sum["etabB"] != 7.25 || sum["tag:prod"] != 0.5 || sum["tag:eval"] != 0.5 || sum["project:x"] != 7 {
 		t.Fatalf("spend rows %+v", rows)
 	}
-	us, err := s.Usage(ctx, t0, t0.Add(24*time.Hour))
+	us, err := s.Report(ctx, t0, t0.Add(24*time.Hour), []string{"pool", "team"})
 	must(err)
-	if len(us) != 2 || us[0].Team != "etabA" || us[0].Requests != 2 || us[0].PromptTokens != 11 ||
+	if len(us) != 2 || us[0].Team != "etabA" || us[0].Pool != "p" || us[0].Requests != 2 || us[0].PromptTokens != 11 ||
 		us[0].CompletionTokens != 6 || us[0].CachedTokens != 2 || us[0].GPUHours != 2 || us[1].GPUHours != 0.25 ||
-		us[0].EstimatedRequests != 1 || us[1].EstimatedRequests != 0 {
-		t.Fatalf("usage %+v", us)
+		us[0].EstimatedRequests != 1 || us[1].EstimatedRequests != 0 || us[0].Org != "" {
+		t.Fatalf("report by team and pool %+v", us)
+	}
+	// By tag: the record with two tags counts under both, untagged under "".
+	us, err = s.Report(ctx, t0, t0.Add(72*time.Hour), []string{"tag"})
+	must(err)
+	if len(us) != 3 || us[0].Tag != "" || us[0].Requests != 2 || us[1].Tag != "eval" || us[1].Requests != 2 ||
+		us[2].Tag != "prod" || us[2].GPUHours != 0.5 {
+		t.Fatalf("report by tag %+v", us)
+	}
+	// Grand total, and by org and project.
+	us, err = s.Report(ctx, t0, t0.Add(72*time.Hour), nil)
+	must(err)
+	if len(us) != 1 || us[0].Requests != 4 || us[0].GPUHours != 9.25 {
+		t.Fatalf("grand total %+v", us)
+	}
+	us, err = s.Report(ctx, t0, t0.Add(72*time.Hour), []string{"project", "org"})
+	must(err)
+	if len(us) != 3 || us[0].Org != "orgA" || us[2].Project != "x" || us[2].GPUHours != 7 {
+		t.Fatalf("by org and project %+v", us)
+	}
+	if us, err := s.Report(ctx, t0.AddDate(1, 0, 0), t0.AddDate(1, 0, 1), nil); err != nil || len(us) != 0 {
+		t.Fatalf("empty period %+v %v", us, err)
+	}
+	if _, err := s.Report(ctx, t0, t0, []string{"user"}); err == nil {
+		t.Fatal("unknown dimension accepted")
 	}
 
 	must(s.DisableTeam(ctx, "etabB"))
@@ -278,7 +302,7 @@ func TestMemoryFaults(t *testing.T) {
 	if _, err := m.MarkSoftAlert(ctx, BudgetKey{}, time.Time{}); !errors.Is(err, boom) {
 		t.Fatal("MarkSoftAlert fault")
 	}
-	_, e6 := m.Usage(ctx, time.Time{}, time.Time{})
+	_, e6 := m.Report(ctx, time.Time{}, time.Time{}, nil)
 	_, e7 := m.ListOrgs(ctx)
 	_, e8 := m.GetTeam(ctx, "a")
 	_, e9 := m.ListProjects(ctx, "a")

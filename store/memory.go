@@ -351,45 +351,6 @@ func (m *Memory) InsertRecords(_ context.Context, recs []Record) error {
 	return nil
 }
 
-func (m *Memory) Usage(_ context.Context, from, to time.Time) ([]TeamUsage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if m.Fail != nil {
-		return nil, m.Fail
-	}
-	agg := map[[2]string]*TeamUsage{}
-	for _, r := range m.records {
-		if r.Time.Before(from) || !r.Time.Before(to) {
-			continue
-		}
-		k := [2]string{r.Team, r.Pool}
-		u := agg[k]
-		if u == nil {
-			u = &TeamUsage{Team: r.Team, Pool: r.Pool}
-			agg[k] = u
-		}
-		u.Requests++
-		u.PromptTokens += r.PromptTokens
-		u.CompletionTokens += r.CompletionTokens
-		u.CachedTokens += r.CachedTokens
-		u.GPUHours += r.Cost
-		if r.Estimated {
-			u.EstimatedRequests++
-		}
-	}
-	out := make([]TeamUsage, 0, len(agg))
-	for _, u := range agg {
-		out = append(out, *u)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Team != out[j].Team {
-			return out[i].Team < out[j].Team
-		}
-		return out[i].Pool < out[j].Pool
-	})
-	return out, nil
-}
-
 // Records returns a copy of the stored usage records (tests, trials).
 func (m *Memory) Records() []Record {
 	m.mu.RLock()

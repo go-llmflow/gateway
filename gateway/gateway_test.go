@@ -276,7 +276,7 @@ func TestStreamingUsageCaptureAndAccounting(t *testing.T) {
 		t.Fatalf("usage chunk missing: %s", out)
 	}
 	e.srv.Close(context.Background())
-	recs, _ := e.st.Usage(context.Background(), time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	recs, _ := e.st.Report(context.Background(), time.Now().Add(-time.Hour), time.Now().Add(time.Hour), []string{"team", "pool"})
 	if len(recs) != 1 || recs[0].Requests != 2 || recs[0].PromptTokens != 200 || recs[0].CompletionTokens != 40 || recs[0].CachedTokens != 80 {
 		t.Fatalf("usage %+v", recs)
 	}
