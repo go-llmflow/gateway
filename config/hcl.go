@@ -31,6 +31,8 @@ type fileHCL struct {
 	ShutdownGrace        *string    `hcl:"shutdown_grace,optional"`
 	ShutdownGraceRange   hcl.Range  `hcl:"shutdown_grace,attr_value_range"`
 	ExposeOverheadHeader *bool      `hcl:"expose_overhead_header,optional"`
+	AuthFailures         *int       `hcl:"auth_failures_per_minute,optional"`
+	AuthFailuresRange    hcl.Range  `hcl:"auth_failures_per_minute,attr_value_range"`
 	Store                *storeHCL  `hcl:"store,block"`
 	Limits               *limitsHCL `hcl:"limits,block"`
 	FairShare            *fairHCL   `hcl:"fairshare,block"`
@@ -230,6 +232,13 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	}
 	if c.MasterKeyFile == "" {
 		v.errf(raw.MasterKeyFileRange, "Missing master key file", "master_key_file must name a file")
+	}
+	c.AuthFailuresPerMinute = DefaultAuthFailuresPerMinute
+	if raw.AuthFailures != nil {
+		c.AuthFailuresPerMinute = *raw.AuthFailures
+		if c.AuthFailuresPerMinute < 0 || c.AuthFailuresPerMinute > 1_000_000 {
+			v.errf(raw.AuthFailuresRange, "Invalid limit", "auth_failures_per_minute = %d: want 0 (off)..1000000", c.AuthFailuresPerMinute)
+		}
 	}
 	if raw.Retries != nil {
 		c.Retries = *raw.Retries

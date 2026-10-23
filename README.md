@@ -289,7 +289,15 @@ Enforced:
   reaches a redirect target); environment proxies are ignored.
 - Limits: request body, header size, read-header / read / idle timeouts, maximum
   request duration, maximum upstream response size; admin JSON bodies ≤ 64 KiB
-  with unknown fields rejected; bounded key cache and accounting queue.
+  with unknown fields rejected; bounded accounting queue.
+- Key cache: valid keys and misses live in two separate bounded maps, never
+  cleared in bulk, so a spray of random keys cannot evict valid keys and push
+  legitimate traffic to PostgreSQL (test: 200 000 random keys, the valid key is
+  still served from the cache). Failed authentications (client keys and the
+  master key) are limited per client network, IPv4 address or IPv6 /64, taken
+  from the connection, not from proxy headers: `auth_failures_per_minute`
+  (default 60, 0 disables) answers 429 before any store lookup, except for a
+  valid key already in the cache.
 - Budgets fail closed: when PostgreSQL cannot be read for 3 refresh periods,
   every request gets 503 (`store.fail_closed: false` to fail open).
 - CI: race tests on amd64 and arm64, PostgreSQL integration tests against a

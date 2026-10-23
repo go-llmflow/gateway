@@ -3,7 +3,9 @@ package gateway
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -13,59 +15,188 @@ import (
 // keyCache keeps recent key lookups so the request path does not query
 // PostgreSQL every time. A revocation through this process's admin API is
 // immediate; one made through another replica takes effect within the
-// TTL. Misses are cached too (for a shorter time) so random keys cannot
-// turn into one database query each.
+// TTL.
+//
+// Hits and misses live in two separate bounded maps. Misses are cached
+// (for a shorter time) so that a repeated wrong key costs one query, but a
+// flood of random keys can only fill the miss map: it never evicts valid
+// keys. (The first version wiped one shared map when it reached 100 000
+// entries, so spraying random keys flushed every valid key and sent all
+// legitimate traffic to PostgreSQL.) Neither map is ever cleared in bulk:
+// when one is full, expired entries are dropped, then single entries.
 type keyCache struct {
 	mu      sync.Mutex
 	ttl     time.Duration
 	now     func() time.Time
-	entries map[[32]byte]cacheEntry
+	valid   map[[32]byte]validEntry
+	missing map[[32]byte]time.Time // expiry
+	maxHit  int
+	maxMiss int
+	// nextMissPurge rate-limits the expiry scan of a full miss map.
+	nextMissPurge time.Time
 }
 
-type cacheEntry struct {
+type validEntry struct {
 	key     store.Key
-	found   bool
 	expires time.Time
 }
 
-const maxCacheEntries = 100_000
+const (
+	maxValidEntries = 100_000
+	maxMissEntries  = 10_000
+)
 
 func newKeyCache(ttl time.Duration, now func() time.Time) *keyCache {
-	return &keyCache{ttl: ttl, now: now, entries: map[[32]byte]cacheEntry{}}
+	return &keyCache{
+		ttl: ttl, now: now, valid: map[[32]byte]validEntry{}, missing: map[[32]byte]time.Time{},
+		maxHit: maxValidEntries, maxMiss: maxMissEntries,
+	}
 }
 
-func (c *keyCache) get(h [32]byte) (cacheEntry, bool) {
+// get returns (key, found, cached).
+func (c *keyCache) get(h [32]byte) (store.Key, bool, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	e, ok := c.entries[h]
-	if !ok || c.now().After(e.expires) {
-		return cacheEntry{}, false
+	now := c.now()
+	if e, ok := c.valid[h]; ok && !now.After(e.expires) {
+		return e.key, true, true
 	}
-	return e, true
+	if exp, ok := c.missing[h]; ok && !now.After(exp) {
+		return store.Key{}, false, true
+	}
+	return store.Key{}, false, false
 }
 
-func (c *keyCache) put(h [32]byte, k store.Key, found bool) {
+func (c *keyCache) putValid(h [32]byte, k store.Key) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.entries) >= maxCacheEntries {
-		c.entries = map[[32]byte]cacheEntry{}
+	if len(c.valid) >= c.maxHit {
+		now := c.now()
+		for kh, e := range c.valid {
+			if now.After(e.expires) {
+				delete(c.valid, kh)
+			}
+		}
+		for kh := range c.valid {
+			if len(c.valid) < c.maxHit {
+				break
+			}
+			delete(c.valid, kh)
+		}
 	}
-	ttl := c.ttl
-	if !found {
-		ttl = c.ttl / 5
-	}
-	c.entries[h] = cacheEntry{key: k, found: found, expires: c.now().Add(ttl)}
+	delete(c.missing, h)
+	c.valid[h] = validEntry{key: k, expires: c.now().Add(c.ttl)}
 }
 
-// forget drops cached entries matching a predicate.
+func (c *keyCache) putMissing(h [32]byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	if len(c.missing) >= c.maxMiss {
+		// Scanning on every miss of a spray would cost O(n) per request;
+		// purge at most once per miss lifetime.
+		if now.Before(c.nextMissPurge) {
+			return // full of live misses: do not cache this one
+		}
+		c.nextMissPurge = now.Add(c.ttl / 5)
+		for kh, exp := range c.missing {
+			if now.After(exp) {
+				delete(c.missing, kh)
+			}
+		}
+		if len(c.missing) >= c.maxMiss {
+			return
+		}
+	}
+	c.missing[h] = now.Add(c.ttl / 5)
+}
+
+// forget drops cached valid entries matching a predicate.
 func (c *keyCache) forget(match func(store.Key) bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for h, e := range c.entries {
-		if e.found && match(e.key) {
-			delete(c.entries, h)
+	for h, e := range c.valid {
+		if match(e.key) {
+			delete(c.valid, h)
 		}
 	}
+}
+
+// failLimiter counts failed authentications per client network (IPv4
+// address, IPv6 /64) over a sliding minute.
+type failLimiter struct {
+	mu    sync.Mutex
+	limit int
+	now   func() time.Time
+	nets  map[netip.Prefix]*window
+	// nextPurge rate-limits the scan of a full map.
+	nextPurge time.Time
+}
+
+const maxTrackedNets = 100_000
+
+func newFailLimiter(limit int, now func() time.Time) *failLimiter {
+	return &failLimiter{limit: limit, now: now, nets: map[netip.Prefix]*window{}}
+}
+
+// clientNet keys a client by its address (no proxy header is trusted).
+func clientNet(r *http.Request) (netip.Prefix, bool) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	a, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	a = a.Unmap()
+	bits := 32
+	if a.Is6() {
+		bits = 64
+	}
+	p, err := a.Prefix(bits)
+	return p, err == nil
+}
+
+func (l *failLimiter) blocked(p netip.Prefix) bool {
+	if l == nil || l.limit <= 0 {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	w := l.nets[p]
+	return w != nil && w.value(l.now()) >= float64(l.limit)
+}
+
+func (l *failLimiter) fail(p netip.Prefix) {
+	if l == nil || l.limit <= 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	w := l.nets[p]
+	if w == nil {
+		if len(l.nets) >= maxTrackedNets {
+			// At most one O(n) purge per 30 s, whatever the request rate.
+			if now.Before(l.nextPurge) {
+				return // cannot track more networks; fail open on tracking
+			}
+			l.nextPurge = now.Add(30 * time.Second)
+			for k, v := range l.nets {
+				if v.value(now) == 0 {
+					delete(l.nets, k)
+				}
+			}
+			if len(l.nets) >= maxTrackedNets {
+				return
+			}
+		}
+		w = &window{}
+		l.nets[p] = w
+	}
+	w.roll(now)
+	w.cur++
 }
 
 var errAuthUnavailable = errors.New("key store unreachable")
@@ -73,49 +204,73 @@ var errAuthUnavailable = errors.New("key store unreachable")
 // lookup resolves a presented secret to a valid key.
 func (s *Server) lookup(ctx context.Context, secret string) (store.Key, bool, error) {
 	h := store.HashSecret(secret)
-	e, ok := s.keys.get(h)
-	if !ok {
-		k, err := s.st.KeyByHash(ctx, h)
+	k, found, cached := s.keys.get(h)
+	if !cached {
+		var err error
+		k, err = s.st.KeyByHash(ctx, h)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
-			s.keys.put(h, store.Key{}, false)
+			s.keys.putMissing(h)
 			return store.Key{}, false, nil
 		case err != nil:
 			return store.Key{}, false, errAuthUnavailable
 		}
-		s.keys.put(h, k, true)
-		e = cacheEntry{key: k, found: true}
+		s.keys.putValid(h, k)
+		found = true
 	}
-	if !e.found || e.key.Revoked || !store.HashEqual(e.key.Hash, h) {
+	if !found || k.Revoked || !store.HashEqual(k.Hash, h) {
 		return store.Key{}, false, nil
 	}
-	return e.key, true, nil
+	return k, true, nil
 }
 
 // authenticate checks the virtual key of a client request and writes the
-// error response itself when it fails.
+// error response itself when it fails. A client network with too many
+// failed authentications in the last minute gets 429 before its key is
+// looked up, unless the key is a valid one already in the cache.
 func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (store.Key, bool) {
 	secret := bearer(r)
-	if secret == "" {
-		apiError(w, http.StatusUnauthorized, "authentication_error", "missing bearer token")
+	cn, haveNet := clientNet(r)
+	fail := func(status int, typ, msg string) (store.Key, bool) {
+		if haveNet && status == http.StatusUnauthorized {
+			s.authFails.fail(cn)
+		}
+		apiError(w, status, typ, msg)
 		return store.Key{}, false
+	}
+	if secret == "" {
+		return fail(http.StatusUnauthorized, "authentication_error", "missing bearer token")
+	}
+	if haveNet && s.authFails.blocked(cn) {
+		if k, found, cached := s.keys.get(store.HashSecret(secret)); !(cached && found && !k.Revoked) {
+			s.met.denied.add(1, "", "auth_failures")
+			apiError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "too many failed authentications from this address")
+			return store.Key{}, false
+		}
 	}
 	k, ok, err := s.lookup(r.Context(), secret)
 	if err != nil {
-		apiError(w, http.StatusServiceUnavailable, "service_unavailable", err.Error())
-		return store.Key{}, false
+		return fail(http.StatusServiceUnavailable, "service_unavailable", err.Error())
 	}
 	if !ok {
-		apiError(w, http.StatusUnauthorized, "authentication_error", "invalid or revoked key")
-		return store.Key{}, false
+		return fail(http.StatusUnauthorized, "authentication_error", "invalid or revoked key")
 	}
 	return k, true
 }
 
 // adminAuth checks the master key in constant time (both sides hashed to a
 // fixed length first, so the comparison does not leak the key's length).
+// Failures count against the client's address like client-key failures.
 func (s *Server) adminAuth(w http.ResponseWriter, r *http.Request) bool {
+	cn, haveNet := clientNet(r)
+	if haveNet && s.authFails.blocked(cn) {
+		apiError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "too many failed authentications from this address")
+		return false
+	}
 	if !store.HashEqual(store.HashSecret(bearer(r)), store.HashSecret(s.secrets.MasterKey)) {
+		if haveNet {
+			s.authFails.fail(cn)
+		}
 		apiError(w, http.StatusUnauthorized, "authentication_error", "master key required")
 		return false
 	}
