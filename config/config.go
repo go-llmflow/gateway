@@ -43,6 +43,10 @@ type Config struct {
 	BudgetRefresh     time.Duration
 	KeyCacheTTL       time.Duration
 	ExposeOverheadHdr bool
+	// AuthFailuresPerMinute is the number of failed authentications a
+	// client network (IPv4 address, IPv6 /64) may make per minute before it
+	// gets 429; 0 disables the limit.
+	AuthFailuresPerMinute int
 }
 
 // Store selects where persistent state lives.
@@ -150,6 +154,7 @@ const (
 	DefaultShutdownGrace         = 30 * time.Second
 	DefaultBudgetRefresh         = 10 * time.Second
 	DefaultKeyCacheTTL           = 30 * time.Second
+	DefaultAuthFailuresPerMinute = 60
 	maxConfigBytes               = 4 << 20
 )
 

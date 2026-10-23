@@ -51,6 +51,8 @@ type Server struct {
 	rec     *recorder
 	met     *metrics
 	keys    *keyCache
+	// authFails limits failed authentications per client network.
+	authFails *failLimiter
 
 	cancel context.CancelFunc
 	bg     sync.WaitGroup
@@ -138,6 +140,7 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 		s.log.Error("accounting write failed", "err", err)
 	})
 	s.keys = newKeyCache(cfg.KeyCacheTTL, s.now)
+	s.authFails = newFailLimiter(cfg.AuthFailuresPerMinute, s.now)
 	return s, nil
 }
 

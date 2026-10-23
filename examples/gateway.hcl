@@ -16,6 +16,10 @@ key_cache_ttl          = "30s"
 shutdown_grace         = "30s"
 expose_overhead_header = false
 
+# Failed authentications allowed per client network (IPv4 address, IPv6 /64)
+# per minute before 429; 0 disables.
+auth_failures_per_minute = 60
+
 store {
   kind        = "postgres"            # or "memory" (state lost on restart)
   dsn_file    = "/etc/llmflow/pg.dsn" # e.g. postgres://llmflow@db:5432/llmflow?sslmode=verify-full
