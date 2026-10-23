@@ -28,6 +28,18 @@ auth_failures_per_minute = 60
 cache_isolation     = "org"
 cache_salt_key_file = "/etc/llmflow/cache-salt.key"
 
+# Reverse proxies whose X-Forwarded-For is believed (read from the right,
+# skipping these). Without it the connection's address is the client.
+trusted_proxies = ["10.0.0.0/24"]
+
+# Networks allowed per route class. /metrics and /healthz default to
+# loopback; /metrics also opens with the metrics token from anywhere.
+routes {
+  metrics { allow = ["127.0.0.0/8", "10.0.1.0/24"] } # Prometheus
+  healthz { allow = ["127.0.0.0/8", "10.0.0.0/24"] } # load balancer
+  admin { allow = ["10.0.2.0/24", "2001:db8:2::/48"] } # operators
+}
+
 store {
   kind        = "postgres"            # or "memory" (state lost on restart)
   dsn_file    = "/etc/llmflow/pg.dsn" # e.g. postgres://llmflow@db:5432/llmflow?sslmode=verify-full

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -712,6 +713,9 @@ func TestRequestValidation(t *testing.T) {
 func TestMetricsTokenAndFormat(t *testing.T) {
 	up := newFakeVLLM(t)
 	cfg := testConfig(up.URL())
+	// The test client is on loopback, which the default allows: move the
+	// allowed network elsewhere so that only the token opens the route.
+	cfg.Routes.Metrics = []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}
 	st := store.NewMemory()
 	srv, err := New(cfg, st, Secrets{MasterKey: master, MetricsToken: "mt", UpstreamKeys: testKeys(cfg), CacheSaltKey: testSaltKey})
 	if err != nil {

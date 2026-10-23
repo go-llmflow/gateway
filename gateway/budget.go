@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -105,6 +106,7 @@ type budgeter struct {
 	pending    map[store.BudgetKey]float64 // charged here, record not yet stored
 	written    map[store.BudgetKey]float64 // stored since the last refresh query
 	models     map[string]map[string]bool  // team → allowed model groups
+	allow      map[store.AllowKey][]netip.Prefix
 	lastOK     time.Time
 	everOK     bool
 	maxAge     time.Duration
@@ -194,8 +196,25 @@ func (b *budgeter) refresh(ctx context.Context) error {
 		}
 		models[team] = set
 	}
+	lists, err := b.st.Allowlists(ctx)
+	if err != nil {
+		restore()
+		return err
+	}
+	allow := make(map[store.AllowKey][]netip.Prefix, len(lists))
+	for _, l := range lists {
+		ps := make([]netip.Prefix, 0, len(l.CIDRs))
+		for _, c := range l.CIDRs {
+			if p, err := netip.ParsePrefix(c); err == nil {
+				ps = append(ps, p)
+			}
+		}
+		// A list whose every prefix is unreadable must still deny:
+		// an empty non-nil slice matches nothing.
+		allow[l.AllowKey] = ps
+	}
 	b.mu.Lock()
-	b.budgets, b.models, b.lastOK, b.everOK = budgets, models, now, true
+	b.budgets, b.models, b.allow, b.lastOK, b.everOK = budgets, models, allow, now, true
 	onSoft := b.onSoft
 	b.mu.Unlock()
 	if onSoft != nil && len(alerts) > 0 {
@@ -293,6 +312,19 @@ func (b *budgeter) modelAllowed(team, model string) bool {
 	defer b.mu.Unlock()
 	set, ok := b.models[team]
 	return !ok || set[model]
+}
+
+// addrAllowed reports whether address a passes every IP allowlist set on
+// the key's organisation, team and the key itself.
+func (b *budgeter) addrAllowed(a netip.Addr, k store.Key) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, ak := range []store.AllowKey{{Kind: store.ScopeOrg, Name: k.Org}, {Kind: store.ScopeTeam, Name: k.Team}, {Kind: store.ScopeKey, Name: k.ID}} {
+		if ps, ok := b.allow[ak]; ok && !inAny(a, ps) {
+			return false
+		}
+	}
+	return true
 }
 
 // healthy reports whether the last refresh is recent.

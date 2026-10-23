@@ -205,6 +205,10 @@ type Store interface {
 	// team, project, key, model and tag set.
 	SpendRows(ctx context.Context, since time.Time) ([]SpendRow, error)
 	InsertRecords(ctx context.Context, recs []Record) error
+	// SetAllowlist replaces the client networks allowed for an
+	// organisation, a team or a key; an empty list removes the allowlist.
+	SetAllowlist(ctx context.Context, a Allowlist) error
+	Allowlists(ctx context.Context) ([]Allowlist, error)
 	// Report aggregates the records in [from, to) by the given dimensions
 	// (see ReportDims), sorted.
 	Report(ctx context.Context, from, to time.Time, dims []string) ([]ReportRow, error)

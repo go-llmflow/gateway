@@ -181,6 +181,8 @@ model "llama-3.3-70b" {
 | `limits { … }`, `health { … }` | body and header size, timeouts, maximum request duration and response size; health-check interval, timeout, cooldown, path |
 | `tags { header, allowed }` | the request header clients may tag requests with, and the allowed tags |
 | `cache_isolation`, `cache_salt_key_file` | prefix-cache tenant scope (`org` default, `team`, `key`, `none`) and the file holding the HMAC key (at least 32 bytes, required unless `none`); see Security |
+| `trusted_proxies` | CIDR prefixes of the reverse proxies whose `X-Forwarded-For` is read; see Security |
+| `routes { inference, admin, metrics, healthz { allow = [...] } }` | networks allowed per route class; `metrics` and `healthz` default to loopback |
 | `alerts { webhook_url, webhook_token_file, smtp { server, from, to, username, password_file } }` | where soft-budget alerts go |
 
 HCL design decisions:
@@ -284,6 +286,7 @@ authentications count in the per-network failure limit.
 | route | |
 |---|---|
 | `GET /admin/whoami` | the caller and their roles |
+| `GET` / `PUT /admin/allowlists` | IP allowlists `{"kind":"org"\|"team"\|"key","name","cidrs":[…]}` (empty list removes); organisation lists by its admins, team and key lists by the team's admins |
 | `GET` / `POST /admin/users`, `DELETE /admin/users/{name}` | list (filtered), create `{"name"}`, disable (revokes their tokens; proxy admin only) |
 | `GET` / `POST /admin/users/{name}/tokens`, `DELETE /admin/users/{name}/tokens/{id}` | a user's admin tokens (the user themselves or a proxy admin) |
 | `GET` / `PUT /admin/users/{name}/roles`, `DELETE /admin/users/{name}/roles?role=&org=&team=` | list, grant `{"role","org","team"}`, remove |
@@ -389,6 +392,19 @@ Enforced:
   `llmf-` + an HMAC of (scope, uuid), so a client keeps referring to media it
   sent earlier, while the same uuid presented by two tenants names two
   different cache entries.
+- **Client addresses and network restrictions.** The client is the
+  connection's address, unless the connection comes from one of
+  `trusted_proxies`: then `X-Forwarded-For` is read **from the right**,
+  skipping trusted proxies, and the first other address is the client (MDN,
+  X-Forwarded-For, "trusted proxy list"; the leftmost entries are written by
+  the client and never used). An unparsable or zoned entry, or a chain of more
+  than 64 hops, stops the walk at the last trusted hop. Each route class can
+  be restricted to networks (`routes { … }`): `/metrics` and `/healthz` answer
+  only loopback by default (`/metrics` also with its token from anywhere).
+  IP allowlists on an organisation, a team or a key (admin API) must all
+  match the client, else 403 with one generic message; they are loaded with
+  the budget state, so the request path never queries the store. The address
+  parser is fuzzed (`FuzzClientAddr`).
 - **vLLM must only be reachable from the gateway**: its `--api-key` covers only
   `/v1`, `/v2` and `/inference`, and `/invocations` exposes the same inference
   without authentication (vLLM docs above). Firewall the vLLM ports.
