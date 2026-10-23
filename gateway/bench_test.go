@@ -71,7 +71,7 @@ func BenchmarkOverhead(b *testing.B) {
 	cfg := testConfig(up.URL)
 	cfg.Health.Interval = time.Hour
 	st := store.NewMemory()
-	srv, err := New(cfg, st, Secrets{MasterKey: master, UpstreamKeys: map[string]string{"llama": "k", "llama-batch": "k"}})
+	srv, err := New(cfg, st, Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg)})
 	if err != nil {
 		b.Fatal(err)
 	}

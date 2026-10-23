@@ -215,7 +215,7 @@ func (s *Server) send(ctx context.Context, g *group, path string, body []byte, a
 		if accept == "text/event-stream" || accept == "application/json" {
 			req.Header.Set("Accept", accept)
 		}
-		req.Header.Set("Authorization", "Bearer "+g.apiKey)
+		req.Header.Set("Authorization", "Bearer "+u.apiKey)
 		req.Header.Set("X-Vllm-Priority", strconv.Itoa(priority))
 		req.Header.Set("X-Request-Id", rid)
 		req.ContentLength = int64(len(body))

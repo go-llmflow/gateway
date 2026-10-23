@@ -18,9 +18,9 @@ Built for a 4-node HGX B300 cluster (32 GPUs) shared by two institutions, A
 
 ```sh
 go install github.com/go-llmflow/gateway/cmd/llmflow-gateway@latest
-llmflow-gateway check-config -c examples/gateway.yaml   # validates the file and every secret file it names
-llmflow-gateway serve -c examples/gateway.yaml
-llmflow-gateway export -c examples/gateway.yaml --from 2026-10-01 --to 2026-11-01 > october.csv
+llmflow-gateway check-config -c examples/gateway.hcl   # validates the file and every secret file it names
+llmflow-gateway serve -c examples/gateway.hcl
+llmflow-gateway export -c examples/gateway.hcl --from 2026-10-01 --to 2026-11-01 > october.csv
 ```
 
 ## Architecture
@@ -124,20 +124,71 @@ preemption of the largest `(priority, arrival)`) with closed-loop clients:
 
 ## Configuration
 
-See [`examples/gateway.yaml`](examples/gateway.yaml) (parsed by the test suite,
-so it stays valid). Secrets are only read from files named in the
-configuration: `master_key_file`, `metrics_token_file`, each group's
-`api_key_file` (the vLLM `--api-key`) and `store.dsn_file`. Nothing is read
-from the environment or the command line. Unknown YAML keys are rejected.
+The configuration is written in [HCL2 native syntax](https://github.com/hashicorp/hcl/blob/main/hclsyntax/spec.md).
+See [`examples/gateway.hcl`](examples/gateway.hcl) (parsed by the test suite,
+so it stays valid):
 
-| key | meaning |
+```hcl
+master_key_file = "/etc/llmflow/master.key"
+
+team "etabA" { share = 0.8125 }
+team "etabB" { share = 0.1875 }
+
+pool "b300" { capacity = 256 }
+
+model "llama-3.3-70b" {
+  upstream_model = "meta-llama/Llama-3.3-70B-Instruct"
+  pool           = "b300"
+  class          = "interactive"
+  key_file       = "/etc/llmflow/vllm.key"
+  cost {
+    input_per_mtok  = 0.02
+    output_per_mtok = 0.20
+    cached_per_mtok = 0.002
+  }
+  upstream "gpu01" { base_url = "http://10.0.0.11:8000" }
+  upstream "gpu02" {
+    base_url = "http://10.0.0.12:8000"
+    key_file = "/etc/llmflow/gpu02.key"
+  }
+}
+```
+
+| block / attribute | meaning |
 |---|---|
-| `teams[].share` | fraction of every pool reserved for the team (sum ≤ 1) |
-| `pools[].capacity` | C, sustainable concurrency of the pool |
-| `model_groups[]` | client model name → `upstream_model`, `pool`, `class` (`interactive` / `batch`), `upstreams`, `api_key_file`, `cost` in GPU-hours per million input / output / cached tokens |
-| `store` | `memory` or `postgres`; `fail_closed` (default true); accounting queue and batch size |
-| `fairshare.half_life` | usage decay half-life (default 168h) |
-| `limits` | body size, header size, timeouts, max request duration, max upstream response size |
+| `team "<name>" { share }` | fraction of every pool reserved for the team (sum ≤ 1) |
+| `pool "<name>" { capacity }` | C, sustainable concurrency of the pool (1..1048576) |
+| `model "<name>" { … }` | client model name → `upstream_model`, `pool`, `class` (`interactive` / `batch`), `key_file`, `cost { input_per_mtok, output_per_mtok, cached_per_mtok }` in GPU-hours per million tokens, and `upstream "<name>" { base_url, key_file }` blocks |
+| `store { … }` | `kind` (`memory` / `postgres`), `dsn_file`, `fail_closed` (default true), `queue_size`, `batch_size` |
+| `fairshare { half_life }` | usage decay half-life (default `"168h"`) |
+| `limits { … }`, `health { … }` | body and header size, timeouts, maximum request duration and response size; health-check interval, timeout, cooldown, path |
+
+HCL design decisions:
+
+- **Static evaluation.** The file is decoded with no evaluation context: no
+  variables and no functions. `env.HOME`, `file("/etc/shadow")` or `"${x}"`
+  are errors ("Variables not allowed", "Function calls not allowed"), so the
+  configuration cannot read the environment or other files. Constant
+  expressions (`0.5 + 0.25`, heredocs) still work.
+- **Quoted strings are templates.** A literal `${` must be written `$${` and a
+  literal `%{` must be written `%%{` (a lone `$` or `%` needs nothing). This
+  applies to every value, URLs, paths and model names included; tests cover
+  both the refusal and the escapes.
+- **Labelled blocks** for the things that have names: `team`, `pool`,
+  `model`, `upstream`. Duplicate labels are errors.
+- **Every diagnostic carries `file:line:column`**, from the parser, the
+  decoder (unknown attributes, wrong types) and the semantic checks (share sum,
+  capacity bounds, unknown pool, invalid URL, durations). `check-config` prints
+  them one per line.
+- **Secrets only by file.** `master_key_file`, `metrics_token_file`,
+  `store.dsn_file`, and `key_file` on a model (default for its upstreams) or on
+  an upstream (override). An upstream URL with credentials is rejected. Nothing
+  is read from the environment or the command line.
+- **Durations are strings** in Go syntax (`"30s"`, `"168h"`), positive.
+- **Absent and zero differ**: `retries = 0` disables retries; leaving it out
+  takes the default (2).
+- The parser is fuzzed (`FuzzParse`, corpus in `config/testdata/fuzz`): the
+  configuration is treated as untrusted input.
 
 Cost of a request: `((prompt − cached) × input + cached × cached_price +
 completion × output) / 10⁶` GPU-hours, from the `usage` vLLM reports. For

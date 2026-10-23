@@ -52,24 +52,21 @@ func checkConfigCmd() *cobra.Command {
 		Short: "Validate a configuration file and the secret files it names",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// A configuration error lists every diagnostic as
+			// file:line:column: summary: detail, one per line.
 			c, err := config.Load(path)
 			if err != nil {
 				return err
 			}
-			if _, err := config.ReadSecret(c.MasterKeyFile); err != nil {
-				return fmt.Errorf("master_key_file: %w", err)
+			if _, err := readSecrets(c); err != nil {
+				return err
 			}
-			for _, g := range c.ModelGroups {
-				if _, err := config.ReadSecret(g.APIKeyFile); err != nil {
-					return fmt.Errorf("model group %q api_key_file: %w", g.Name, err)
-				}
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "ok: %d teams, %d pools, %d model groups\n",
+			fmt.Fprintf(cmd.OutOrStdout(), "ok: %d teams, %d pools, %d models\n",
 				len(c.Teams), len(c.Pools), len(c.ModelGroups))
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&path, "config", "c", "", "configuration file (YAML)")
+	cmd.Flags().StringVarP(&path, "config", "c", "", "configuration file (HCL)")
 	_ = cmd.MarkFlagRequired("config")
 	return cmd
 }

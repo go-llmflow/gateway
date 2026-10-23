@@ -26,7 +26,8 @@ import (
 type Secrets struct {
 	// MasterKey protects the admin API.
 	MasterKey string
-	// UpstreamKeys maps a model group name to its vLLM --api-key.
+	// UpstreamKeys maps an upstream key_file path to the vLLM --api-key
+	// it holds.
 	UpstreamKeys map[string]string
 	// MetricsToken, when set, is required as a bearer token on /metrics.
 	MetricsToken string
@@ -87,24 +88,27 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 		s.pools[p.Name] = fairshare.NewPool(p.Name, p.Capacity, shares, cfg.FairShare.HalfLife, s.now)
 		s.porder = append(s.porder, p.Name)
 	}
-	ups := map[string]*upstream{}
+	// An upstream shared by several model groups (same URL, same key) is
+	// one object, so its in-flight count and cooldown are shared too.
+	ups := map[[2]string]*upstream{}
 	for _, g := range cfg.ModelGroups {
-		key := secrets.UpstreamKeys[g.Name]
-		if key == "" {
-			return nil, fmt.Errorf("gateway: no upstream key for model group %q", g.Name)
-		}
-		gr := &group{cfg: g, apiKey: key, pool: s.pools[g.Pool], class: fairshare.Interactive}
+		gr := &group{cfg: g, pool: s.pools[g.Pool], class: fairshare.Interactive}
 		if g.Class == config.Batch {
 			gr.class = fairshare.Batch
 		}
-		for _, raw := range g.Upstreams {
-			if err := config.ValidateUpstream(raw); err != nil {
+		for _, cu := range g.Upstreams {
+			if err := config.ValidateUpstream(cu.BaseURL); err != nil {
 				return nil, err
 			}
-			u := ups[raw]
+			key := secrets.UpstreamKeys[cu.KeyFile]
+			if key == "" {
+				return nil, fmt.Errorf("gateway: no key loaded for upstream %q of model %q", cu.Name, g.Name)
+			}
+			id := [2]string{cu.BaseURL, cu.KeyFile}
+			u := ups[id]
 			if u == nil {
-				u = newUpstream(raw)
-				ups[raw] = u
+				u = newUpstream(cu.BaseURL, key)
+				ups[id] = u
 			}
 			gr.upstreams = append(gr.upstreams, u)
 		}

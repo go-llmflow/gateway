@@ -54,7 +54,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [FuzzRewrite, FuzzCopySSE]
+        include:
+          - { target: FuzzRewrite, pkg: ./openai }
+          - { target: FuzzCopySSE, pkg: ./openai }
+          - { target: FuzzParse, pkg: ./config }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -62,7 +65,7 @@ jobs:
           go-version: stable
           check-latest: true
       - name: fuzz
-        run: go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=30s ./openai
+        run: go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=30s ${{ matrix.pkg }}
 
   build:
     name: cross-build CGO_ENABLED=0 ${{ matrix.goos }}/${{ matrix.goarch }}

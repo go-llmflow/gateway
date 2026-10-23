@@ -15,6 +15,7 @@ import (
 // upstream is one vLLM server.
 type upstream struct {
 	base     string // without trailing slash
+	apiKey   string // vLLM --api-key of this server
 	inflight atomic.Int64
 	cooldown atomic.Int64 // unix nanoseconds until which it is skipped
 	healthy  atomic.Bool
@@ -28,7 +29,6 @@ func (u *upstream) available(now time.Time) bool {
 type group struct {
 	cfg       config.ModelGroup
 	upstreams []*upstream
-	apiKey    string
 	pool      *fairshare.Pool
 	class     fairshare.Class
 }
@@ -56,8 +56,8 @@ func (g *group) pick(tried map[*upstream]bool, now time.Time) *upstream {
 	return fallback
 }
 
-func newUpstream(raw string) *upstream {
-	u := &upstream{base: strings.TrimRight(raw, "/")}
+func newUpstream(raw, apiKey string) *upstream {
+	u := &upstream{base: strings.TrimRight(raw, "/"), apiKey: apiKey}
 	u.healthy.Store(true)
 	return u
 }

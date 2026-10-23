@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("master_key_file = \"/m$${x}%%{y}\"\npool \"p\" { capacity = 1 }\nmodel \"m\" {\n  pool = \"p\"\n  key_file = \"${env.HOME}\"\n  upstream \"u\" { base_url = \"http://h:1\" }\n}\n")

@@ -43,12 +43,12 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 		}
 	}
 	s.UpstreamKeys = map[string]string{}
-	for _, g := range c.ModelGroups {
-		k, err := config.ReadSecret(g.APIKeyFile)
+	for _, f := range c.KeyFiles() {
+		k, err := config.ReadSecret(f)
 		if err != nil {
-			return s, fmt.Errorf("model group %q api_key_file: %w", g.Name, err)
+			return s, fmt.Errorf("key_file: %w", err)
 		}
-		s.UpstreamKeys[g.Name] = k
+		s.UpstreamKeys[f] = k
 	}
 	return s, nil
 }
@@ -114,7 +114,7 @@ func serveCmd() *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().StringVarP(&path, "config", "c", "", "configuration file (YAML)")
+	cmd.Flags().StringVarP(&path, "config", "c", "", "configuration file (HCL)")
 	_ = cmd.MarkFlagRequired("config")
 	return cmd
 }
@@ -157,7 +157,7 @@ func exportCmd() *cobra.Command {
 			return gateway.WriteUsageCSV(cmd.OutOrStdout(), f, t, us)
 		},
 	}
-	cmd.Flags().StringVarP(&path, "config", "c", "", "configuration file (YAML)")
+	cmd.Flags().StringVarP(&path, "config", "c", "", "configuration file (HCL)")
 	cmd.Flags().StringVar(&from, "from", "", "start (RFC 3339 or YYYY-MM-DD, inclusive)")
 	cmd.Flags().StringVar(&to, "to", "", "end (RFC 3339 or YYYY-MM-DD, exclusive)")
 	for _, f := range []string{"config", "from", "to"} {
