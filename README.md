@@ -487,6 +487,22 @@ about 60–90 times the gateway's added p50. The two numbers are not measured
 the same way (LiteLLM's is self-reported per request, ours is the end-to-end
 difference against a direct call), but both exclude the upstream's own time.
 
+**Independent comparison, measured the same way.** A separate harness (not
+this repository's) ran llmflow v0.1.0 (`GOMAXPROCS=1`) and LiteLLM 1.106.2 in
+front of the same instant upstream, with 2 000 interleaved rounds per run, 8
+runs, at a 1-minute load of 3.3–3.94, and took the overhead of each as the
+end-to-end difference against a direct call:
+
+| added latency | llmflow v0.1.0 | LiteLLM 1.106.2 |
+|---|---|---|
+| p50 | **117 µs** | 4.86 ms |
+| p99 | **239 µs** | 6.21 ms |
+
+v0.2.0–v0.4.0 were not re-measured with that harness; the in-repository
+benchmark above did not move between v0.1.0 and v0.2.0, and the v0.3.0 and
+v0.4.0 paths add a HMAC per request (cache salt) and, for JWT access tokens, a
+cache lookup per request (a signature check on a cache miss).
+
 ## Security
 
 Enforced:
@@ -617,6 +633,43 @@ Open defects (v0.2.0):
    Role changes therefore apply at once.
 10. **Soft-budget alerts are sent once and not retried**: a webhook or SMTP
     failure is logged, and the period is already marked as alerted.
+
+11. **SSO sessions live in one replica's memory**: behind several replicas,
+    use sticky sessions.
+12. **A person holding a JWT cannot be revoked individually**: disable the
+    team, change the `map` blocks, or revoke at the identity provider; a token
+    already verified stays cached until its `exp` or `key_cache_ttl`.
+13. **SCIM does not expand nested groups**, and a provisioned role on a team
+    that does not exist is logged, not created.
+14. **The audit events are log lines** (`audit=true`); the tamper-evident audit
+    log is the next milestone.
+
+## References
+
+Opened while building v0.1.0–v0.4.0, and cited where used above:
+
+- vLLM: [security guide](https://docs.vllm.ai/en/stable/usage/security/),
+  [prefix caching design](https://docs.vllm.ai/en/stable/design/prefix_caching.html),
+  priority scheduling (`--scheduling-policy priority`).
+- Slurm: Fair Tree and the multifactor priority plugin (`PriorityDecayHalfLife`),
+  `sreport`.
+- HCL2 native syntax specification (`hclsyntax/spec.md`).
+- OpenBao / HashiCorp Vault KV v2 API: "Read secret version", "Create/Update
+  secret", "Patch secret".
+- MDN, `X-Forwarded-For` (trusted proxies, reading from the right).
+- [go-authn/oidc](https://github.com/go-authn/oidc) and
+  [go-authn/rp](https://github.com/go-authn/rp) documentation (OIDC Core,
+  RFC 7636 PKCE, RFC 9068 `at+jwt`, as those packages implement them);
+  [go-authn/bridge](https://github.com/go-authn/bridge) README ("What an
+  application gets").
+- [RFC 7643](https://www.rfc-editor.org/rfc/rfc7643) and
+  [RFC 7644](https://www.rfc-editor.org/rfc/rfc7644) (SCIM), through
+  [go-authn/scim](https://github.com/go-authn/scim).
+- OWASP CSRF prevention cheat sheet (synchronizer token, Fetch Metadata).
+- LiteLLM: [Enterprise features](https://docs.litellm.ai/docs/enterprise),
+  [Dynamic TPM/RPM Allocation](https://docs.litellm.ai/docs/proxy/dynamic_rate_limit),
+  [virtual keys](https://docs.litellm.ai/docs/proxy/virtual_keys) (key
+  regeneration and grace period).
 
 ## Development
 
