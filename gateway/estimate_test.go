@@ -72,7 +72,7 @@ func TestStreamAbortedBeforeUsageIsCharged(t *testing.T) {
 		t.Fatalf("budget not charged: %v", spent)
 	}
 	e.srv.Close(context.Background())
-	recs, _ := e.st.Usage(context.Background(), time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	recs, _ := e.st.Report(context.Background(), time.Now().Add(-time.Hour), time.Now().Add(time.Hour), []string{"team", "pool"})
 	if len(recs) != 1 || recs[0].EstimatedRequests != 1 || recs[0].CompletionTokens != n || recs[0].PromptTokens <= 100 {
 		t.Fatalf("record %+v", recs)
 	}
@@ -97,7 +97,7 @@ func TestNonStreamAbortChargesPrompt(t *testing.T) {
 	}
 	waitIdle(t, e)
 	e.srv.Close(context.Background())
-	recs, _ := e.st.Usage(context.Background(), time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	recs, _ := e.st.Report(context.Background(), time.Now().Add(-time.Hour), time.Now().Add(time.Hour), []string{"team", "pool"})
 	if len(recs) != 1 || recs[0].EstimatedRequests != 1 || recs[0].PromptTokens == 0 || recs[0].CompletionTokens != 0 || !(recs[0].GPUHours > 0) {
 		t.Fatalf("record %+v", recs)
 	}

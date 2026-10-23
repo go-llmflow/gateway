@@ -21,6 +21,8 @@ go install github.com/go-llmflow/gateway/cmd/llmflow-gateway@latest
 llmflow-gateway check-config -c examples/gateway.hcl   # validates the file and every secret file it names
 llmflow-gateway serve -c examples/gateway.hcl
 llmflow-gateway export -c examples/gateway.hcl --from 2026-10-01 --to 2026-11-01 > october.csv
+llmflow-gateway export -c examples/gateway.hcl --from 2026-10-01 --to 2026-11-01 \
+  --group-by org,team,project --format parsable2   # side by side with sreport --parsable2
 ```
 
 ## Architecture
@@ -274,7 +276,8 @@ authentications count in the per-network failure limit.
 | `GET /admin/keys?team=`, `POST /admin/keys`, `DELETE /admin/keys/{id}` | list (no secrets), create `{"team","project","name","rpm","tpm","max_inflight"}` (`project` optional; the `llmf-…` secret is returned once), revoke |
 | `GET /admin/budgets`, `PUT /admin/budgets`, `DELETE /admin/budgets?kind=&name=&model=` | budgets on any scope (see below), listed with their current `spent` and effective `limit` |
 | `POST /admin/budgets/increase` | temporary increase `{"kind","name","model","amount","expires_at"}` (RFC 3339, within a year) |
-| `GET /admin/usage.csv?from=&to=` | per team and pool: requests, tokens, GPU-hours (same as `llmflow-gateway export`) |
+| `GET /admin/spend?from=&to=&group_by=&format=` | spend report: requests, prompt / completion / cached tokens, GPU-hours and estimated requests, grouped by any of `org`, `team`, `project`, `key`, `model`, `pool`, `tag` (default `org,team`), as `json`, `csv` or `parsable2` (pipe-delimited like `sreport --parsable2`). Filtered to what the caller may see: an org admin sees their organisation, a member their own keys. A request with several tags counts once under each tag |
+| `GET /admin/usage.csv?from=&to=` | the v0.1 export: `group_by=team,pool`, CSV |
 | `GET /admin/fairshare` | reservations, in-flight, borrowing, usage, LF and rank per pool and organisation |
 
 Client routes: `POST /v1/chat/completions`, `/v1/completions`,

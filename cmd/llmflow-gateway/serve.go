@@ -130,10 +130,10 @@ func serveCmd() *cobra.Command {
 }
 
 func exportCmd() *cobra.Command {
-	var path, from, to string
+	var path, from, to, groupBy, format string
 	cmd := &cobra.Command{
 		Use:   "export",
-		Short: "Export per-team GPU-hours for a period as CSV (for reconciliation with Slurm sreport)",
+		Short: "Export GPU-hours and tokens for a period, grouped (for reconciliation with Slurm sreport)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c, err := config.Load(path)
@@ -160,16 +160,22 @@ func exportCmd() *cobra.Command {
 				return err
 			}
 			defer st.Close()
-			us, err := st.Usage(ctx, f, t)
+			dims, err := gateway.ParseGroupBy(groupBy)
+			if err != nil {
+				return fmt.Errorf("--group-by: %w", err)
+			}
+			rows, err := st.Report(ctx, f, t, dims)
 			if err != nil {
 				return err
 			}
-			return gateway.WriteUsageCSV(cmd.OutOrStdout(), f, t, us)
+			return gateway.WriteReport(cmd.OutOrStdout(), format, f, t, dims, rows)
 		},
 	}
 	cmd.Flags().StringVarP(&path, "config", "c", "", "configuration file (HCL)")
 	cmd.Flags().StringVar(&from, "from", "", "start (RFC 3339 or YYYY-MM-DD, inclusive)")
 	cmd.Flags().StringVar(&to, "to", "", "end (RFC 3339 or YYYY-MM-DD, exclusive)")
+	cmd.Flags().StringVar(&groupBy, "group-by", "team,pool", "dimensions: org, team, project, key, model, pool, tag")
+	cmd.Flags().StringVar(&format, "format", gateway.FormatCSV, "csv, json or parsable2 ('|'-delimited like sreport --parsable2)")
 	for _, f := range []string{"config", "from", "to"} {
 		_ = cmd.MarkFlagRequired(f)
 	}

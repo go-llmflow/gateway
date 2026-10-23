@@ -126,19 +126,6 @@ type Record struct {
 	Estimated bool
 }
 
-// TeamUsage aggregates records of a team and pool over a period.
-type TeamUsage struct {
-	Team             string
-	Pool             string
-	Requests         int64
-	PromptTokens     int64
-	CompletionTokens int64
-	CachedTokens     int64
-	GPUHours         float64
-	// EstimatedRequests counts records whose tokens were estimated.
-	EstimatedRequests int64
-}
-
 // Store is the persistence contract.
 type Store interface {
 	Ping(ctx context.Context) error
@@ -218,8 +205,8 @@ type Store interface {
 	// team, project, key, model and tag set.
 	SpendRows(ctx context.Context, since time.Time) ([]SpendRow, error)
 	InsertRecords(ctx context.Context, recs []Record) error
-	// Usage aggregates records in [from, to) per team and pool, sorted by
-	// team then pool.
-	Usage(ctx context.Context, from, to time.Time) ([]TeamUsage, error)
+	// Report aggregates the records in [from, to) by the given dimensions
+	// (see ReportDims), sorted.
+	Report(ctx context.Context, from, to time.Time, dims []string) ([]ReportRow, error)
 	Close()
 }

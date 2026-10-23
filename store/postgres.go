@@ -364,20 +364,4 @@ func (p *Postgres) InsertRecords(ctx context.Context, recs []Record) error {
 	return err
 }
 
-func (p *Postgres) Usage(ctx context.Context, from, to time.Time) ([]TeamUsage, error) {
-	rows, err := p.pool.Query(ctx, `
-		SELECT team, pool, count(*), sum(prompt_tokens), sum(completion_tokens), sum(cached_tokens), sum(cost),
-		       count(*) FILTER (WHERE estimated)
-		FROM llmflow_usage WHERE ts >= $1 AND ts < $2
-		GROUP BY team, pool ORDER BY team, pool`, from, to)
-	if err != nil {
-		return nil, err
-	}
-	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (TeamUsage, error) {
-		var u TeamUsage
-		err := r.Scan(&u.Team, &u.Pool, &u.Requests, &u.PromptTokens, &u.CompletionTokens, &u.CachedTokens, &u.GPUHours, &u.EstimatedRequests)
-		return u, err
-	})
-}
-
 func (p *Postgres) Close() { p.pool.Close() }
