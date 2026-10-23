@@ -304,6 +304,73 @@ proxy roles or roles in another organisation. Listings and reports are
 filtered to what the caller may see; other writes answer 403. Failed admin
 authentications count in the per-network failure limit.
 
+### Single sign-on for administrators
+
+With an `sso` block, administrators log in with OpenID Connect in a browser
+instead of holding an admin token. The login (discovery, authorization code
+with PKCE S256, `state`, `nonce`, ID token verification) is
+[`github.com/go-authn/rp`](https://github.com/go-authn/rp) v0.1.1; the gateway
+keeps the session and the role mapping.
+
+```hcl
+sso {
+  issuer             = "https://login.example.org"
+  client_id          = "llmflow-admin"
+  client_secret_file = "/etc/llmflow/sso.secret"   # a secret reference; absent: a public client
+  redirect_url       = "https://llm.example.org/admin/callback"
+  scopes             = ["openid", "profile", "groups"]  # default openid, profile, email
+  session_ttl        = "8h"                              # at most 168h
+  role {                                               # groups -> role bindings
+    value = "llm-admins"                               # claim defaults to "groups"
+    role  = "proxy_admin"
+  }
+  role {
+    value = "lab-physics-leads"
+    role  = "team_admin"
+    team  = "etabA"
+  }
+}
+```
+
+- `GET /admin/login` redirects to the provider; `GET /admin/callback` ends
+  the login and redirects to `GET /admin/session`, which returns the user,
+  their roles and the session's `csrf_token`. `POST /admin/logout` ends the
+  session and returns the provider's `end_session_url`.
+- The person is `preferred_username` (else a verified `email`, else `sub`).
+  Their roles are the `role` blocks their claims match, **plus** the roles of
+  the gateway user of the same name, read from the store on every request (so
+  revoking a role or disabling the user takes effect at once). Somebody with
+  neither is refused at the callback.
+- The session is a random 256-bit value in a `__Host-llmflow-session` cookie
+  (Secure, HttpOnly, SameSite=Lax, Path=/), kept server-side as its SHA-256.
+  A login in progress is bound to the browser that started it by a
+  `__Host-llmflow-login` cookie, its `state` is usable once and for 10
+  minutes.
+- **CSRF**: a state-changing request authenticated by the session cookie must
+  carry the session's token in `X-CSRF-Token` and must not be marked
+  cross-site (`Sec-Fetch-Site`) or come from another `Origin` than
+  `redirect_url`'s. Requests with a bearer token are unaffected.
+- Sessions live in the memory of the replica that created them: behind
+  several replicas, use sticky sessions (open: sessions in PostgreSQL).
+
+**SAML federations (RENATER, eduGAIN)** go through
+[`go-authn/bridge`](https://github.com/go-authn/bridge) (`authn-bridge`), an
+OpenID provider in front of a SAML federation, rather than SATOSA. Register
+the gateway as one of its clients and point `sso.issuer` at the bridge:
+
+```hcl
+# authn-bridge configuration
+client "llmflow-admin" {
+  secret_file     = "/etc/authn-bridge/llmflow-admin.secret"
+  redirect_uris   = ["https://llm.example.org/admin/callback"]
+  id_token_claims = true   # the bridge's ID tokens carry no claims about the person otherwise
+}
+```
+
+and ask for `scopes = ["openid", "profile", "groups"]`: the bridge's
+`groups` are entitlements held to the IdP that asserted them, so a `role`
+block can match `urn:mace:…` or `urn:geant:…` values.
+
 | route | |
 |---|---|
 | `GET /admin/whoami` | the caller and their roles |

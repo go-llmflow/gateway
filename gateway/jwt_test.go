@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,65 @@ type fakeIdP struct {
 	srv     *httptest.Server
 	key     *rsa.PrivateKey
 	fetches atomic.Int64
+
+	// The token endpoint (RFC 6749 §4.1.3, RFC 7636 §4.6): codes issued by
+	// the test with the claims of the ID token they buy.
+	mu     sync.Mutex
+	grants map[string]grant
+	secret string // client secret expected with client_secret_basic
+}
+
+type grant struct {
+	challenge string
+	claims    map[string]any
+}
+
+// issue registers a code for a login whose authorization request was
+// authURL, as the provider would after the person authenticated.
+func (p *fakeIdP) issue(t testing.TB, authURL string, claims map[string]any) (state, code string) {
+	t.Helper()
+	u, err := url.Parse(authURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := u.Query()
+	if q.Get("code_challenge_method") != "S256" || q.Get("response_type") != "code" {
+		t.Fatalf("authorization request %s: no PKCE S256 code flow", authURL)
+	}
+	if _, set := claims["nonce"]; !set {
+		claims["nonce"] = q.Get("nonce")
+	}
+	code = randomToken()
+	p.mu.Lock()
+	p.grants[code] = grant{challenge: q.Get("code_challenge"), claims: claims}
+	p.mu.Unlock()
+	return q.Get("state"), code
+}
+
+func (p *fakeIdP) token(t testing.TB, w http.ResponseWriter, r *http.Request) {
+	if p.secret != "" {
+		id, sec, ok := r.BasicAuth()
+		if !ok || id != "llmflow-admin" || sec != p.secret {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid_client"})
+			return
+		}
+	}
+	code := r.PostFormValue("code")
+	p.mu.Lock()
+	g, ok := p.grants[code]
+	delete(p.grants, code)
+	p.mu.Unlock()
+	sum := sha256.Sum256([]byte(r.PostFormValue("code_verifier")))
+	if !ok || r.PostFormValue("grant_type") != "authorization_code" || b64u(sum[:]) != g.challenge {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant"})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{
+		"access_token": "at-" + code, "token_type": "Bearer", "expires_in": 300,
+		"id_token": p.sign(t, map[string]any{"alg": "RS256", "kid": "k1"}, g.claims),
+	})
 }
 
 func newFakeIdP(t testing.TB) *fakeIdP {
@@ -39,12 +99,18 @@ func newFakeIdP(t testing.TB) *fakeIdP {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &fakeIdP{key: k}
+	p := &fakeIdP{key: k, grants: map[string]grant{}}
 	p.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
-			json.NewEncoder(w).Encode(map[string]any{"issuer": p.srv.URL, "jwks_uri": p.srv.URL + "/keys"})
+			json.NewEncoder(w).Encode(map[string]any{
+				"issuer": p.srv.URL, "jwks_uri": p.srv.URL + "/keys",
+				"authorization_endpoint": p.srv.URL + "/authorize", "token_endpoint": p.srv.URL + "/token",
+				"end_session_endpoint": p.srv.URL + "/logout", "code_challenge_methods_supported": []string{"S256"},
+			})
+		case "/token":
+			p.token(t, w, r)
 		case "/keys":
 			p.fetches.Add(1)
 			json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]any{

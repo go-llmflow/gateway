@@ -68,6 +68,40 @@ type Config struct {
 	// JWT, when set, accepts OpenID Connect access tokens on the inference
 	// API besides virtual keys.
 	JWT *JWT
+	// SSO, when set, logs administrators in with OpenID Connect
+	// (authorization code + PKCE) and keeps them in a session cookie.
+	SSO *SSO
+}
+
+// SSO configures the admin login at one OpenID provider.
+type SSO struct {
+	Issuer, ClientID string
+	// ClientSecretFile is a secret reference; empty is a public client.
+	ClientSecretFile string
+	// RedirectURL is this gateway's /admin/callback as the browser sees
+	// it; its origin is also the only Origin accepted on state-changing
+	// cookie-authenticated requests.
+	RedirectURL string
+	Scopes      []string
+	SessionTTL  time.Duration
+	// Roles map ID token claims to role bindings, added to the bindings
+	// the user has in the store.
+	Roles []SSORole
+}
+
+// SSORole grants Role (on Org or Team, or proxy-wide) to whoever's Claim
+// holds Value.
+type SSORole struct {
+	Claim, Value, Role, Org, Team string
+}
+
+// Origin is the scheme://host[:port] of the redirect URL.
+func (s *SSO) Origin() string {
+	u, err := url.Parse(s.RedirectURL)
+	if err != nil {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // Routes holds the network restrictions per route class. A nil list means

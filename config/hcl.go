@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/mail"
 	"net/netip"
+	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -54,6 +56,47 @@ type fileHCL struct {
 	TrustedProxiesRange  hcl.Range  `hcl:"trusted_proxies,attr_value_range"`
 	Routes               *routesHCL `hcl:"routes,block"`
 	JWT                  *jwtHCL    `hcl:"jwt,block"`
+	SSO                  *ssoHCL    `hcl:"sso,block"`
+}
+
+type ssoHCL struct {
+	Issuer           string       `hcl:"issuer"`
+	IssuerRange      hcl.Range    `hcl:"issuer,attr_value_range"`
+	ClientID         string       `hcl:"client_id"`
+	ClientIDRange    hcl.Range    `hcl:"client_id,attr_value_range"`
+	ClientSecretFile *string      `hcl:"client_secret_file,optional"`
+	RedirectURL      string       `hcl:"redirect_url"`
+	RedirectRange    hcl.Range    `hcl:"redirect_url,attr_value_range"`
+	Scopes           []string     `hcl:"scopes,optional"`
+	ScopesRange      hcl.Range    `hcl:"scopes,attr_value_range"`
+	SessionTTL       *string      `hcl:"session_ttl,optional"`
+	SessionTTLRange  hcl.Range    `hcl:"session_ttl,attr_value_range"`
+	Roles            []ssoRoleHCL `hcl:"role,block"`
+}
+
+type ssoRoleHCL struct {
+	Claim    *string   `hcl:"claim,optional"`
+	Value    string    `hcl:"value"`
+	Role     string    `hcl:"role"`
+	Org      *string   `hcl:"org,optional"`
+	Team     *string   `hcl:"team,optional"`
+	DefRange hcl.Range `hcl:",def_range"`
+}
+
+// validRoleScope mirrors the store's binding rules: proxy roles have no
+// scope, org_admin an org, team roles a team, viewer one of the two.
+func validRoleScope(role, org, team string) bool {
+	switch role {
+	case "proxy_admin", "proxy_viewer":
+		return org == "" && team == ""
+	case "org_admin":
+		return org != "" && team == "" && ValidName(org)
+	case "team_admin", "member":
+		return org == "" && team != "" && ValidName(team)
+	case "viewer":
+		return (org == "") != (team == "") && ValidName(org+team)
+	}
+	return false
 }
 
 type jwtHCL struct {
@@ -695,6 +738,37 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		}
 		c.JWT = cj
 	}
+	if o := raw.SSO; o != nil {
+		cs := &SSO{Issuer: o.Issuer, ClientID: o.ClientID, ClientSecretFile: strOr(o.ClientSecretFile, ""),
+			RedirectURL: o.RedirectURL, Scopes: o.Scopes,
+			SessionTTL: v.dur(o.SessionTTL, o.SessionTTLRange, "session_ttl", 8*time.Hour)}
+		if len(cs.Scopes) == 0 {
+			cs.Scopes = []string{"openid", "profile", "email"}
+		}
+		if !validIssuer(o.Issuer) {
+			v.errf(o.IssuerRange, "Invalid issuer", "issuer %q: want an https URL", o.Issuer)
+		}
+		if o.ClientID == "" {
+			v.errf(o.ClientIDRange, "Missing client_id", "the client registered at the provider")
+		}
+		if u, err := url.Parse(o.RedirectURL); err != nil || !validIssuer(o.RedirectURL) || u.Path != "/admin/callback" {
+			v.errf(o.RedirectRange, "Invalid redirect_url", "redirect_url %q: want https://<this gateway>/admin/callback", o.RedirectURL)
+		}
+		if !slices.Contains(cs.Scopes, "openid") {
+			v.errf(o.ScopesRange, "Invalid scopes", "scopes must include openid")
+		}
+		if cs.SessionTTL > 7*24*time.Hour {
+			v.errf(o.SessionTTLRange, "Session too long", "session_ttl %v: at most 168h", cs.SessionTTL)
+		}
+		for _, r := range o.Roles {
+			cr := SSORole{Claim: strOr(r.Claim, "groups"), Value: r.Value, Role: r.Role, Org: strOr(r.Org, ""), Team: strOr(r.Team, "")}
+			if r.Value == "" || !validRoleScope(cr.Role, cr.Org, cr.Team) {
+				v.errf(r.DefRange, "Invalid role", "role %q needs a value and its scope (proxy roles: none; org_admin: org; team_admin, member: team; viewer: org or team)", r.Role)
+			}
+			cs.Roles = append(cs.Roles, cr)
+		}
+		c.SSO = cs
+	}
 	// Every *_file attribute is a secret reference: a file, or a field of
 	// an OpenBao/Vault KV v2 secret (package secret).
 	for _, ref := range c.SecretRefs() {
@@ -722,6 +796,9 @@ func (c *Config) SecretRefs() []string {
 	add(c.Store.DSNFile)
 	add(c.CacheSaltKeyFile)
 	add(c.Alerts.WebhookTokenFile)
+	if c.SSO != nil {
+		add(c.SSO.ClientSecretFile)
+	}
 	if c.Alerts.SMTP != nil {
 		add(c.Alerts.SMTP.PasswordFile)
 	}

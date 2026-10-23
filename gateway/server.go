@@ -38,6 +38,9 @@ type Secrets struct {
 	// WebhookToken and SMTPPassword authenticate soft-budget alerts.
 	WebhookToken string
 	SMTPPassword string
+	// SSOClientSecret is the admin login client's secret (empty: a public
+	// client).
+	SSOClientSecret string
 }
 
 // Server is the gateway.
@@ -69,6 +72,8 @@ type Server struct {
 	jwt       *oidc.Verifier
 	jwtCache  *keyCache
 	jwtClient *http.Client
+	// sso holds the admin login client, sessions and logins in progress.
+	sso *ssoState
 
 	cancel context.CancelFunc
 	bg     sync.WaitGroup
@@ -200,6 +205,9 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 	if err := s.startJWT(ctx); err != nil {
+		return err
+	}
+	if err := s.startSSO(ctx); err != nil {
 		return err
 	}
 	if err := s.budget.refresh(ctx); err != nil {

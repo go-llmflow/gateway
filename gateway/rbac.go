@@ -20,6 +20,9 @@ type principal struct {
 	name     string
 	master   bool
 	bindings []store.Binding
+	// session is the SHA-256 of the SSO session cookie, when the principal
+	// comes from one.
+	session [32]byte
 }
 
 func (p *principal) has(role store.Role, org, team string) bool {
@@ -84,6 +87,12 @@ func (s *Server) adminPrincipal(w http.ResponseWriter, r *http.Request) (*princi
 		return nil, false
 	}
 	secret := bearer(r)
+	if secret == "" {
+		// A browser with an SSO session (CSRF checked there).
+		if p, _, handled := s.sessionPrincipal(w, r); handled {
+			return p, p != nil
+		}
+	}
 	h := store.HashSecret(secret)
 	if store.HashEqual(h, store.HashSecret(s.secrets.MasterKey)) {
 		return &principal{name: "master", master: true}, true

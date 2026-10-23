@@ -82,6 +82,11 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 	if err := get("alerts webhook_token_file", c.Alerts.WebhookTokenFile, &s.WebhookToken); err != nil {
 		return s, err
 	}
+	if c.SSO != nil {
+		if err := get("sso client_secret_file", c.SSO.ClientSecretFile, &s.SSOClientSecret); err != nil {
+			return s, err
+		}
+	}
 	if c.Alerts.SMTP != nil {
 		if err := get("alerts smtp password_file", c.Alerts.SMTP.PasswordFile, &s.SMTPPassword); err != nil {
 			return s, err
