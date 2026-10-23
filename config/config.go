@@ -35,6 +35,7 @@ const (
 type Config struct {
 	Listen            string        `yaml:"listen"`
 	MasterKeyFile     string        `yaml:"master_key_file"`
+	MetricsTokenFile  string        `yaml:"metrics_token_file"`
 	Store             Store         `yaml:"store"`
 	Limits            Limits        `yaml:"limits"`
 	FairShare         FairShare     `yaml:"fairshare"`
