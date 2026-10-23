@@ -257,22 +257,3 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (store.Key
 	}
 	return k, true
 }
-
-// adminAuth checks the master key in constant time (both sides hashed to a
-// fixed length first, so the comparison does not leak the key's length).
-// Failures count against the client's address like client-key failures.
-func (s *Server) adminAuth(w http.ResponseWriter, r *http.Request) bool {
-	cn, haveNet := clientNet(r)
-	if haveNet && s.authFails.blocked(cn) {
-		apiError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "too many failed authentications from this address")
-		return false
-	}
-	if !store.HashEqual(store.HashSecret(bearer(r)), store.HashSecret(s.secrets.MasterKey)) {
-		if haveNet {
-			s.authFails.fail(cn)
-		}
-		apiError(w, http.StatusUnauthorized, "authentication_error", "master key required")
-		return false
-	}
-	return true
-}

@@ -206,6 +206,7 @@ func contract(t *testing.T, s Store) {
 func TestMemoryContract(t *testing.T) {
 	m := NewMemory()
 	contract(t, m)
+	contractUsers(t, m)
 	m.Close()
 }
 
@@ -288,6 +289,7 @@ func TestPostgresContract(t *testing.T) {
 	}
 	defer p.Close()
 	contract(t, p)
+	contractUsers(t, p)
 
 	if _, err := OpenPostgres(ctx, "postgres://u:hunter2@[::1"); err == nil || strings.Contains(err.Error(), "hunter2") {
 		t.Fatalf("bad DSN error leaks or passes: %v", err)
@@ -297,7 +299,8 @@ func TestPostgresContract(t *testing.T) {
 func dropAll(t *testing.T, p *Postgres) {
 	t.Helper()
 	if _, err := p.pool.Exec(context.Background(),
-		`DROP TABLE IF EXISTS llmflow_usage, llmflow_budgets, llmflow_keys, llmflow_projects, llmflow_teams, llmflow_orgs`); err != nil {
+		`DROP TABLE IF EXISTS llmflow_bindings, llmflow_user_tokens, llmflow_users,
+		 llmflow_usage, llmflow_budgets, llmflow_keys, llmflow_projects, llmflow_teams, llmflow_orgs`); err != nil {
 		t.Fatal(err)
 	}
 }
