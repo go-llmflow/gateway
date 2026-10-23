@@ -57,7 +57,9 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 		var g *group
 		out, req, err := openai.Rewrite(body, func(m string) (string, error) {
 			g = s.groups[m]
-			if g == nil {
+			// A model hidden from the key's team answers exactly like an
+			// unknown one, so its existence is not revealed.
+			if g == nil || !s.budget.modelAllowed(key.Team, m) {
 				return "", errUnknownModel
 			}
 			return g.cfg.UpstreamModel, nil

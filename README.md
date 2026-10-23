@@ -234,6 +234,7 @@ authentications count in the per-network failure limit.
 | `GET` / `POST /admin/orgs`, `DELETE /admin/orgs/{name}` | list (with configured share), create `{"name"}` (an organisation created here has no share: it only borrows), disable (its teams, projects and keys too) |
 | `GET /admin/teams?org=`, `POST /admin/teams`, `DELETE /admin/teams/{name}` | list, create `{"name","org"}`, disable (its projects and keys too) |
 | `GET` / `POST /admin/teams/{team}/projects`, `DELETE /admin/teams/{team}/projects/{name}` | list, create `{"name"}`, disable (revokes its keys) |
+| `GET` / `PUT /admin/teams/{team}/models` | the model groups the team may use: `{"models":[…]}` (team admin and above; empty list = every configured model). A hidden model answers 404 like an unknown one and is left out of `/v1/models` |
 | `GET /admin/keys?team=`, `POST /admin/keys`, `DELETE /admin/keys/{id}` | list (no secrets), create `{"team","project","name","rpm","tpm","max_inflight"}` (`project` optional; the `llmf-…` secret is returned once), revoke |
 | `GET /admin/budgets`, `PUT` / `DELETE /admin/budgets/{team}` | `{"period": "day" \| "week" \| "month", "max_cost": <GPU-hours>}`, periods aligned on UTC |
 | `GET /admin/usage.csv?from=&to=` | per team and pool: requests, tokens, GPU-hours (same as `llmflow-gateway export`) |

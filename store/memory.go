@@ -19,6 +19,7 @@ type Memory struct {
 	budgets    map[string]Budget
 	records    []Record
 	u          memUsers
+	teamModels map[string][]string
 	MaxRecords int
 	// Fail, when set, is returned by every call (fault injection). Set it
 	// with SetFail.
