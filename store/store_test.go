@@ -91,7 +91,7 @@ func contract(t *testing.T, s Store) {
 	t0 := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	must(s.InsertRecords(ctx, []Record{
 		{Time: t0, Team: "etabA", KeyID: id, Model: "m", Pool: "p", Upstream: "u", PromptTokens: 10, CompletionTokens: 5, CachedTokens: 2, Cost: 1.5, Status: 200},
-		{Time: t0.Add(time.Hour), Team: "etabA", KeyID: id, Model: "m", Pool: "p", Upstream: "u", PromptTokens: 1, CompletionTokens: 1, Cost: 0.5, Status: 200, Borrowing: true, Priority: 10, Stream: true},
+		{Time: t0.Add(time.Hour), Team: "etabA", KeyID: id, Model: "m", Pool: "p", Upstream: "u", PromptTokens: 1, CompletionTokens: 1, Cost: 0.5, Status: 499, Borrowing: true, Priority: 10, Stream: true, Estimated: true},
 		{Time: t0.Add(2 * time.Hour), Team: "etabB", KeyID: id2, Model: "m", Pool: "p", Upstream: "u", PromptTokens: 3, Cost: 0.25, Status: 200},
 		{Time: t0.Add(48 * time.Hour), Team: "etabB", KeyID: id2, Model: "m", Pool: "q", Upstream: "u", Cost: 7, Status: 200},
 	}))
@@ -103,7 +103,8 @@ func contract(t *testing.T, s Store) {
 	us, err := s.Usage(ctx, t0, t0.Add(24*time.Hour))
 	must(err)
 	if len(us) != 2 || us[0].Team != "etabA" || us[0].Requests != 2 || us[0].PromptTokens != 11 ||
-		us[0].CompletionTokens != 6 || us[0].CachedTokens != 2 || us[0].GPUHours != 2 || us[1].GPUHours != 0.25 {
+		us[0].CompletionTokens != 6 || us[0].CachedTokens != 2 || us[0].GPUHours != 2 || us[1].GPUHours != 0.25 ||
+		us[0].EstimatedRequests != 1 || us[1].EstimatedRequests != 0 {
 		t.Fatalf("usage %+v", us)
 	}
 

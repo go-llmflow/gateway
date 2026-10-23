@@ -307,8 +307,13 @@ Open defects (v0.1.0):
 3. **Priorities are fixed at admission.** A borrowing request already queued in
    vLLM keeps its priority when its team drops back under its reservation (vLLM
    has no API to re-prioritise a queued request).
-4. **Interrupted streams are not charged.** The usage chunk comes last; a stream
-   cut before it records zero tokens.
+4. **Aborted requests are charged with an estimate.** vLLM's usage chunk comes
+   last; when the client leaves before it (or before a non-streaming answer),
+   the gateway stops reading (vLLM is not kept generating for nobody) and
+   charges prompt bytes / 4 plus the content deltas already forwarded. The
+   record is flagged `estimated` (column in PostgreSQL and in the CSV export,
+   metric `llmflow_usage_estimated_total`); the estimate undercounts tool-call
+   and reasoning tokens.
 5. **Shared prefix cache.** Institutions share vLLM's prefix cache, a timing
    side channel between them; the gateway does not set vLLM's `cache_salt` yet.
 6. **Accounting can drop records** when the queue is full or a batch write fails

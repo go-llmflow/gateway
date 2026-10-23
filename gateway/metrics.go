@@ -164,6 +164,7 @@ type metrics struct {
 	gpuHours  *counterVec // team, pool
 	denied    *counterVec // team, reason
 	retries   *counterVec // group
+	estimated *counterVec // team, model
 	overhead  *histogram
 	upstreamT *histogram
 }
@@ -175,6 +176,8 @@ func newMetrics() *metrics {
 		gpuHours: newCounterVec("llmflow_gpu_hours_total", "Internal cost charged, in GPU-hours.", "team", "pool"),
 		denied:   newCounterVec("llmflow_denied_total", "Requests refused before reaching vLLM, by reason.", "team", "reason"),
 		retries:  newCounterVec("llmflow_upstream_retries_total", "Retries to another upstream before the first byte.", "group"),
+		estimated: newCounterVec("llmflow_usage_estimated_total",
+			"Requests charged with estimated tokens because vLLM's usage never reached the gateway (client gone first).", "team", "model"),
 		overhead: newHistogram("llmflow_overhead_seconds", "Time spent in the gateway itself (request handling before the upstream call plus response handling after it).",
 			[]float64{0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1}),
 		upstreamT: newHistogram("llmflow_upstream_seconds", "Time from sending the upstream request to the end of its response.",

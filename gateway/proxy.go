@@ -89,30 +89,86 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			apiError(w, http.StatusTooManyRequests, "rate_limit_exceeded", err.Error())
 			return
 		}
-		var usage openai.Usage
-		var haveUsage bool
-		defer func() { s.limiter.release(key.ID, usage.PromptTokens+usage.CompletionTokens) }()
+		promptEst := int64(len(out) / 4)
+		grant := g.pool.Acquire(key.Team, g.class, promptEst+req.MaxTokens)
 
-		est := int64(len(body)/4) + req.MaxTokens
-		grant := g.pool.Acquire(key.Team, g.class, est)
-		var consumed float64
-		defer func() { grant.Release(consumed) }()
+		// Everything below ends in finish, which charges what vLLM did.
+		// The usage vLLM reports is used when it arrives. When it does not
+		// (the client left before the final usage chunk, or before a
+		// non-streaming answer), the work is still charged, with an
+		// estimate: prompt bytes / 4, plus the content deltas already
+		// forwarded for a stream. Charging zero would let a client use the
+		// GPUs for free and keep its fair-share level high.
+		var (
+			st            openai.StreamResult
+			haveUsage     bool
+			worked        bool // vLLM received the request and may have computed
+			u             *upstream
+			tUp, tUpEnd   time.Time
+			status        int
+			pre           time.Duration
+			rid           = requestID()
+			usage         openai.Usage
+			estimated     bool
+			upstreamLabel string
+		)
+		defer func() {
+			if !haveUsage && worked {
+				usage = openai.Usage{PromptTokens: promptEst, CompletionTokens: st.Deltas}
+				usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+				haveUsage, estimated = true, true
+				s.met.estimated.add(1, key.Team, g.cfg.Name)
+			}
+			cost, consumed := 0.0, 0.0
+			if haveUsage {
+				cost = g.cost(usage)
+				consumed = cost
+				if consumed == 0 {
+					// No price configured: rank fair share by tokens.
+					consumed = float64(usage.PromptTokens+usage.CompletionTokens) / 1e6
+				}
+				s.budget.add(key.Team, cost)
+				s.met.tokens.add(float64(usage.PromptTokens), key.Team, g.cfg.Name, "prompt")
+				s.met.tokens.add(float64(usage.CompletionTokens), key.Team, g.cfg.Name, "completion")
+				s.met.tokens.add(float64(usage.Cached()), key.Team, g.cfg.Name, "cached")
+				s.met.gpuHours.add(cost, key.Team, g.cfg.Pool)
+			}
+			grant.Release(consumed)
+			s.limiter.release(key.ID, usage.PromptTokens+usage.CompletionTokens)
+			if status != 0 {
+				s.met.requests.add(1, key.Team, g.cfg.Name, strconv.Itoa(status))
+			}
+			if !worked && status == 0 {
+				return
+			}
+			end := time.Now()
+			if !tUpEnd.IsZero() {
+				s.met.overhead.observe((pre + end.Sub(tUpEnd)).Seconds())
+				s.met.upstreamT.observe(tUpEnd.Sub(tUp).Seconds())
+			}
+			if u != nil {
+				upstreamLabel = redactURL(u.base)
+			}
+			s.rec.record(store.Record{
+				Time: end.UTC(), Team: key.Team, KeyID: key.ID, Model: g.cfg.Name, Pool: g.cfg.Pool,
+				Upstream: upstreamLabel, PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
+				CachedTokens: usage.Cached(), Cost: cost, LatencyMS: float64(end.Sub(t0).Microseconds()) / 1000,
+				Status: status, Priority: grant.Priority, Borrowing: grant.Borrowing, Stream: req.Stream,
+				Estimated: estimated,
+			})
+		}()
 
 		ctx, cancel := context.WithTimeout(r.Context(), s.cfg.Limits.MaxRequestDuration)
 		defer cancel()
-		rid := requestID()
-		resp, u, tUp, err := s.send(ctx, g, path, out, r.Header.Get("Accept"), grant.Priority, rid)
-		pre := tUp.Sub(t0)
-		status := 0
-		defer func() {
-			if status == 0 {
-				return
-			}
-			s.met.requests.add(1, key.Team, g.cfg.Name, strconv.Itoa(status))
-		}()
+		var resp *http.Response
+		resp, u, tUp, err = s.send(ctx, g, path, out, r.Header.Get("Accept"), grant.Priority, rid)
+		pre = tUp.Sub(t0)
 		if err != nil {
 			if r.Context().Err() != nil {
 				status = 499 // client closed the request
+				// send returns the context error only when a request was
+				// in flight at vLLM: the prompt may have been computed.
+				worked = errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 				return
 			}
 			status = http.StatusBadGateway
@@ -134,56 +190,46 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			}
 		}
 		status = resp.StatusCode
-		var tUpEnd time.Time
+		// vLLM computed only for a successful answer; an error status
+		// (validation, overload) is not charged.
+		worked = resp.StatusCode < 300
 		if req.Stream && strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 			h.Set("X-Accel-Buffering", "no")
 			w.WriteHeader(resp.StatusCode)
 			rc := http.NewResponseController(w)
 			_ = rc.Flush()
-			usage, haveUsage, err = openai.CopySSE(w, func() { _ = rc.Flush() }, resp.Body, !req.ClientWantsUsage)
+			// When the client leaves, CopySSE stops at the first failed
+			// write and the request context cancels the upstream call:
+			// vLLM is not kept generating for nobody.
+			st, err = openai.CopySSE(w, func() { _ = rc.Flush() }, resp.Body, !req.ClientWantsUsage)
 			tUpEnd = time.Now()
+			usage, haveUsage = st.Usage, st.HaveUsage
 			if err != nil {
 				s.log.Info("stream ended early", "request_id", rid, "err", err)
+				if r.Context().Err() != nil {
+					status = 499
+				}
 			}
-		} else {
-			data, err := io.ReadAll(io.LimitReader(resp.Body, s.cfg.Limits.MaxResponseBytes+1))
-			tUpEnd = time.Now()
-			if err != nil || int64(len(data)) > s.cfg.Limits.MaxResponseBytes {
-				status = http.StatusBadGateway
-				apiError(w, status, "upstream_error", "upstream response unreadable or too large")
+			return
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, s.cfg.Limits.MaxResponseBytes+1))
+		tUpEnd = time.Now()
+		if err != nil || int64(len(data)) > s.cfg.Limits.MaxResponseBytes {
+			if r.Context().Err() != nil {
+				status = 499 // client gone while vLLM was answering
 				return
 			}
-			if resp.StatusCode < 300 {
-				usage, haveUsage = openai.ParseUsage(data)
-			}
-			h.Set("Content-Length", strconv.Itoa(len(data)))
-			w.WriteHeader(resp.StatusCode)
-			_, _ = w.Write(data)
+			status = http.StatusBadGateway
+			worked = false
+			apiError(w, status, "upstream_error", "upstream response unreadable or too large")
+			return
 		}
-
-		cost := 0.0
-		if haveUsage {
-			cost = g.cost(usage)
-			consumed = cost
-			if consumed == 0 {
-				// No price configured: rank fair share by tokens.
-				consumed = float64(usage.PromptTokens+usage.CompletionTokens) / 1e6
-			}
-			s.budget.add(key.Team, cost)
-			s.met.tokens.add(float64(usage.PromptTokens), key.Team, g.cfg.Name, "prompt")
-			s.met.tokens.add(float64(usage.CompletionTokens), key.Team, g.cfg.Name, "completion")
-			s.met.tokens.add(float64(usage.Cached()), key.Team, g.cfg.Name, "cached")
-			s.met.gpuHours.add(cost, key.Team, g.cfg.Pool)
+		if resp.StatusCode < 300 {
+			usage, haveUsage = openai.ParseUsage(data)
 		}
-		end := time.Now()
-		s.met.overhead.observe((pre + end.Sub(tUpEnd)).Seconds())
-		s.met.upstreamT.observe(tUpEnd.Sub(tUp).Seconds())
-		s.rec.record(store.Record{
-			Time: end.UTC(), Team: key.Team, KeyID: key.ID, Model: g.cfg.Name, Pool: g.cfg.Pool,
-			Upstream: redactURL(u.base), PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
-			CachedTokens: usage.Cached(), Cost: cost, LatencyMS: float64(end.Sub(t0).Microseconds()) / 1000,
-			Status: status, Priority: grant.Priority, Borrowing: grant.Borrowing, Stream: req.Stream,
-		})
+		h.Set("Content-Length", strconv.Itoa(len(data)))
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(data)
 	}
 }
 

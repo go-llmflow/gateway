@@ -149,9 +149,10 @@ type flushCounter struct {
 
 func TestCopySSEPassThrough(t *testing.T) {
 	var out flushCounter
-	u, ok, err := CopySSE(&out, func() { out.flushes++ }, strings.NewReader(stream), false)
-	if err != nil || !ok || u.PromptTokens != 7 || u.CompletionTokens != 2 {
-		t.Fatalf("%+v %v %v", u, ok, err)
+	r, err := CopySSE(&out, func() { out.flushes++ }, strings.NewReader(stream), false)
+	u, ok := r.Usage, r.HaveUsage
+	if err != nil || !ok || u.PromptTokens != 7 || u.CompletionTokens != 2 || r.Deltas != 2 {
+		t.Fatalf("%+v %v", r, err)
 	}
 	if out.String() != stream {
 		t.Fatalf("not byte-identical:\n%q", out.String())
@@ -163,9 +164,9 @@ func TestCopySSEPassThrough(t *testing.T) {
 
 func TestCopySSEDropsInjectedUsage(t *testing.T) {
 	var out bytes.Buffer
-	u, ok, err := CopySSE(&out, nil, strings.NewReader(strings.ReplaceAll(stream, "\n", "\r\n")), true)
-	if err != nil || !ok || u.TotalTokens != 9 {
-		t.Fatalf("%+v %v %v", u, ok, err)
+	r, err := CopySSE(&out, nil, strings.NewReader(strings.ReplaceAll(stream, "\n", "\r\n")), true)
+	if err != nil || !r.HaveUsage || r.Usage.TotalTokens != 9 {
+		t.Fatalf("%+v %v", r, err)
 	}
 	if strings.Contains(out.String(), "prompt_tokens") || !strings.Contains(out.String(), "[DONE]") ||
 		!strings.Contains(out.String(), `"content":"b"`) {
@@ -176,15 +177,33 @@ func TestCopySSEDropsInjectedUsage(t *testing.T) {
 func TestCopySSEUnterminatedAndLong(t *testing.T) {
 	var out bytes.Buffer
 	tail := "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}"
-	u, ok, err := CopySSE(&out, func() {}, strings.NewReader(tail), true)
-	if err != nil || !ok || u.TotalTokens != 2 || out.String() != tail {
-		t.Fatalf("%+v %v %v %q", u, ok, err, out.String())
+	r, err := CopySSE(&out, func() {}, strings.NewReader(tail), true)
+	if err != nil || !r.HaveUsage || r.Usage.TotalTokens != 2 || out.String() != tail {
+		t.Fatalf("%+v %v %q", r, err, out.String())
 	}
 	long := "data: " + strings.Repeat("x", 3*maxEvent) + "\n\n" + stream
 	out.Reset()
-	u, ok, err = CopySSE(&out, nil, strings.NewReader(long), false)
-	if err != nil || !ok || u.TotalTokens != 9 || out.String() != long {
-		t.Fatalf("long event: %v %v len %d", ok, err, out.Len())
+	r, err = CopySSE(&out, nil, strings.NewReader(long), false)
+	if err != nil || !r.HaveUsage || r.Usage.TotalTokens != 9 || out.String() != long {
+		t.Fatalf("long event: %+v %v len %d", r, err, out.Len())
+	}
+}
+
+// Deltas counts the content forwarded before a stream is cut, so that
+// work done by vLLM can be charged when the usage chunk never arrives.
+func TestCopySSECountsDeltas(t *testing.T) {
+	in := "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n" + // empty: not a token
+		"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n" + // not content
+		"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}},{\"delta\":{\"content\":\"b\"}}]}\n\n" + // n=2
+		"data: {\"choices\":[{\"delta\":{\"content\":\"c\"}}]}" // trailing, unterminated
+	r, err := CopySSE(io.Discard, nil, strings.NewReader(in), false)
+	if err != nil || r.Deltas != 3 || r.HaveUsage {
+		t.Fatalf("%+v %v", r, err)
+	}
+	// A client gone after two events: only what was forwarded counts.
+	r, err = CopySSE(&failWriter{after: 3}, nil, strings.NewReader(in), false)
+	if err == nil || r.Deltas != 2 {
+		t.Fatalf("after write failure: %+v %v", r, err)
 	}
 }
 
@@ -209,19 +228,19 @@ func (e errReader) Read(b []byte) (int, error) {
 }
 
 func TestCopySSEErrors(t *testing.T) {
-	if _, _, err := CopySSE(&failWriter{}, nil, strings.NewReader(stream), false); err == nil {
+	if _, err := CopySSE(&failWriter{}, nil, strings.NewReader(stream), false); err == nil {
 		t.Fatal("write error swallowed")
 	}
 	long := "data: " + strings.Repeat("x", 2*maxEvent) + "\n\n"
 	for i := 0; i < 3; i++ {
-		if _, _, err := CopySSE(&failWriter{after: i}, nil, strings.NewReader(long), false); err == nil {
+		if _, err := CopySSE(&failWriter{after: i}, nil, strings.NewReader(long), false); err == nil {
 			t.Fatalf("write error swallowed in overflow (after %d)", i)
 		}
 	}
-	if _, _, err := CopySSE(&failWriter{}, nil, strings.NewReader("data: x"), false); err == nil {
+	if _, err := CopySSE(&failWriter{}, nil, strings.NewReader("data: x"), false); err == nil {
 		t.Fatal("trailing write error swallowed")
 	}
-	if _, _, err := CopySSE(io.Discard, nil, errReader{strings.NewReader("data: x\n\ndata: y")}, false); !errors.Is(err, io.ErrUnexpectedEOF) {
+	if _, err := CopySSE(io.Discard, nil, errReader{strings.NewReader("data: x\n\ndata: y")}, false); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("read error: %v", err)
 	}
 }
@@ -232,7 +251,7 @@ func FuzzCopySSE(f *testing.F) {
 	f.Add([]byte("data: {\"usage\":{\"prompt_tokens\":1}}\n\n:comment\n\n"), true)
 	f.Fuzz(func(t *testing.T, in []byte, drop bool) {
 		var out bytes.Buffer
-		_, _, err := CopySSE(&out, nil, bytes.NewReader(in), drop)
+		_, err := CopySSE(&out, nil, bytes.NewReader(in), drop)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -56,20 +56,42 @@ var (
 	usageKey   = []byte(`"usage"`)
 )
 
+// StreamResult is what CopySSE learnt from a stream.
+type StreamResult struct {
+	// Usage is the usage chunk's content, valid when HaveUsage.
+	Usage     Usage
+	HaveUsage bool
+	// Deltas counts the non-empty choices[].delta.content values forwarded
+	// to the client. vLLM emits about one token per delta, so it is the
+	// estimate of completion tokens when the stream ends before the usage
+	// chunk (which comes last).
+	Deltas int64
+}
+
+var (
+	contentKey   = []byte(`"content":"`)
+	emptyContent = []byte(`"content":""`)
+)
+
+// countDeltas counts non-empty "content" string values in one event.
+// "reasoning_content" does not match: the key must start with a quote.
+func countDeltas(event []byte) int64 {
+	return int64(bytes.Count(event, contentKey) - bytes.Count(event, emptyContent))
+}
+
 // CopySSE copies a server-sent event stream from src to dst event by event
 // (an event ends with a blank line), calling flush after each one so
 // tokens reach the client as soon as vLLM produces them; nothing beyond
 // one event is buffered. It returns the usage carried by the stream, if
-// any. When dropUsage is true the usage-only chunk (empty choices, non-null
-// usage), which the gateway requested on the client's behalf, is not
-// forwarded.
-func CopySSE(dst io.Writer, flush func(), src io.Reader, dropUsage bool) (Usage, bool, error) {
+// any, and the number of content deltas forwarded. When dropUsage is true
+// the usage-only chunk (empty choices, non-null usage), which the gateway
+// requested on the client's behalf, is not forwarded.
+func CopySSE(dst io.Writer, flush func(), src io.Reader, dropUsage bool) (StreamResult, error) {
 	br := bufio.NewReaderSize(src, 64<<10)
 	var (
 		event    []byte
 		overflow bool // event too long to hold: being streamed through
-		usage    Usage
-		found    bool
+		res      StreamResult
 	)
 	write := func(b []byte) error {
 		if len(b) == 0 {
@@ -82,12 +104,13 @@ func CopySSE(dst io.Writer, flush func(), src io.Reader, dropUsage bool) (Usage,
 		if !overflow {
 			u, ok, isUsageOnly := inspectEvent(event)
 			if ok {
-				usage, found = u, true
+				res.Usage, res.HaveUsage = u, true
 			}
 			if !(dropUsage && isUsageOnly) {
 				if err := write(event); err != nil {
 					return err
 				}
+				res.Deltas += countDeltas(event)
 			}
 		}
 		event, overflow = event[:0], false
@@ -103,15 +126,15 @@ func CopySSE(dst io.Writer, flush func(), src io.Reader, dropUsage bool) (Usage,
 			switch {
 			case overflow:
 				if werr := write(line); werr != nil {
-					return usage, found, werr
+					return res, werr
 				}
 			case len(event)+len(line) > maxEvent:
 				overflow = true
 				if werr := write(event); werr != nil {
-					return usage, found, werr
+					return res, werr
 				}
 				if werr := write(line); werr != nil {
-					return usage, found, werr
+					return res, werr
 				}
 				event = event[:0]
 			default:
@@ -119,7 +142,7 @@ func CopySSE(dst io.Writer, flush func(), src io.Reader, dropUsage bool) (Usage,
 			}
 			if blank {
 				if werr := endEvent(); werr != nil {
-					return usage, found, werr
+					return res, werr
 				}
 			}
 		}
@@ -130,19 +153,20 @@ func CopySSE(dst io.Writer, flush func(), src io.Reader, dropUsage bool) (Usage,
 			// Forward a trailing unterminated event as is.
 			if !overflow && len(event) > 0 {
 				if u, ok, _ := inspectEvent(event); ok {
-					usage, found = u, true
+					res.Usage, res.HaveUsage = u, true
 				}
 				if werr := write(event); werr != nil {
-					return usage, found, werr
+					return res, werr
 				}
+				res.Deltas += countDeltas(event)
 				if flush != nil {
 					flush()
 				}
 			}
 			if err == io.EOF {
-				return usage, found, nil
+				return res, nil
 			}
-			return usage, found, err
+			return res, err
 		}
 	}
 }

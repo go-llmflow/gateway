@@ -91,6 +91,10 @@ type Record struct {
 	Priority         int
 	Borrowing        bool
 	Stream           bool
+	// Estimated is true when vLLM's usage report never arrived (client
+	// gone before the final usage chunk or before a non-streaming answer)
+	// and the tokens were estimated by the gateway.
+	Estimated bool
 }
 
 // TeamUsage aggregates records of a team and pool over a period.
@@ -102,6 +106,8 @@ type TeamUsage struct {
 	CompletionTokens int64
 	CachedTokens     int64
 	GPUHours         float64
+	// EstimatedRequests counts records whose tokens were estimated.
+	EstimatedRequests int64
 }
 
 // Store is the persistence contract.
