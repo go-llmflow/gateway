@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-llmflow/gateway/store"
 )
 
 // A client that closes the connection after the last content delta, before
@@ -39,6 +41,9 @@ func TestStreamAbortedBeforeUsageIsCharged(t *testing.T) {
 	defer up.Close()
 	e := newEnv(t, testConfig(up.URL))
 	_, key := e.newKey("etabA")
+	if resp := e.do("PUT", "/admin/budgets", master, `{"kind":"team","name":"etabA","period":"day","max_cost":1000}`); readAll(t, resp) == "" || resp.StatusCode != 200 {
+		t.Fatalf("budget %d", resp.StatusCode)
+	}
 
 	req, _ := http.NewRequest("POST", e.gw.URL+"/v1/chat/completions",
 		strings.NewReader(`{"model":"llama","stream":true,"messages":[{"role":"user","content":"`+strings.Repeat("x", 400)+`"}]}`))
@@ -63,10 +68,7 @@ func TestStreamAbortedBeforeUsageIsCharged(t *testing.T) {
 	if u := e.srv.pools["b300"].Snapshot()[0].Usage; !(u > 0) {
 		t.Fatalf("fair-share usage not charged: %v", u)
 	}
-	e.srv.budget.mu.Lock()
-	spent := e.srv.budget.local["etabA"]
-	e.srv.budget.mu.Unlock()
-	if !(spent > 0) {
+	if spent, ok := e.srv.budget.spent(store.BudgetKey{Kind: store.ScopeTeam, Name: "etabA"}); !ok || !(spent > 0) {
 		t.Fatalf("budget not charged: %v", spent)
 	}
 	e.srv.Close(context.Background())

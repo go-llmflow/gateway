@@ -13,7 +13,6 @@ package store
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 )
 
@@ -60,7 +59,9 @@ type Key struct {
 	Project string `json:"project,omitempty"`
 	// Owner is the user who created the key as a team member; empty for
 	// team keys created by an administrator.
-	Owner       string    `json:"owner,omitempty"`
+	Owner string `json:"owner,omitempty"`
+	// Tags label every request made with the key (budgets and reports).
+	Tags        []string  `json:"tags,omitempty"`
 	Name        string    `json:"name"`
 	RPM         int       `json:"rpm"`
 	TPM         int       `json:"tpm"`
@@ -98,13 +99,6 @@ func (p Period) Start(now time.Time) time.Time {
 	}
 }
 
-// Budget caps a team's cost (GPU-hours) per period.
-type Budget struct {
-	Team    string  `json:"team"`
-	Period  Period  `json:"period"`
-	MaxCost float64 `json:"max_cost"`
-}
-
 // Record is one finished request.
 type Record struct {
 	Time             time.Time
@@ -124,6 +118,8 @@ type Record struct {
 	Priority         int
 	Borrowing        bool
 	Stream           bool
+	// Tags are the key's tags and the allow-listed request tags.
+	Tags []string
 	// Estimated is true when vLLM's usage report never arrived (client
 	// gone before the final usage chunk or before a non-streaming answer)
 	// and the tokens were estimated by the gateway.
@@ -206,25 +202,24 @@ type Store interface {
 	// TeamModels returns every team's non-empty model list.
 	TeamModels(ctx context.Context) (map[string][]string, error)
 
+	// SetBudget creates or replaces a budget's period, maximum and soft
+	// limit; a temporary increase already granted is kept.
 	SetBudget(ctx context.Context, b Budget) error
-	DeleteBudget(ctx context.Context, team string) error
+	// IncreaseBudget grants a temporary increase until expiry, replacing
+	// any earlier one; ErrNotFound when the budget does not exist.
+	IncreaseBudget(ctx context.Context, k BudgetKey, amount float64, expiry time.Time) error
+	DeleteBudget(ctx context.Context, k BudgetKey) error
 	Budgets(ctx context.Context) ([]Budget, error)
-	// SpendSince returns the cost of each team's records at or after since.
-	SpendSince(ctx context.Context, since time.Time) (map[string]float64, error)
+	// MarkSoftAlert records that the soft-limit alert of a budget was sent
+	// for the period starting at period; it returns false when it already
+	// was, so that several gateways or restarts send it once.
+	MarkSoftAlert(ctx context.Context, k BudgetKey, period time.Time) (bool, error)
+	// SpendRows aggregates the cost of records at or after since by org,
+	// team, project, key, model and tag set.
+	SpendRows(ctx context.Context, since time.Time) ([]SpendRow, error)
 	InsertRecords(ctx context.Context, recs []Record) error
 	// Usage aggregates records in [from, to) per team and pool, sorted by
 	// team then pool.
 	Usage(ctx context.Context, from, to time.Time) ([]TeamUsage, error)
 	Close()
-}
-
-// ValidateBudget checks a budget before it is stored.
-func ValidateBudget(b Budget) error {
-	if !b.Period.Valid() {
-		return fmt.Errorf("period %q: want day, week or month", b.Period)
-	}
-	if !(b.MaxCost >= 0) || b.MaxCost > 1e15 {
-		return fmt.Errorf("max_cost %v: want 0..1e15", b.MaxCost)
-	}
-	return nil
 }

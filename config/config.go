@@ -43,10 +43,39 @@ type Config struct {
 	BudgetRefresh     time.Duration
 	KeyCacheTTL       time.Duration
 	ExposeOverheadHdr bool
+	// Tags configures request tags; Alerts the soft-budget alert channels.
+	Tags   Tags
+	Alerts Alerts
 	// AuthFailuresPerMinute is the number of failed authentications a
 	// client network (IPv4 address, IPv6 /64) may make per minute before it
 	// gets 429; 0 disables the limit.
 	AuthFailuresPerMinute int
+}
+
+// Tags lets clients label requests through one header, restricted to an
+// allow-list. Keys carry their own tags too (set by an administrator).
+type Tags struct {
+	// Header is the request header holding comma-separated tags; empty
+	// disables request tags.
+	Header string
+	// Allowed lists the tags a request may carry; others are refused.
+	Allowed []string
+}
+
+// Alerts are the channels soft-budget alerts go to.
+type Alerts struct {
+	WebhookURL       string
+	WebhookTokenFile string
+	SMTP             *SMTP
+}
+
+// SMTP is a mail relay for alerts.
+type SMTP struct {
+	Server       string // host:port
+	From         string
+	To           []string
+	Username     string
+	PasswordFile string
 }
 
 // Store selects where persistent state lives.

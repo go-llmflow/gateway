@@ -134,31 +134,74 @@ func contract(t *testing.T, s Store) {
 		t.Fatalf("revoke unknown: %v", err)
 	}
 
-	must(s.SetBudget(ctx, Budget{Team: "etabB", Period: Month, MaxCost: 100}))
-	must(s.SetBudget(ctx, Budget{Team: "etabB", Period: Day, MaxCost: 5}))
-	if err := s.SetBudget(ctx, Budget{Team: "nobody", Period: Day, MaxCost: 5}); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("budget for unknown team: %v", err)
+	teamB := BudgetKey{Kind: ScopeTeam, Name: "etabB"}
+	must(s.SetBudget(ctx, Budget{BudgetKey: teamB, Period: Month, MaxCost: 100}))
+	must(s.SetBudget(ctx, Budget{BudgetKey: teamB, Period: Day, MaxCost: 5, SoftLimit: 4}))
+	must(s.SetBudget(ctx, Budget{BudgetKey: BudgetKey{Kind: ScopeKey, Name: id, Model: "m"}, Period: Week, MaxCost: 2}))
+	for _, bad := range []Budget{
+		{BudgetKey: teamB, Period: "year", MaxCost: 5},
+		{BudgetKey: BudgetKey{Kind: "user", Name: "x"}, Period: Day},
+		{BudgetKey: BudgetKey{Kind: ScopeTag, Name: ""}, Period: Day},
+		{BudgetKey: teamB, Period: Day, MaxCost: -1},
+		{BudgetKey: teamB, Period: Day, SoftLimit: -1},
+	} {
+		if err := s.SetBudget(ctx, bad); err == nil {
+			t.Fatalf("accepted %+v", bad)
+		}
 	}
-	if err := s.SetBudget(ctx, Budget{Team: "etabB", Period: "year", MaxCost: 5}); err == nil {
-		t.Fatal("bad period accepted")
+	exp := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
+	must(s.IncreaseBudget(ctx, teamB, 3, exp))
+	if err := s.IncreaseBudget(ctx, BudgetKey{Kind: ScopeTag, Name: "nope"}, 1, exp); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("increase unknown: %v", err)
 	}
+	must(s.SetBudget(ctx, Budget{BudgetKey: teamB, Period: Day, MaxCost: 5, SoftLimit: 4})) // keeps the increase
 	bs, err := s.Budgets(ctx)
 	must(err)
-	if len(bs) != 1 || bs[0].Period != Day || bs[0].MaxCost != 5 {
+	if len(bs) != 2 || bs[1].Kind != ScopeTeam || bs[1].Period != Day || bs[1].MaxCost != 5 || bs[1].SoftLimit != 4 ||
+		bs[1].TempIncrease != 3 || bs[1].TempExpiry == nil || !bs[1].TempExpiry.Equal(exp) {
 		t.Fatalf("budgets %+v", bs)
+	}
+	if l := bs[1].Limit(time.Now()); l != 8 {
+		t.Fatalf("limit with increase %v", l)
+	}
+	if l := bs[1].Limit(exp.Add(time.Second)); l != 5 {
+		t.Fatalf("limit after expiry %v", l)
+	}
+	p0 := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	if ok, err := s.MarkSoftAlert(ctx, teamB, p0); !ok || err != nil {
+		t.Fatalf("first alert %v %v", ok, err)
+	}
+	if ok, err := s.MarkSoftAlert(ctx, teamB, p0); ok || err != nil {
+		t.Fatalf("second alert in the same period %v %v", ok, err)
+	}
+	if ok, err := s.MarkSoftAlert(ctx, teamB, p0.AddDate(0, 0, 1)); !ok || err != nil {
+		t.Fatalf("alert in the next period %v %v", ok, err)
+	}
+	if _, err := s.MarkSoftAlert(ctx, BudgetKey{Kind: ScopeTag, Name: "nope"}, p0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("alert unknown: %v", err)
 	}
 
 	t0 := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	must(s.InsertRecords(ctx, []Record{
-		{Time: t0, Team: "etabA", KeyID: id, Model: "m", Pool: "p", Upstream: "u", PromptTokens: 10, CompletionTokens: 5, CachedTokens: 2, Cost: 1.5, Status: 200},
-		{Time: t0.Add(time.Hour), Team: "etabA", KeyID: id, Model: "m", Pool: "p", Upstream: "u", PromptTokens: 1, CompletionTokens: 1, Cost: 0.5, Status: 499, Borrowing: true, Priority: 10, Stream: true, Estimated: true},
-		{Time: t0.Add(2 * time.Hour), Team: "etabB", KeyID: id2, Model: "m", Pool: "p", Upstream: "u", PromptTokens: 3, Cost: 0.25, Status: 200},
-		{Time: t0.Add(48 * time.Hour), Team: "etabB", KeyID: id2, Model: "m", Pool: "q", Upstream: "u", Cost: 7, Status: 200},
+		{Time: t0, Org: "orgA", Team: "etabA", KeyID: id, Model: "m", Pool: "p", Upstream: "u", PromptTokens: 10, CompletionTokens: 5, CachedTokens: 2, Cost: 1.5, Status: 200, Tags: []string{"eval"}},
+		{Time: t0.Add(time.Hour), Org: "orgA", Team: "etabA", KeyID: id, Model: "m", Pool: "p", Upstream: "u", PromptTokens: 1, CompletionTokens: 1, Cost: 0.5, Status: 499, Borrowing: true, Priority: 10, Stream: true, Estimated: true, Tags: []string{"eval", "prod"}},
+		{Time: t0.Add(2 * time.Hour), Org: "orgB", Team: "etabB", KeyID: id2, Model: "m", Pool: "p", Upstream: "u", PromptTokens: 3, Cost: 0.25, Status: 200},
+		{Time: t0.Add(48 * time.Hour), Org: "orgB", Team: "etabB", Project: "x", KeyID: id2, Model: "m", Pool: "q", Upstream: "u", Cost: 7, Status: 200},
 	}))
-	spend, err := s.SpendSince(ctx, t0.Add(time.Minute))
+	rows, err := s.SpendRows(ctx, t0.Add(time.Minute))
 	must(err)
-	if spend["etabA"] != 0.5 || spend["etabB"] != 7.25 {
-		t.Fatalf("spend %v", spend)
+	sum := map[string]float64{}
+	for _, r := range rows {
+		sum[r.Team] += r.Cost
+		for _, tg := range r.Tags {
+			sum["tag:"+tg] += r.Cost
+		}
+		if r.Project != "" {
+			sum["project:"+r.Project] += r.Cost
+		}
+	}
+	if len(rows) != 3 || sum["etabA"] != 0.5 || sum["etabB"] != 7.25 || sum["tag:prod"] != 0.5 || sum["tag:eval"] != 0.5 || sum["project:x"] != 7 {
+		t.Fatalf("spend rows %+v", rows)
 	}
 	us, err := s.Usage(ctx, t0, t0.Add(24*time.Hour))
 	must(err)
@@ -179,8 +222,8 @@ func contract(t *testing.T, s Store) {
 		t.Fatalf("disable unknown: %v", err)
 	}
 	must(s.CreateTeam(ctx, "etabB", "orgB")) // re-enable
-	must(s.DeleteBudget(ctx, "etabB"))
-	if err := s.DeleteBudget(ctx, "etabB"); !errors.Is(err, ErrNotFound) {
+	must(s.DeleteBudget(ctx, teamB))
+	if err := s.DeleteBudget(ctx, teamB); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete missing budget: %v", err)
 	}
 
@@ -223,14 +266,18 @@ func TestMemoryFaults(t *testing.T) {
 	checks := []error{
 		m.Ping(ctx), m.CreateOrg(ctx, "o"), m.DisableOrg(ctx, "o"), m.CreateTeam(ctx, "a", "o"), m.DisableTeam(ctx, "a"),
 		m.CreateProject(ctx, "a", "p"), m.DisableProject(ctx, "a", "p"), m.CreateKey(ctx, Key{}),
-		m.RevokeKey(ctx, "a"), m.SetBudget(ctx, Budget{Period: Day}), m.DeleteBudget(ctx, "a"),
+		m.RevokeKey(ctx, "a"), m.SetBudget(ctx, Budget{BudgetKey: BudgetKey{Kind: ScopeTag, Name: "a"}, Period: Day}),
+		m.DeleteBudget(ctx, BudgetKey{}), m.IncreaseBudget(ctx, BudgetKey{}, 1, time.Time{}),
 		m.InsertRecords(ctx, nil),
 	}
 	_, e1 := m.ListTeams(ctx, "")
 	_, e2 := m.ListKeys(ctx, "")
 	_, e3 := m.KeyByHash(ctx, [32]byte{})
 	_, e4 := m.Budgets(ctx)
-	_, e5 := m.SpendSince(ctx, time.Time{})
+	_, e5 := m.SpendRows(ctx, time.Time{})
+	if _, err := m.MarkSoftAlert(ctx, BudgetKey{}, time.Time{}); !errors.Is(err, boom) {
+		t.Fatal("MarkSoftAlert fault")
+	}
 	_, e6 := m.Usage(ctx, time.Time{}, time.Time{})
 	_, e7 := m.ListOrgs(ctx)
 	_, e8 := m.GetTeam(ctx, "a")

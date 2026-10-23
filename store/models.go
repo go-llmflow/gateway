@@ -15,8 +15,10 @@ CREATE TABLE IF NOT EXISTS llmflow_team_models (
 );
 `
 
+// dedupSorted returns the sorted distinct values, never nil: a nil slice
+// would be stored as NULL in a NOT NULL text[] column.
 func dedupSorted(models []string) []string {
-	out := append([]string(nil), models...)
+	out := append(make([]string, 0, len(models)), models...)
 	sort.Strings(out)
 	n := 0
 	for i, m := range out {

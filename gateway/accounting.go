@@ -24,6 +24,9 @@ type recorder struct {
 	wg       sync.WaitGroup
 	onErr    func(error)
 	interval time.Duration
+	// done is told about every record once it is stored, failed or
+	// dropped (the budgeter moves its cost from pending to written).
+	done func([]store.Record)
 }
 
 func newRecorder(st store.Store, size, batch int, onErr func(error)) *recorder {
@@ -33,14 +36,16 @@ func newRecorder(st store.Store, size, batch int, onErr func(error)) *recorder {
 func (r *recorder) record(rec store.Record) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.closed {
-		r.dropped.Add(1)
-		return
+	if !r.closed {
+		select {
+		case r.queue <- rec:
+			return
+		default:
+		}
 	}
-	select {
-	case r.queue <- rec:
-	default:
-		r.dropped.Add(1)
+	r.dropped.Add(1)
+	if r.done != nil {
+		r.done([]store.Record{rec})
 	}
 }
 
@@ -76,6 +81,9 @@ func (r *recorder) run() {
 			}
 		} else {
 			r.written.Add(int64(len(buf)))
+		}
+		if r.done != nil {
+			r.done(buf)
 		}
 		buf = buf[:0]
 	}

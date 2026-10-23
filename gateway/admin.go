@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-llmflow/gateway/config"
@@ -51,8 +52,9 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	h("PUT /admin/users/{name}/roles", s.grantRole)
 	h("DELETE /admin/users/{name}/roles", s.ungrantRole)
 	h("GET /admin/budgets", s.listBudgets)
-	h("PUT /admin/budgets/{team}", s.setBudget)
-	h("DELETE /admin/budgets/{team}", s.deleteBudget)
+	h("PUT /admin/budgets", s.setBudget)
+	h("POST /admin/budgets/increase", s.increaseBudget)
+	h("DELETE /admin/budgets", s.deleteBudget)
 	h("GET /admin/usage.csv", s.usageCSV)
 	h("GET /admin/fairshare", s.fairshareState)
 }
@@ -409,12 +411,13 @@ func (s *Server) listKeys(w http.ResponseWriter, r *http.Request, p *principal) 
 
 func (s *Server) createKey(w http.ResponseWriter, r *http.Request, p *principal) {
 	var in struct {
-		Team        string `json:"team"`
-		Project     string `json:"project"`
-		Name        string `json:"name"`
-		RPM         int    `json:"rpm"`
-		TPM         int    `json:"tpm"`
-		MaxInFlight int    `json:"max_inflight"`
+		Team        string   `json:"team"`
+		Project     string   `json:"project"`
+		Name        string   `json:"name"`
+		RPM         int      `json:"rpm"`
+		TPM         int      `json:"tpm"`
+		MaxInFlight int      `json:"max_inflight"`
+		Tags        []string `json:"tags"`
 	}
 	if !readJSON(w, r, &in) {
 		return
@@ -422,6 +425,16 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request, p *principal)
 	if in.RPM < 0 || in.TPM < 0 || in.MaxInFlight < 0 || len(in.Name) > 128 {
 		apiError(w, http.StatusBadRequest, "invalid_request_error", "limits must be non-negative and the name at most 128 bytes")
 		return
+	}
+	if len(in.Tags) > maxRequestTags {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", "at most 8 tags")
+		return
+	}
+	for _, t := range in.Tags {
+		if !config.ValidName(t) {
+			badName(w, "tag")
+			return
+		}
 	}
 	t, ok := s.team(w, r, in.Team)
 	if !ok {
@@ -438,7 +451,7 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request, p *principal)
 	}
 	secret, id, hash := store.GenerateKey()
 	k := store.Key{ID: id, Hash: hash, Team: in.Team, Project: in.Project, Owner: owner, Name: in.Name,
-		RPM: in.RPM, TPM: in.TPM, MaxInFlight: in.MaxInFlight}
+		RPM: in.RPM, TPM: in.TPM, MaxInFlight: in.MaxInFlight, Tags: in.Tags}
 	if err := s.st.CreateKey(r.Context(), k); err != nil {
 		storeError(w, err)
 		return
@@ -668,44 +681,117 @@ func (s *Server) ungrantRole(w http.ResponseWriter, r *http.Request, p *principa
 
 // ---- budgets ----
 
+// budgetAccess says who may read and write a budget: organisation budgets
+// are set by proxy admins and read by the organisation; team budgets by
+// the organisation's admins; project and key budgets by the team's admins
+// (a member reads the budgets of their own keys); tag budgets cross teams
+// and belong to proxy roles. It also checks that the target exists.
+func (s *Server) budgetAccess(r *http.Request, p *principal, k store.BudgetKey) (read, write bool, err error) {
+	if k.Model != "" && s.groups[k.Model] == nil {
+		return false, false, store.ErrNotFound
+	}
+	ctx := r.Context()
+	switch k.Kind {
+	case store.ScopeOrg:
+		orgs, err := s.st.ListOrgs(ctx)
+		if err != nil {
+			return false, false, err
+		}
+		for _, o := range orgs {
+			if o.Name == k.Name {
+				return p.orgView(k.Name), p.proxyAdmin(), nil
+			}
+		}
+		return false, false, store.ErrNotFound
+	case store.ScopeTeam:
+		t, err := s.st.GetTeam(ctx, k.Name)
+		if err != nil {
+			return false, false, err
+		}
+		return p.teamView(t), p.orgAdmin(t.Org), nil
+	case store.ScopeProject:
+		team, project, ok := strings.Cut(k.Name, "/")
+		if !ok {
+			return false, false, store.ErrNotFound
+		}
+		t, err := s.st.GetTeam(ctx, team)
+		if err != nil {
+			return false, false, err
+		}
+		ps, err := s.st.ListProjects(ctx, team)
+		if err != nil {
+			return false, false, err
+		}
+		for _, pr := range ps {
+			if pr.Name == project {
+				return p.teamView(t), p.teamAdmin(t), nil
+			}
+		}
+		return false, false, store.ErrNotFound
+	case store.ScopeKey:
+		key, err := s.st.GetKey(ctx, k.Name)
+		if err != nil {
+			return false, false, err
+		}
+		t, err := s.st.GetTeam(ctx, key.Team)
+		if err != nil {
+			return false, false, err
+		}
+		return keyVisible(p, t, key), p.teamAdmin(t), nil
+	case store.ScopeTag:
+		if !config.ValidName(k.Name) {
+			return false, false, store.ErrNotFound
+		}
+		return p.proxyView(), p.proxyAdmin(), nil
+	}
+	return false, false, store.ErrNotFound
+}
+
+type budgetOut struct {
+	store.Budget
+	Spent float64 `json:"spent"`
+	Limit float64 `json:"limit"`
+}
+
 func (s *Server) listBudgets(w http.ResponseWriter, r *http.Request, p *principal) {
 	bs, err := s.st.Budgets(r.Context())
 	if err != nil {
 		storeError(w, err)
 		return
 	}
-	teams, err := s.teamsByName(r)
-	if err != nil {
-		storeError(w, err)
-		return
-	}
-	out := []store.Budget{}
+	now := s.now()
+	out := []budgetOut{}
 	for _, b := range bs {
-		if p.teamView(teams[b.Team]) {
-			out = append(out, b)
+		read, _, err := s.budgetAccess(r, p, b.BudgetKey)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			storeError(w, err)
+			return
 		}
+		if !read && !p.proxyView() {
+			continue
+		}
+		spent, _ := s.budget.spent(b.BudgetKey)
+		out = append(out, budgetOut{b, spent, b.Limit(now)})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) setBudget(w http.ResponseWriter, r *http.Request, p *principal) {
-	var in struct {
-		Period  store.Period `json:"period"`
-		MaxCost float64      `json:"max_cost"`
-	}
-	if !readJSON(w, r, &in) {
+	var b store.Budget
+	if !readJSON(w, r, &b) {
 		return
 	}
-	b := store.Budget{Team: r.PathValue("team"), Period: in.Period, MaxCost: in.MaxCost}
+	b.TempIncrease, b.TempExpiry = 0, nil // only through /admin/budgets/increase
 	if err := store.ValidateBudget(b); err != nil {
 		apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	t, ok := s.team(w, r, b.Team)
-	if !ok {
+	_, write, err := s.budgetAccess(r, p, b.BudgetKey)
+	if err != nil {
+		storeError(w, err)
 		return
 	}
-	if !p.orgAdmin(t.Org) {
+	if !write {
 		forbidden(w)
 		return
 	}
@@ -714,19 +800,57 @@ func (s *Server) setBudget(w http.ResponseWriter, r *http.Request, p *principal)
 		return
 	}
 	_ = s.budget.refresh(r.Context())
+	s.log.Info("budget set", "budget", b.BudgetKey.String(), "max_cost", b.MaxCost, "by", p.name)
 	writeJSON(w, http.StatusOK, b)
 }
 
-func (s *Server) deleteBudget(w http.ResponseWriter, r *http.Request, p *principal) {
-	t, ok := s.team(w, r, r.PathValue("team"))
-	if !ok {
+// increaseBudget grants a temporary increase that ends at expires_at,
+// whatever the period, like LiteLLM's temp_budget_increase/expiry.
+func (s *Server) increaseBudget(w http.ResponseWriter, r *http.Request, p *principal) {
+	var in struct {
+		store.BudgetKey
+		Amount    float64   `json:"amount"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if !readJSON(w, r, &in) {
 		return
 	}
-	if !p.orgAdmin(t.Org) {
+	now := s.now()
+	if !(in.Amount > 0 && in.Amount <= 1e15) || !in.ExpiresAt.After(now) || in.ExpiresAt.After(now.AddDate(1, 0, 0)) {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", "amount must be positive and expires_at within the next year")
+		return
+	}
+	_, write, err := s.budgetAccess(r, p, in.BudgetKey)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	if !write {
 		forbidden(w)
 		return
 	}
-	if err := s.st.DeleteBudget(r.Context(), t.Name); err != nil {
+	if err := s.st.IncreaseBudget(r.Context(), in.BudgetKey, in.Amount, in.ExpiresAt); err != nil {
+		storeError(w, err)
+		return
+	}
+	_ = s.budget.refresh(r.Context())
+	s.log.Info("budget increased", "budget", in.BudgetKey.String(), "amount", in.Amount, "until", in.ExpiresAt, "by", p.name)
+	writeJSON(w, http.StatusOK, map[string]any{"budget": in.BudgetKey, "amount": in.Amount, "expires_at": in.ExpiresAt.UTC()})
+}
+
+func (s *Server) deleteBudget(w http.ResponseWriter, r *http.Request, p *principal) {
+	q := r.URL.Query()
+	k := store.BudgetKey{Kind: store.ScopeKind(q.Get("kind")), Name: q.Get("name"), Model: q.Get("model")}
+	_, write, err := s.budgetAccess(r, p, k)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	if !write {
+		forbidden(w)
+		return
+	}
+	if err := s.st.DeleteBudget(r.Context(), k); err != nil {
 		storeError(w, err)
 		return
 	}

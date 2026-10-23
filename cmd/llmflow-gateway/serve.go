@@ -42,6 +42,16 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 			return s, fmt.Errorf("metrics_token_file: %w", err)
 		}
 	}
+	if f := c.Alerts.WebhookTokenFile; f != "" {
+		if s.WebhookToken, err = config.ReadSecret(f); err != nil {
+			return s, fmt.Errorf("alerts webhook_token_file: %w", err)
+		}
+	}
+	if c.Alerts.SMTP != nil && c.Alerts.SMTP.PasswordFile != "" {
+		if s.SMTPPassword, err = config.ReadSecret(c.Alerts.SMTP.PasswordFile); err != nil {
+			return s, fmt.Errorf("alerts smtp password_file: %w", err)
+		}
+	}
 	s.UpstreamKeys = map[string]string{}
 	for _, f := range c.KeyFiles() {
 		k, err := config.ReadSecret(f)
