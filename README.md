@@ -548,7 +548,9 @@ Enforced:
 - **OpenID Connect access tokens on the inference API.** With a `jwt { … }`
   block, a bearer token that has the JWS compact shape (three dot-separated
   segments) is verified by [`github.com/go-authn/oidc`](https://github.com/go-authn/oidc)
-  v0.4.1 instead of being looked up as a virtual key. That library does the
+  v0.4.2 (fuzzed in its own repository; v0.4.2 refuses an `nbf` that wrapped
+  past the int64 range and RSA exponents below 3) instead of being looked up
+  as a virtual key. That library does the
   JOSE work and its refusals: no `alg: none`, no HMAC algorithm (so the
   issuer's public key cannot be used as an HS256 secret), `iss` compared
   whole, `aud` and `exp` required, bounded clock skew, an optional `typ`
