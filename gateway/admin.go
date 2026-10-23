@@ -600,8 +600,8 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request, p *principal
 	if !readJSON(w, r, &in) {
 		return
 	}
-	if !config.ValidName(in.Name) {
-		badName(w, "user")
+	if !config.ValidUserName(in.Name) {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", "user name: want [A-Za-z0-9_.@+-]{1,128}")
 		return
 	}
 	if err := s.st.CreateUser(r.Context(), in.Name); err != nil {

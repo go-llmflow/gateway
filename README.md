@@ -371,6 +371,40 @@ and ask for `scopes = ["openid", "profile", "groups"]`: the bridge's
 `groups` are entitlements held to the IdP that asserted them, so a `role`
 block can match `urn:mace:…` or `urn:geant:…` values.
 
+### Provisioning with SCIM 2.0
+
+With a `scim` block, an identity provider (Entra ID, Okta, Keycloak…)
+provisions users and groups at `/scim/v2` (RFC 7643/7644). The protocol —
+filters, PATCH, paging, versions, errors, discovery — is
+[`github.com/go-authn/scim`](https://github.com/go-authn/scim); the gateway
+stores what is pushed and derives its own state from it:
+
+```hcl
+scim {
+  token_file = "vault:secret/llmflow#scim"      # the provider's bearer token, at least 32 bytes
+  base_url   = "https://llm.example.org/scim/v2"
+  group "Lab Physics" { team = "etabA" }         # members get member on etabA
+  group "Lab Physics Leads" {
+    team = "etabA"
+    role = "team_admin"                          # member (default), team_admin or viewer
+  }
+}
+```
+
+- A provisioned user is a gateway user of the same `userName` (letters,
+  digits, `_ . - @ +`, at most 128), disabled while `active` is false or
+  after deletion, which revokes their admin tokens. A renamed user is a new
+  gateway user; the old name is disabled.
+- The members of a mapped group (display names compare without case) get the
+  block's role on its team; leaving the group, deactivation or deletion takes
+  it away. Only those (role, team) pairs of provisioned users are managed:
+  roles granted by hand stay. Nested groups are not expanded.
+- The state is reconciled after every change and at start-up, so a change
+  interrupted half-way is repaired.
+- The bearer token is compared in constant time and failures count in the
+  per-network limit; `/scim/v2` obeys the `routes.admin` networks. With SSO,
+  the provisioned roles apply to the person's session at once.
+
 | route | |
 |---|---|
 | `GET /admin/whoami` | the caller and their roles |

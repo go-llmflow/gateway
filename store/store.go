@@ -183,6 +183,16 @@ type Store interface {
 	// ErrNotFound for an unknown or revoked key, ErrExists when the new
 	// hash is already another key's, or this key's current one.
 	RotateKey(ctx context.Context, id string, newHash, expect [32]byte, prevExpires, at time.Time) error
+	// SCIM provisioning documents (see SCIMDoc). SCIMCreate: ErrExists
+	// when the id, or a User's name without case, is taken. SCIMReplace:
+	// ErrConflict when the stored version is not ifVersion, ErrExists for a
+	// taken name. SCIMList filters by name without case when name != "".
+	SCIMCreate(ctx context.Context, d SCIMDoc) error
+	SCIMGet(ctx context.Context, kind, id string) (SCIMDoc, error)
+	SCIMReplace(ctx context.Context, d SCIMDoc, ifVersion string) error
+	SCIMDelete(ctx context.Context, kind, id string) error
+	SCIMList(ctx context.Context, kind, name string) ([]SCIMDoc, error)
+
 	// SetKeyRotation sets a key's rotation schedule (every 0: none).
 	SetKeyRotation(ctx context.Context, id string, r Rotation) error
 	// DueKeys lists the keys, not revoked, whose scheduled rotation is due

@@ -58,6 +58,21 @@ type fileHCL struct {
 	JWT                  *jwtHCL    `hcl:"jwt,block"`
 	SSO                  *ssoHCL    `hcl:"sso,block"`
 	KeyRotation          *rotHCL    `hcl:"key_rotation,block"`
+	SCIM                 *scimHCL   `hcl:"scim,block"`
+}
+
+type scimHCL struct {
+	TokenFile    string         `hcl:"token_file"`
+	BaseURL      string         `hcl:"base_url"`
+	BaseURLRange hcl.Range      `hcl:"base_url,attr_value_range"`
+	Groups       []scimGroupHCL `hcl:"group,block"`
+}
+
+type scimGroupHCL struct {
+	Name     string    `hcl:"name,label"`
+	Team     string    `hcl:"team"`
+	Role     *string   `hcl:"role,optional"`
+	DefRange hcl.Range `hcl:",def_range"`
 }
 
 type rotHCL struct {
@@ -791,6 +806,27 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		}
 		c.KeyRotation = ck
 	}
+	if sc := raw.SCIM; sc != nil {
+		cs := &SCIM{TokenFile: sc.TokenFile, BaseURL: strings.TrimRight(sc.BaseURL, "/")}
+		if u, err := url.Parse(cs.BaseURL); err != nil || !validIssuer(cs.BaseURL) || u.Path != "/scim/v2" {
+			v.errf(sc.BaseURLRange, "Invalid base_url", "base_url %q: want https://<this gateway>/scim/v2", sc.BaseURL)
+		}
+		seen := map[string]bool{}
+		for _, g := range sc.Groups {
+			cg := SCIMGroup{Name: g.Name, Team: g.Team, Role: strOr(g.Role, "member")}
+			switch {
+			case strings.TrimSpace(g.Name) == "" || seen[strings.ToLower(g.Name)]:
+				v.errf(g.DefRange, "Invalid group", "group %q: empty or declared twice (names compare without case)", g.Name)
+			case !ValidName(g.Team):
+				v.errf(g.DefRange, "Invalid team", "group %q: team %q", g.Name, g.Team)
+			case cg.Role != "member" && cg.Role != "team_admin" && cg.Role != "viewer":
+				v.errf(g.DefRange, "Invalid role", "group %q: role %q: want member, team_admin or viewer", g.Name, cg.Role)
+			}
+			seen[strings.ToLower(g.Name)] = true
+			cs.Groups = append(cs.Groups, cg)
+		}
+		c.SCIM = cs
+	}
 	// Every *_file attribute is a secret reference: a file, or a field of
 	// an OpenBao/Vault KV v2 secret (package secret).
 	for _, ref := range c.SecretRefs() {
@@ -820,6 +856,9 @@ func (c *Config) SecretRefs() []string {
 	add(c.Alerts.WebhookTokenFile)
 	if c.SSO != nil {
 		add(c.SSO.ClientSecretFile)
+	}
+	if c.SCIM != nil {
+		add(c.SCIM.TokenFile)
 	}
 	if c.Alerts.SMTP != nil {
 		add(c.Alerts.SMTP.PasswordFile)
