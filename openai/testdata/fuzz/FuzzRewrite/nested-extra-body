@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"extra_body\":{\"priority\":0,\"extra_body\":{\"priority\":-1}},\"model\":\"m\",\"vllm_xargs\":{\"priority\":0},\"max_tokens\":null}")

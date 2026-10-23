@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"model\":\"m\",\"priority\":1,\"\\u0070riority\":-9,\"priority\":2,\"stream\":true,\"stream_options\":{\"include_usage\":null}}")
