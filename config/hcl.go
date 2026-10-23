@@ -5,6 +5,7 @@ import (
 	"math"
 	"net"
 	"net/mail"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -49,6 +50,39 @@ type fileHCL struct {
 	Pools                []poolHCL  `hcl:"pool,block"`
 	Models               []modelHCL `hcl:"model,block"`
 	Vault                *vaultHCL  `hcl:"vault,block"`
+	TrustedProxies       []string   `hcl:"trusted_proxies,optional"`
+	TrustedProxiesRange  hcl.Range  `hcl:"trusted_proxies,attr_value_range"`
+	Routes               *routesHCL `hcl:"routes,block"`
+}
+
+type routeHCL struct {
+	Allow      []string  `hcl:"allow"`
+	AllowRange hcl.Range `hcl:"allow,attr_value_range"`
+}
+
+type routesHCL struct {
+	Inference *routeHCL `hcl:"inference,block"`
+	Admin     *routeHCL `hcl:"admin,block"`
+	Metrics   *routeHCL `hcl:"metrics,block"`
+	Healthz   *routeHCL `hcl:"healthz,block"`
+}
+
+// prefixes parses a CIDR list, reporting at r.
+func (v *validator) prefixes(list []string, r hcl.Range, what string) []netip.Prefix {
+	if len(list) > 1024 {
+		v.errf(r, "Too many prefixes", "%s: at most 1024", what)
+		return nil
+	}
+	out := make([]netip.Prefix, 0, len(list))
+	for _, s := range list {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			v.errf(r, "Invalid prefix", "%s: %q is not a CIDR prefix (e.g. 10.0.0.0/8, 2001:db8::/32)", what, s)
+			continue
+		}
+		out = append(out, p.Masked())
+	}
+	return out
 }
 
 type vaultHCL struct {
@@ -565,6 +599,22 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			v.errf(vb.TokenRange, "Invalid vault token file", "token_file must be a file, not a vault reference")
 		}
 		c.Vault.CacheTTL = v.dur(vb.CacheTTL, vb.CacheTTLRange, "cache_ttl", 5*time.Minute)
+	}
+	c.TrustedProxies = v.prefixes(raw.TrustedProxies, raw.TrustedProxiesRange, "trusted_proxies")
+	c.Routes.Metrics, c.Routes.Healthz = LoopbackOnly, LoopbackOnly
+	if rt := raw.Routes; rt != nil {
+		set := func(h *routeHCL, dst *[]netip.Prefix, what string) {
+			if h != nil {
+				*dst = v.prefixes(h.Allow, h.AllowRange, what)
+				if len(h.Allow) == 0 {
+					v.errf(h.AllowRange, "Empty allow list", "%s: an empty list would close the route; remove the block for the default", what)
+				}
+			}
+		}
+		set(rt.Inference, &c.Routes.Inference, "routes.inference.allow")
+		set(rt.Admin, &c.Routes.Admin, "routes.admin.allow")
+		set(rt.Metrics, &c.Routes.Metrics, "routes.metrics.allow")
+		set(rt.Healthz, &c.Routes.Healthz, "routes.healthz.allow")
 	}
 	// Every *_file attribute is a secret reference: a file, or a field of
 	// an OpenBao/Vault KV v2 secret (package secret).

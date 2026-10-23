@@ -212,12 +212,14 @@ func (s *Server) Close(ctx context.Context) {
 // Handler returns the HTTP handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/chat/completions", s.proxy("/v1/chat/completions"))
-	mux.HandleFunc("POST /v1/completions", s.proxy("/v1/completions"))
-	mux.HandleFunc("POST /v1/embeddings", s.proxy("/v1/embeddings"))
-	mux.HandleFunc("GET /v1/models", s.models)
-	mux.HandleFunc("GET /healthz", s.healthz)
-	mux.HandleFunc("GET /metrics", s.metrics)
+	inf := func(h http.HandlerFunc) http.Handler { return s.withClientAddr(s.cfg.Routes.Inference, h) }
+	mux.Handle("POST /v1/chat/completions", inf(s.proxy("/v1/chat/completions")))
+	mux.Handle("POST /v1/completions", inf(s.proxy("/v1/completions")))
+	mux.Handle("POST /v1/embeddings", inf(s.proxy("/v1/embeddings")))
+	mux.Handle("GET /v1/models", inf(s.models))
+	mux.Handle("GET /healthz", s.withClientAddr(s.cfg.Routes.Healthz, http.HandlerFunc(s.healthz)))
+	// /metrics: from an allowed network, or anywhere with the metrics token.
+	mux.Handle("GET /metrics", s.withClientAddr(nil, http.HandlerFunc(s.metrics)))
 	s.adminRoutes(mux)
 	return mux
 }
@@ -278,8 +280,14 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
-	if s.secrets.MetricsToken != "" && !store.HashEqual(store.HashSecret(bearer(r)), store.HashSecret(s.secrets.MetricsToken)) {
-		apiError(w, http.StatusUnauthorized, "authentication_error", "metrics token required")
+	a, _ := clientAddrOf(r)
+	tokenOK := s.secrets.MetricsToken != "" && store.HashEqual(store.HashSecret(bearer(r)), store.HashSecret(s.secrets.MetricsToken))
+	if !tokenOK && !inAny(a, s.cfg.Routes.Metrics) {
+		if s.secrets.MetricsToken != "" {
+			apiError(w, http.StatusUnauthorized, "authentication_error", "metrics token required")
+		} else {
+			apiError(w, http.StatusForbidden, "permission_denied", "address not allowed")
+		}
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")

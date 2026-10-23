@@ -362,6 +362,7 @@ func TestPostgresContract(t *testing.T) {
 	contract(t, p)
 	contractUsers(t, p)
 	contractModels(t, p)
+	contractAllowlists(t, p)
 
 	if _, err := OpenPostgres(ctx, "postgres://u:hunter2@[::1"); err == nil || strings.Contains(err.Error(), "hunter2") {
 		t.Fatalf("bad DSN error leaks or passes: %v", err)
@@ -371,7 +372,7 @@ func TestPostgresContract(t *testing.T) {
 func dropAll(t *testing.T, p *Postgres) {
 	t.Helper()
 	if _, err := p.pool.Exec(context.Background(),
-		`DROP TABLE IF EXISTS llmflow_team_models, llmflow_bindings, llmflow_user_tokens, llmflow_users,
+		`DROP TABLE IF EXISTS llmflow_allowlists, llmflow_budgets_v2, llmflow_team_models, llmflow_bindings, llmflow_user_tokens, llmflow_users,
 		 llmflow_usage, llmflow_budgets, llmflow_keys, llmflow_projects, llmflow_teams, llmflow_orgs`); err != nil {
 		t.Fatal(err)
 	}

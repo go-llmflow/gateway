@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"net/netip"
 	"sync"
@@ -139,17 +138,13 @@ func newFailLimiter(limit int, now func() time.Time) *failLimiter {
 	return &failLimiter{limit: limit, now: now, nets: map[netip.Prefix]*window{}}
 }
 
-// clientNet keys a client by its address (no proxy header is trusted).
+// clientNet keys a client by its network: the client address the network
+// middleware established (see net.go), or the connection's address.
 func clientNet(r *http.Request) (netip.Prefix, bool) {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	a, err := netip.ParseAddr(host)
-	if err != nil {
+	a, ok := clientAddrOf(r)
+	if !ok {
 		return netip.Prefix{}, false
 	}
-	a = a.Unmap()
 	bits := 32
 	if a.Is6() {
 		bits = 64
@@ -254,6 +249,11 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (store.Key
 	}
 	if !ok {
 		return fail(http.StatusUnauthorized, "authentication_error", "invalid or revoked key")
+	}
+	if !s.addrAllowed(r, k) {
+		s.met.denied.add(1, k.Team, "address")
+		apiError(w, http.StatusForbidden, "permission_denied", "address not allowed")
+		return store.Key{}, false
 	}
 	return k, true
 }

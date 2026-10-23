@@ -89,7 +89,7 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 	if err != nil {
 		return nil, fmt.Errorf("postgres: connect: %w", err)
 	}
-	for _, s := range []string{schema, usersSchema, modelsSchema, budgetsSchema} {
+	for _, s := range []string{schema, usersSchema, modelsSchema, budgetsSchema, allowSchema} {
 		if _, err := pool.Exec(ctx, s); err != nil {
 			pool.Close()
 			return nil, fmt.Errorf("postgres: schema: %w", err)

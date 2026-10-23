@@ -18,15 +18,17 @@ type adminHandler func(w http.ResponseWriter, r *http.Request, p *principal)
 
 func (s *Server) adminRoutes(mux *http.ServeMux) {
 	h := func(pattern string, f adminHandler) {
-		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+		mux.Handle(pattern, s.withClientAddr(s.cfg.Routes.Admin, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p, ok := s.adminPrincipal(w, r)
 			if !ok {
 				return
 			}
 			f(w, r, p)
-		})
+		})))
 	}
 	h("GET /admin/whoami", s.whoami)
+	h("GET /admin/allowlists", s.listAllowlists)
+	h("PUT /admin/allowlists", s.setAllowlist)
 	h("GET /admin/orgs", s.listOrgs)
 	h("POST /admin/orgs", s.createOrg)
 	h("DELETE /admin/orgs/{name}", s.disableOrg)

@@ -10,6 +10,7 @@ package config
 import (
 	"fmt"
 	"io"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -58,7 +59,25 @@ type Config struct {
 	// Vault, when set, is the OpenBao/Vault server that vault: secret
 	// references are read from.
 	Vault *Vault
+	// TrustedProxies are the reverse proxies whose X-Forwarded-For
+	// entries are believed; the client address is the rightmost entry not
+	// in this list. Empty: X-Forwarded-For is ignored.
+	TrustedProxies []netip.Prefix
+	// Routes restricts route classes to client networks.
+	Routes Routes
 }
+
+// Routes holds the network restrictions per route class. A nil list means
+// any address, except for Metrics and Healthz, which default to loopback.
+type Routes struct {
+	Inference []netip.Prefix
+	Admin     []netip.Prefix
+	Metrics   []netip.Prefix
+	Healthz   []netip.Prefix
+}
+
+// LoopbackOnly is the default for /metrics and /healthz.
+var LoopbackOnly = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")}
 
 // Vault reaches an OpenBao or HashiCorp Vault KV v2 engine.
 type Vault struct {
