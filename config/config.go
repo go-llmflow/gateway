@@ -71,6 +71,17 @@ type Config struct {
 	// SSO, when set, logs administrators in with OpenID Connect
 	// (authorization code + PKCE) and keeps them in a session cookie.
 	SSO *SSO
+	// KeyRotation, when set, enables scheduled key rotation, delivering
+	// new secrets to OpenBao/Vault under VaultPrefix/<team>/.
+	KeyRotation *KeyRotation
+}
+
+// KeyRotation configures scheduled key rotation.
+type KeyRotation struct {
+	// VaultPrefix is "mount/path": a key of team T may only be delivered
+	// to vault:VaultPrefix/T/…#field.
+	VaultPrefix   string
+	CheckInterval time.Duration
 }
 
 // SSO configures the admin login at one OpenID provider.

@@ -131,7 +131,15 @@ func serveCmd() *cobra.Command {
 				return err
 			}
 			defer st.Close()
-			srv, err := gateway.New(c, st, secrets, gateway.WithLogger(log))
+			opts := []gateway.Option{gateway.WithLogger(log)}
+			if c.KeyRotation != nil {
+				res, err := resolver(c)
+				if err != nil {
+					return err
+				}
+				opts = append(opts, gateway.WithSecretWriter(res))
+			}
+			srv, err := gateway.New(c, st, secrets, opts...)
 			if err != nil {
 				return err
 			}

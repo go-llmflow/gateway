@@ -47,6 +47,7 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	h("POST /admin/keys", s.createKey)
 	h("DELETE /admin/keys/{id}", s.revokeKey)
 	h("POST /admin/keys/{id}/rotate", s.rotateKey)
+	h("PUT /admin/keys/{id}/rotation", s.setKeyRotation)
 	h("GET /admin/users", s.listUsers)
 	h("POST /admin/users", s.createUser)
 	h("DELETE /admin/users/{name}", s.disableUser)
@@ -526,7 +527,7 @@ func (s *Server) rotateKey(w http.ResponseWriter, r *http.Request, p *principal)
 	}
 	secret, hash := store.NewKeySecret()
 	now := s.now()
-	if err := s.st.RotateKey(r.Context(), k.ID, hash, now.Add(grace), now); err != nil {
+	if err := s.st.RotateKey(r.Context(), k.ID, hash, [32]byte{}, now.Add(grace), now); err != nil {
 		storeError(w, err)
 		return
 	}

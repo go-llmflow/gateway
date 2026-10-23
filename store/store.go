@@ -73,6 +73,8 @@ type Key struct {
 	PrevHash    [32]byte  `json:"-"`
 	PrevExpires time.Time `json:"prev_expires_at,omitzero"`
 	RotatedAt   time.Time `json:"rotated_at,omitzero"`
+	// Rotation is the key's rotation schedule, if any.
+	Rotation Rotation `json:"rotation,omitzero"`
 }
 
 // Matches reports whether h is the key's secret, or its previous secret
@@ -175,9 +177,17 @@ type Store interface {
 	RevokeKey(ctx context.Context, id string) error
 	// RotateKey gives a key a new secret hash. The current one becomes
 	// the previous secret, valid until prevExpires (a zero or past time
-	// drops it at once). ErrNotFound for an unknown or revoked key,
-	// ErrExists when the new hash is already some key's.
-	RotateKey(ctx context.Context, id string, newHash [32]byte, prevExpires, at time.Time) error
+	// drops it at once), and RotatedAt becomes at (zero: none). With a
+	// non-zero expect, the key's current hash must be expect (ErrConflict
+	// otherwise), so that two replicas cannot rotate one key twice.
+	// ErrNotFound for an unknown or revoked key, ErrExists when the new
+	// hash is already another key's, or this key's current one.
+	RotateKey(ctx context.Context, id string, newHash, expect [32]byte, prevExpires, at time.Time) error
+	// SetKeyRotation sets a key's rotation schedule (every 0: none).
+	SetKeyRotation(ctx context.Context, id string, r Rotation) error
+	// DueKeys lists the keys, not revoked, whose scheduled rotation is due
+	// at now: RotatedAt (or CreatedAt) + Every <= now.
+	DueKeys(ctx context.Context, now time.Time) ([]Key, error)
 	// KeyByHash returns the key whose current or previous hash is hash,
 	// revoked or not, with its Org filled in, or ErrNotFound. The caller
 	// must still check it with Key.Matches.

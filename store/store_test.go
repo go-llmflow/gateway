@@ -138,7 +138,8 @@ func contract(t *testing.T, s Store) {
 	// its ID; the old one only as the previous secret.
 	at := time.Now().UTC().Truncate(time.Microsecond)
 	_, h3 := NewKeySecret()
-	must(s.RotateKey(ctx, id2, h3, at.Add(time.Hour), at))
+	var none [32]byte
+	must(s.RotateKey(ctx, id2, h3, none, at.Add(time.Hour), at))
 	for _, hh := range [][32]byte{h2, h3} {
 		k, err := s.KeyByHash(ctx, hh)
 		must(err)
@@ -151,7 +152,7 @@ func contract(t *testing.T, s Store) {
 	}
 	// Without grace the old secrets are gone at once.
 	_, h4 := NewKeySecret()
-	must(s.RotateKey(ctx, id2, h4, time.Time{}, at))
+	must(s.RotateKey(ctx, id2, h4, none, time.Time{}, at))
 	for _, hh := range [][32]byte{h2, h3} {
 		if _, err := s.KeyByHash(ctx, hh); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("old secret after rotation without grace: %v", err)
@@ -160,16 +161,57 @@ func contract(t *testing.T, s Store) {
 	if k, err := s.KeyByHash(ctx, h4); err != nil || !k.PrevExpires.IsZero() {
 		t.Fatalf("rotated without grace: %+v %v", k, err)
 	}
-	if err := s.RotateKey(ctx, id2, h4, time.Time{}, at); !errors.Is(err, ErrExists) {
-		t.Fatalf("rotate to a taken hash: %v", err)
+	if err := s.RotateKey(ctx, id2, h4, none, time.Time{}, at); !errors.Is(err, ErrExists) {
+		t.Fatalf("rotate to the current hash: %v", err)
 	}
-	if err := s.RotateKey(ctx, id, HashSecret("r"), time.Time{}, at); !errors.Is(err, ErrNotFound) {
+	if err := s.RotateKey(ctx, id, HashSecret("r"), none, time.Time{}, at); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("rotate a revoked key: %v", err)
 	}
-	if err := s.RotateKey(ctx, "k_none", HashSecret("r"), time.Time{}, at); !errors.Is(err, ErrNotFound) {
+	if err := s.RotateKey(ctx, "k_none", HashSecret("r"), none, time.Time{}, at); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("rotate unknown: %v", err)
 	}
-	h2 = h4 // later checks use the current secret
+	// Conditional rotation: only from the expected current hash.
+	_, h5 := NewKeySecret()
+	if err := s.RotateKey(ctx, id2, h5, h3, at.Add(time.Hour), at); !errors.Is(err, ErrConflict) {
+		t.Fatalf("rotate from a stale hash: %v", err)
+	}
+	must(s.RotateKey(ctx, id2, h5, h4, at.Add(time.Hour), at))
+	// Undoing it: back to the previous hash, conditional on the new one,
+	// with no grace and no rotation time.
+	must(s.RotateKey(ctx, id2, h4, h5, time.Time{}, time.Time{}))
+	if k, err := s.KeyByHash(ctx, h4); err != nil || k.Hash != h4 || !k.PrevExpires.IsZero() || !k.RotatedAt.IsZero() {
+		t.Fatalf("undone rotation: %+v %v", k, err)
+	}
+	if _, err := s.KeyByHash(ctx, h5); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("undone secret still found: %v", err)
+	}
+	// Schedules: due when created (or rotated) + every <= now.
+	sched := Rotation{Every: Duration(time.Hour), Grace: Duration(time.Minute), Target: "vault:secret/keys/etabB/k#key"}
+	must(s.SetKeyRotation(ctx, id2, sched))
+	if err := s.SetKeyRotation(ctx, id, sched); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("schedule a revoked key: %v", err)
+	}
+	k2, err := s.GetKey(ctx, id2)
+	must(err)
+	if k2.Rotation != sched {
+		t.Fatalf("schedule %+v", k2.Rotation)
+	}
+	due, err := s.DueKeys(ctx, k2.CreatedAt.Add(59*time.Minute))
+	must(err)
+	if len(due) != 0 {
+		t.Fatalf("due too early: %+v", due)
+	}
+	due, err = s.DueKeys(ctx, k2.CreatedAt.Add(61*time.Minute))
+	must(err)
+	if len(due) != 1 || due[0].ID != id2 || due[0].Rotation != sched {
+		t.Fatalf("due: %+v", due)
+	}
+	must(s.RotateKey(ctx, id2, h5, h4, time.Time{}, k2.CreatedAt.Add(61*time.Minute)))
+	if due, _ = s.DueKeys(ctx, k2.CreatedAt.Add(90*time.Minute)); len(due) != 0 {
+		t.Fatalf("due again right after a rotation: %+v", due)
+	}
+	must(s.SetKeyRotation(ctx, id2, Rotation{}))
+	h2 = h5 // later checks use the current secret
 
 	teamB := BudgetKey{Kind: ScopeTeam, Name: "etabB"}
 	must(s.SetBudget(ctx, Budget{BudgetKey: teamB, Period: Month, MaxCost: 100}))

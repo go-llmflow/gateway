@@ -57,6 +57,14 @@ type fileHCL struct {
 	Routes               *routesHCL `hcl:"routes,block"`
 	JWT                  *jwtHCL    `hcl:"jwt,block"`
 	SSO                  *ssoHCL    `hcl:"sso,block"`
+	KeyRotation          *rotHCL    `hcl:"key_rotation,block"`
+}
+
+type rotHCL struct {
+	VaultPrefix        string    `hcl:"vault_prefix"`
+	VaultPrefixRange   hcl.Range `hcl:"vault_prefix,attr_value_range"`
+	CheckInterval      *string   `hcl:"check_interval,optional"`
+	CheckIntervalRange hcl.Range `hcl:"check_interval,attr_value_range"`
 }
 
 type ssoHCL struct {
@@ -768,6 +776,20 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			cs.Roles = append(cs.Roles, cr)
 		}
 		c.SSO = cs
+	}
+	if kr := raw.KeyRotation; kr != nil {
+		ck := &KeyRotation{VaultPrefix: strings.Trim(kr.VaultPrefix, "/"),
+			CheckInterval: v.dur(kr.CheckInterval, kr.CheckIntervalRange, "check_interval", time.Hour)}
+		if r, err := secret.Parse("vault:" + ck.VaultPrefix + "/t/k#f"); err != nil || !r.IsVault() {
+			v.errf(kr.VaultPrefixRange, "Invalid vault_prefix", "vault_prefix %q: want mount/path with [A-Za-z0-9._-] segments", kr.VaultPrefix)
+		}
+		if c.Vault == nil {
+			v.errf(kr.VaultPrefixRange, "Key rotation without vault block", "scheduled rotation delivers new secrets to OpenBao/Vault: add a vault block")
+		}
+		if ck.CheckInterval < time.Minute {
+			v.errf(kr.CheckIntervalRange, "Invalid check_interval", "check_interval %v: at least 1m", ck.CheckInterval)
+		}
+		c.KeyRotation = ck
 	}
 	// Every *_file attribute is a secret reference: a file, or a field of
 	// an OpenBao/Vault KV v2 secret (package secret).

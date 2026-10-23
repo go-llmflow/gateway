@@ -74,6 +74,8 @@ type Server struct {
 	jwtClient *http.Client
 	// sso holds the admin login client, sessions and logins in progress.
 	sso *ssoState
+	// secretWriter delivers secrets of scheduled key rotations.
+	secretWriter SecretWriter
 
 	cancel context.CancelFunc
 	bg     sync.WaitGroup
@@ -222,6 +224,13 @@ func (s *Server) Start(ctx context.Context) error {
 		defer s.bg.Done()
 		s.budget.loop(bctx, s.cfg.BudgetRefresh, func(err error) { s.log.Error("budget refresh failed", "err", err) })
 	}()
+	if s.cfg.KeyRotation != nil {
+		if s.secretWriter == nil {
+			return errors.New("gateway: key_rotation needs a secret writer (vault)")
+		}
+		s.bg.Add(1)
+		go func() { defer s.bg.Done(); s.rotationLoop(bctx) }()
+	}
 	return nil
 }
 
