@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"math"
+	"net"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -38,6 +40,8 @@ type fileHCL struct {
 	FairShare            *fairHCL   `hcl:"fairshare,block"`
 	Health               *healthHCL `hcl:"health,block"`
 	Orgs                 []orgHCL   `hcl:"org,block"`
+	Tags                 *tagsHCL   `hcl:"tags,block"`
+	Alerts               *alertsHCL `hcl:"alerts,block"`
 	Pools                []poolHCL  `hcl:"pool,block"`
 	Models               []modelHCL `hcl:"model,block"`
 }
@@ -87,6 +91,33 @@ type healthHCL struct {
 	CooldownRange hcl.Range `hcl:"cooldown,attr_value_range"`
 	Path          *string   `hcl:"path,optional"`
 	PathRange     hcl.Range `hcl:"path,attr_value_range"`
+}
+
+type tagsHCL struct {
+	Header       string    `hcl:"header"`
+	HeaderRange  hcl.Range `hcl:"header,attr_value_range"`
+	Allowed      []string  `hcl:"allowed"`
+	AllowedRange hcl.Range `hcl:"allowed,attr_value_range"`
+}
+
+type alertsHCL struct {
+	WebhookURL       *string   `hcl:"webhook_url,optional"`
+	WebhookURLRange  hcl.Range `hcl:"webhook_url,attr_value_range"`
+	WebhookTokenFile *string   `hcl:"webhook_token_file,optional"`
+	SMTP             *smtpHCL  `hcl:"smtp,block"`
+	DefRange         hcl.Range `hcl:",def_range"`
+}
+
+type smtpHCL struct {
+	Server       string    `hcl:"server"`
+	ServerRange  hcl.Range `hcl:"server,attr_value_range"`
+	From         string    `hcl:"from"`
+	FromRange    hcl.Range `hcl:"from,attr_value_range"`
+	To           []string  `hcl:"to"`
+	ToRange      hcl.Range `hcl:"to,attr_value_range"`
+	Username     *string   `hcl:"username,optional"`
+	PasswordFile *string   `hcl:"password_file,optional"`
+	DefRange     hcl.Range `hcl:",def_range"`
 }
 
 type orgHCL struct {
@@ -441,11 +472,73 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		}
 		c.ModelGroups = append(c.ModelGroups, g)
 	}
+	if t := raw.Tags; t != nil {
+		if !validHeaderName(t.Header) {
+			v.errf(t.HeaderRange, "Invalid header", "header = %q: want an HTTP header name such as \"X-Llmflow-Tags\"", t.Header)
+		}
+		if len(t.Allowed) == 0 || len(t.Allowed) > 1000 {
+			v.errf(t.AllowedRange, "Invalid tags", "allowed must list 1..1000 tags")
+		}
+		for _, tag := range t.Allowed {
+			if !ValidName(tag) {
+				v.errf(t.AllowedRange, "Invalid tag", "%q: want [A-Za-z0-9_.-]{1,64}", tag)
+			}
+		}
+		c.Tags = Tags{Header: t.Header, Allowed: t.Allowed}
+	}
+	if a := raw.Alerts; a != nil {
+		c.Alerts.WebhookURL = strOr(a.WebhookURL, "")
+		c.Alerts.WebhookTokenFile = strOr(a.WebhookTokenFile, "")
+		if c.Alerts.WebhookURL != "" {
+			if err := ValidateUpstream(c.Alerts.WebhookURL); err != nil {
+				v.errf(a.WebhookURLRange, "Invalid webhook_url", "%v", err)
+			}
+		}
+		if s := a.SMTP; s != nil {
+			if _, _, err := net.SplitHostPort(s.Server); err != nil {
+				v.errf(s.ServerRange, "Invalid SMTP server", "server = %q: want host:port", s.Server)
+			}
+			if _, err := mail.ParseAddress(s.From); err != nil || strings.ContainsAny(s.From, "\r\n") {
+				v.errf(s.FromRange, "Invalid address", "from = %q", s.From)
+			}
+			if len(s.To) == 0 {
+				v.errf(s.ToRange, "Invalid address", "to must list at least one address")
+			}
+			for _, to := range s.To {
+				if _, err := mail.ParseAddress(to); err != nil || strings.ContainsAny(to, "\r\n") {
+					v.errf(s.ToRange, "Invalid address", "to: %q", to)
+				}
+			}
+			c.Alerts.SMTP = &SMTP{Server: s.Server, From: s.From, To: s.To, Username: strOr(s.Username, ""), PasswordFile: strOr(s.PasswordFile, "")}
+			if (c.Alerts.SMTP.Username == "") != (c.Alerts.SMTP.PasswordFile == "") {
+				v.errf(s.DefRange, "Incomplete SMTP credentials", "username and password_file go together")
+			}
+		}
+		if c.Alerts.WebhookURL == "" && c.Alerts.SMTP == nil {
+			v.errf(a.DefRange, "Empty alerts block", "set webhook_url, an smtp block, or both")
+		}
+	}
+
 	if len(raw.Models) == 0 {
 		v.errf(hcl.Range{Filename: raw.MasterKeyFileRange.Filename, Start: hcl.InitialPos, End: hcl.InitialPos},
 			"No model", "at least one model block is required")
 	}
 	return c, v.diags
+}
+
+// validHeaderName accepts RFC 9110 token characters.
+func validHeaderName(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func f64(p *float64) float64 {

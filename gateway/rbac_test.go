@@ -71,8 +71,10 @@ func TestRBACScopes(t *testing.T) {
 		{"alice", "POST", "/admin/teams", `{"name":"etabA2","org":"etabA"}`, 201},
 		{"alice", "POST", "/admin/teams", `{"name":"x","org":"etabB"}`, 403},
 		{"alice", "DELETE", "/admin/teams/etabB", "", 403},
-		{"alice", "PUT", "/admin/budgets/etabA", `{"period":"day","max_cost":10}`, 200},
-		{"alice", "PUT", "/admin/budgets/etabB", `{"period":"day","max_cost":10}`, 403},
+		{"alice", "PUT", "/admin/budgets", `{"kind":"team","name":"etabA","period":"day","max_cost":10}`, 200},
+		{"alice", "PUT", "/admin/budgets", `{"kind":"team","name":"etabB","period":"day","max_cost":10}`, 403},
+		{"alice", "PUT", "/admin/budgets", `{"kind":"org","name":"etabA","period":"day","max_cost":10}`, 403},
+		{"alice", "PUT", "/admin/budgets", `{"kind":"tag","name":"eval","period":"day","max_cost":10}`, 403},
 		{"alice", "POST", "/admin/orgs", `{"name":"orgD"}`, 403},
 		{"alice", "DELETE", "/admin/orgs/etabA", "", 403},
 		{"alice", "POST", "/admin/users", `{"name":"newbie"}`, 201},
@@ -86,7 +88,8 @@ func TestRBACScopes(t *testing.T) {
 		{"tom", "POST", "/admin/teams/etabA/projects", `{"name":"eval"}`, 201},
 		{"tom", "POST", "/admin/teams/etabB/projects", `{"name":"eval"}`, 403},
 		{"tom", "POST", "/admin/teams", `{"name":"y","org":"etabA"}`, 403},
-		{"tom", "PUT", "/admin/budgets/etabA", `{"period":"day","max_cost":10}`, 403},
+		{"tom", "PUT", "/admin/budgets", `{"kind":"team","name":"etabA","period":"day","max_cost":10}`, 403},
+		{"tom", "PUT", "/admin/budgets", `{"kind":"project","name":"etabA/eval","period":"day","max_cost":3}`, 200},
 		{"tom", "POST", "/admin/keys", `{"team":"etabA","name":"service"}`, 201},
 		{"tom", "PUT", "/admin/users/vic/roles", `{"role":"viewer","team":"etabA"}`, 200},
 		{"tom", "PUT", "/admin/users/mia/roles", `{"role":"team_admin","team":"etabA"}`, 403},
@@ -99,7 +102,7 @@ func TestRBACScopes(t *testing.T) {
 		// viewer: reads, no writes
 		{"vic", "GET", "/admin/teams/etabA/projects", "", 200},
 		{"vic", "POST", "/admin/keys", `{"team":"etabA"}`, 403},
-		{"vic", "PUT", "/admin/budgets/etabA", `{"period":"day","max_cost":1}`, 403},
+		{"vic", "PUT", "/admin/budgets", `{"kind":"team","name":"etabA","period":"day","max_cost":1}`, 403},
 		// other organisation
 		{"eve", "GET", "/admin/teams/etabA/projects", "", 403},
 		{"eve", "POST", "/admin/keys", `{"team":"etabA"}`, 403},
@@ -127,8 +130,8 @@ func TestRBACScopes(t *testing.T) {
 	visible("pat", "/admin/orgs", `"name":"orgC"`, "")
 	visible("mia", "/admin/keys?team=etabA", `"owner":"mia"`, `"name":"service"`)
 	visible("vic", "/admin/keys?team=etabA", `"name":"service"`, "")
-	visible("alice", "/admin/budgets", `"team":"etabA"`, "")
-	visible("eve", "/admin/budgets", "", `"team":"etabA"`)
+	visible("alice", "/admin/budgets", `"name":"etabA"`, "")
+	visible("eve", "/admin/budgets", "", `"name":"etabA"`)
 	visible("alice", "/admin/fairshare", `"org":"etabA"`, `"org":"etabB"`)
 	visible("alice", "/admin/users", `"name":"tom"`, `"name":"eve"`)
 	visible("mia", "/admin/whoami", `"name":"mia"`, "")

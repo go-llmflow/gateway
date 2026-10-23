@@ -89,7 +89,7 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 	if err != nil {
 		return nil, fmt.Errorf("postgres: connect: %w", err)
 	}
-	for _, s := range []string{schema, usersSchema, modelsSchema} {
+	for _, s := range []string{schema, usersSchema, modelsSchema, budgetsSchema} {
 		if _, err := pool.Exec(ctx, s); err != nil {
 			pool.Close()
 			return nil, fmt.Errorf("postgres: schema: %w", err)
@@ -280,11 +280,11 @@ func (p *Postgres) CreateKey(ctx context.Context, k Key) error {
 		k.CreatedAt = time.Now().UTC()
 	}
 	tag, err := p.pool.Exec(ctx, `
-		INSERT INTO llmflow_keys (id, hash, team, project, name, rpm, tpm, max_inflight, created_at, owner)
-		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+		INSERT INTO llmflow_keys (id, hash, team, project, name, rpm, tpm, max_inflight, created_at, owner, tags)
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 		WHERE EXISTS (SELECT 1 FROM llmflow_teams WHERE name = $3 AND NOT disabled)
 		  AND ($4 = '' OR EXISTS (SELECT 1 FROM llmflow_projects WHERE team = $3 AND name = $4 AND NOT disabled))`,
-		k.ID, k.Hash[:], k.Team, k.Project, k.Name, k.RPM, k.TPM, k.MaxInFlight, k.CreatedAt, k.Owner)
+		k.ID, k.Hash[:], k.Team, k.Project, k.Name, k.RPM, k.TPM, k.MaxInFlight, k.CreatedAt, k.Owner, dedupSorted(k.Tags))
 	switch {
 	case uniqueViolation(err):
 		return ErrExists
@@ -298,15 +298,18 @@ func (p *Postgres) CreateKey(ctx context.Context, k Key) error {
 	return nil
 }
 
-const keyCols = `k.id, k.hash, coalesce(t.org, ''), k.team, k.project, k.owner, k.name, k.rpm, k.tpm, k.max_inflight, k.created_at, k.revoked`
+const keyCols = `k.id, k.hash, coalesce(t.org, ''), k.team, k.project, k.owner, k.tags, k.name, k.rpm, k.tpm, k.max_inflight, k.created_at, k.revoked`
 const keyFrom = ` FROM llmflow_keys k LEFT JOIN llmflow_teams t ON t.name = k.team `
 
 func scanKey(r pgx.Row) (Key, error) {
 	var k Key
 	var h []byte
-	err := r.Scan(&k.ID, &h, &k.Org, &k.Team, &k.Project, &k.Owner, &k.Name, &k.RPM, &k.TPM, &k.MaxInFlight, &k.CreatedAt, &k.Revoked)
+	err := r.Scan(&k.ID, &h, &k.Org, &k.Team, &k.Project, &k.Owner, &k.Tags, &k.Name, &k.RPM, &k.TPM, &k.MaxInFlight, &k.CreatedAt, &k.Revoked)
 	if err != nil {
 		return k, err
+	}
+	if len(k.Tags) == 0 {
+		k.Tags = nil
 	}
 	if len(h) != len(k.Hash) {
 		return k, fmt.Errorf("key %s: stored hash has %d bytes", k.ID, len(h))
@@ -343,65 +346,19 @@ func (p *Postgres) KeyByHash(ctx context.Context, h [32]byte) (Key, error) {
 	return k, err
 }
 
-func (p *Postgres) SetBudget(ctx context.Context, b Budget) error {
-	if err := ValidateBudget(b); err != nil {
-		return err
-	}
-	_, err := p.pool.Exec(ctx, `
-		INSERT INTO llmflow_budgets (team, period, max_cost) VALUES ($1, $2, $3)
-		ON CONFLICT (team) DO UPDATE SET period = EXCLUDED.period, max_cost = EXCLUDED.max_cost`,
-		b.Team, string(b.Period), b.MaxCost)
-	if fkViolation(err) {
-		return ErrNotFound
-	}
-	return err
-}
-
-func (p *Postgres) DeleteBudget(ctx context.Context, team string) error {
-	return affected(p.pool.Exec(ctx, `DELETE FROM llmflow_budgets WHERE team = $1`, team))
-}
-
-func (p *Postgres) Budgets(ctx context.Context) ([]Budget, error) {
-	rows, err := p.pool.Query(ctx, `SELECT team, period, max_cost FROM llmflow_budgets ORDER BY team`)
-	if err != nil {
-		return nil, err
-	}
-	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Budget, error) {
-		var b Budget
-		var period string
-		err := r.Scan(&b.Team, &period, &b.MaxCost)
-		b.Period = Period(period)
-		return b, err
-	})
-}
-
-func (p *Postgres) SpendSince(ctx context.Context, since time.Time) (map[string]float64, error) {
-	rows, err := p.pool.Query(ctx, `SELECT team, sum(cost) FROM llmflow_usage WHERE ts >= $1 GROUP BY team`, since)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]float64{}
-	for rows.Next() {
-		var team string
-		var cost float64
-		if err := rows.Scan(&team, &cost); err != nil {
-			return nil, err
-		}
-		out[team] = cost
-	}
-	return out, rows.Err()
-}
-
 var usageCols = []string{"ts", "org", "team", "project", "key_id", "model", "pool", "upstream", "prompt_tokens",
-	"completion_tokens", "cached_tokens", "cost", "latency_ms", "status", "priority", "borrowing", "stream", "estimated"}
+	"completion_tokens", "cached_tokens", "cost", "latency_ms", "status", "priority", "borrowing", "stream", "estimated", "tags"}
 
 // InsertRecords writes a batch with COPY.
 func (p *Postgres) InsertRecords(ctx context.Context, recs []Record) error {
 	rows := make([][]any, len(recs))
 	for i, r := range recs {
+		tags := r.Tags
+		if tags == nil {
+			tags = []string{}
+		}
 		rows[i] = []any{r.Time, r.Org, r.Team, r.Project, r.KeyID, r.Model, r.Pool, r.Upstream, r.PromptTokens,
-			r.CompletionTokens, r.CachedTokens, r.Cost, r.LatencyMS, r.Status, r.Priority, r.Borrowing, r.Stream, r.Estimated}
+			r.CompletionTokens, r.CachedTokens, r.Cost, r.LatencyMS, r.Status, r.Priority, r.Borrowing, r.Stream, r.Estimated, tags}
 	}
 	_, err := p.pool.CopyFrom(ctx, pgx.Identifier{"llmflow_usage"}, usageCols, pgx.CopyFromRows(rows))
 	return err

@@ -31,6 +31,9 @@ type Secrets struct {
 	UpstreamKeys map[string]string
 	// MetricsToken, when set, is required as a bearer token on /metrics.
 	MetricsToken string
+	// WebhookToken and SMTPPassword authenticate soft-budget alerts.
+	WebhookToken string
+	SMTPPassword string
 }
 
 // Server is the gateway.
@@ -53,6 +56,10 @@ type Server struct {
 	keys    *keyCache
 	// authFails limits failed authentications per client network.
 	authFails *failLimiter
+	// allowedTags is the request-tag allow-list; alerts sends soft-budget
+	// alerts (nil when no channel is configured).
+	allowedTags map[string]bool
+	alerts      *alerter
 
 	cancel context.CancelFunc
 	bg     sync.WaitGroup
@@ -139,9 +146,18 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 	}
 	s.limiter = newLimiter(s.now)
 	s.budget = newBudgeter(st, cfg.BudgetRefresh, cfg.FailClosed(), s.now)
+	s.allowedTags = map[string]bool{}
+	for _, t := range cfg.Tags.Allowed {
+		s.allowedTags[t] = true
+	}
+	if cfg.Alerts.WebhookURL != "" || cfg.Alerts.SMTP != nil {
+		s.alerts = newAlerter(cfg.Alerts, secrets.WebhookToken, secrets.SMTPPassword, func(msg string, args ...any) { s.log.Error(msg, args...) })
+	}
+	s.budget.onSoft = s.onSoftLimit
 	s.rec = newRecorder(st, cfg.Store.QueueSize, cfg.Store.BatchSize, func(err error) {
 		s.log.Error("accounting write failed", "err", err)
 	})
+	s.rec.done = s.budget.persisted
 	s.keys = newKeyCache(cfg.KeyCacheTTL, s.now)
 	s.authFails = newFailLimiter(cfg.AuthFailuresPerMinute, s.now)
 	return s, nil
@@ -316,6 +332,7 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 	s.met.denied.write(w)
 	s.met.retries.write(w)
 	s.met.estimated.write(w)
+	s.met.softAlerts.write(w)
 	s.met.overhead.write(w)
 	s.met.upstreamT.write(w)
 	writeHeader(w, "llmflow_accounting_dropped_total", "Usage records dropped because the queue was full.", "counter")

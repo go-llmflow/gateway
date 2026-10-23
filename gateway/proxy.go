@@ -76,7 +76,13 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			s.log.Info("client fields stripped", "key", key.ID, "team", key.Team, "fields", strings.Join(req.Stripped, ","))
 		}
 
-		switch err := s.budget.check(key.Team); {
+		tags, err := s.requestTags(r, key)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
+		scope := reqScope{org: key.Org, team: key.Team, project: key.Project, key: key.ID, model: g.cfg.Name, tags: tags}
+		switch err := s.budget.check(scope); {
 		case errors.Is(err, errBudgetExceeded):
 			s.met.denied.add(1, key.Team, "budget")
 			apiError(w, http.StatusTooManyRequests, "insufficient_quota", err.Error())
@@ -129,7 +135,7 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 					// No price configured: rank fair share by tokens.
 					consumed = float64(usage.PromptTokens+usage.CompletionTokens) / 1e6
 				}
-				s.budget.add(key.Team, cost)
+				s.budget.add(scope, cost)
 				s.met.tokens.add(float64(usage.PromptTokens), key.Team, g.cfg.Name, "prompt")
 				s.met.tokens.add(float64(usage.CompletionTokens), key.Team, g.cfg.Name, "completion")
 				s.met.tokens.add(float64(usage.Cached()), key.Team, g.cfg.Name, "cached")
@@ -156,7 +162,7 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 				Upstream: upstreamLabel, PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
 				CachedTokens: usage.Cached(), Cost: cost, LatencyMS: float64(end.Sub(t0).Microseconds()) / 1000,
 				Status: status, Priority: grant.Priority, Borrowing: grant.Borrowing, Stream: req.Stream,
-				Estimated: estimated,
+				Estimated: estimated, Tags: tags,
 			})
 		}()
 

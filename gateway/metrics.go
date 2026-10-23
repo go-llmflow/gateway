@@ -159,23 +159,25 @@ func formatFloat(v float64) string {
 
 // metrics groups the gateway's instruments.
 type metrics struct {
-	requests  *counterVec // team, model, code
-	tokens    *counterVec // team, model, kind
-	gpuHours  *counterVec // team, pool
-	denied    *counterVec // team, reason
-	retries   *counterVec // group
-	estimated *counterVec // team, model
-	overhead  *histogram
-	upstreamT *histogram
+	requests   *counterVec // team, model, code
+	tokens     *counterVec // team, model, kind
+	gpuHours   *counterVec // team, pool
+	denied     *counterVec // team, reason
+	retries    *counterVec // group
+	estimated  *counterVec // team, model
+	softAlerts *counterVec // kind
+	overhead   *histogram
+	upstreamT  *histogram
 }
 
 func newMetrics() *metrics {
 	return &metrics{
-		requests: newCounterVec("llmflow_requests_total", "Requests handled, by team, model and HTTP status.", "team", "model", "code"),
-		tokens:   newCounterVec("llmflow_tokens_total", "Tokens reported by vLLM usage, by kind (prompt, completion, cached).", "team", "model", "kind"),
-		gpuHours: newCounterVec("llmflow_gpu_hours_total", "Internal cost charged, in GPU-hours.", "team", "pool"),
-		denied:   newCounterVec("llmflow_denied_total", "Requests refused before reaching vLLM, by reason.", "team", "reason"),
-		retries:  newCounterVec("llmflow_upstream_retries_total", "Retries to another upstream before the first byte.", "group"),
+		requests:   newCounterVec("llmflow_requests_total", "Requests handled, by team, model and HTTP status.", "team", "model", "code"),
+		tokens:     newCounterVec("llmflow_tokens_total", "Tokens reported by vLLM usage, by kind (prompt, completion, cached).", "team", "model", "kind"),
+		gpuHours:   newCounterVec("llmflow_gpu_hours_total", "Internal cost charged, in GPU-hours.", "team", "pool"),
+		denied:     newCounterVec("llmflow_denied_total", "Requests refused before reaching vLLM, by reason.", "team", "reason"),
+		retries:    newCounterVec("llmflow_upstream_retries_total", "Retries to another upstream before the first byte.", "group"),
+		softAlerts: newCounterVec("llmflow_soft_budget_alerts_total", "Soft-budget limits reached (one per budget and period).", "kind"),
 		estimated: newCounterVec("llmflow_usage_estimated_total",
 			"Requests charged with estimated tokens because vLLM's usage never reached the gateway (client gone first).", "team", "model"),
 		overhead: newHistogram("llmflow_overhead_seconds", "Time spent in the gateway itself (request handling before the upstream call plus response handling after it).",

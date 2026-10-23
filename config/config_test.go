@@ -98,6 +98,21 @@ limits {
   max_response_bytes = 4096
 }
 fairshare { half_life = "1h" }
+tags {
+  header  = "X-Llmflow-Tags"
+  allowed = ["eval", "prod"]
+}
+alerts {
+  webhook_url        = "https://hooks.example.org/llmflow"
+  webhook_token_file = "/hook"
+  smtp {
+    server        = "smtp.example.org:587"
+    from          = "llmflow@example.org"
+    to            = ["ops@example.org", "Admin <admin@example.org>"]
+    username      = "llmflow"
+    password_file = "/smtp"
+  }
+}
 health {
   interval = "1s"
   timeout = "2s"
@@ -110,7 +125,9 @@ health {
 	}
 	if c.Retries != 0 || c.FailClosed() || c.Store.Kind != "postgres" || c.Limits.MaxRequestDuration != 5*time.Second ||
 		c.Health.Path != "/ping" || c.FairShare.HalfLife != time.Hour || !c.ExposeOverheadHdr || c.MetricsTokenFile != "/m" ||
-		c.Limits.MaxResponseBytes != 4096 || c.Store.BatchSize != 5 || c.KeyCacheTTL != time.Minute {
+		c.Limits.MaxResponseBytes != 4096 || c.Store.BatchSize != 5 || c.KeyCacheTTL != time.Minute ||
+		c.Tags.Header != "X-Llmflow-Tags" || len(c.Tags.Allowed) != 2 || c.Alerts.SMTP == nil || len(c.Alerts.SMTP.To) != 2 ||
+		c.Alerts.WebhookTokenFile != "/hook" || c.Alerts.SMTP.PasswordFile != "/smtp" {
 		t.Fatalf("%+v", c)
 	}
 }
@@ -144,6 +161,15 @@ func TestParseRejectsWithPosition(t *testing.T) {
 		{"duplicate upstream", strings.Replace(valid, `"gpu02"`, `"gpu01"`, 1), "Duplicate upstream"},
 		{"no model", "master_key_file = \"/m\"\n", "No model"},
 		{"retries", valid + "retries = 11\n", "Invalid retries"},
+		{"tag header", valid + "tags {\n  header = \"X Tags\"\n  allowed = [\"a\"]\n}\n", "Invalid header"},
+		{"tag name", valid + "tags {\n  header = \"X-Tags\"\n  allowed = [\"a b\"]\n}\n", "Invalid tag"},
+		{"no tags", valid + "tags {\n  header = \"X-Tags\"\n  allowed = []\n}\n", "Invalid tags"},
+		{"empty alerts", valid + "alerts {}\n", "Empty alerts block"},
+		{"webhook url", valid + "alerts { webhook_url = \"ftp://x\" }\n", "Invalid webhook_url"},
+		{"smtp server", valid + "alerts {\n  smtp {\n    server = \"nohost\"\n    from = \"a@b.c\"\n    to = [\"d@e.f\"]\n  }\n}\n", "Invalid SMTP server"},
+		{"smtp from", valid + "alerts {\n  smtp {\n    server = \"h:25\"\n    from = \"not an address\"\n    to = [\"d@e.f\"]\n  }\n}\n", "Invalid address"},
+		{"smtp to", valid + "alerts {\n  smtp {\n    server = \"h:25\"\n    from = \"a@b.c\"\n    to = []\n  }\n}\n", "Invalid address"},
+		{"smtp creds", valid + "alerts {\n  smtp {\n    server = \"h:25\"\n    from = \"a@b.c\"\n    to = [\"d@e.f\"]\n    username = \"u\"\n  }\n}\n", "Incomplete SMTP credentials"},
 		{"body limit", valid + "limits { max_body_bytes = 0 }\n", "Invalid body limit"},
 		{"syntax", valid + "team {", "test.hcl:"},
 		{"string for number", strings.Replace(valid, "capacity = 256", `capacity = "many"`, 1), "Unsuitable value type"},

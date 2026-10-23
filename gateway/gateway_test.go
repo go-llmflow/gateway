@@ -69,6 +69,11 @@ model "llama-batch" {
   pool           = "b300"
   class          = "batch"
   key_file       = "/unused"
+  cost {
+    input_per_mtok  = 1000
+    output_per_mtok = 5000
+    cached_per_mtok = 100
+  }
 `+ups.String()+`}
 `), "test.hcl")
 	if err != nil {
@@ -292,7 +297,7 @@ func TestBudgetDeniesAndFailsClosed(t *testing.T) {
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 	e := newEnv(t, testConfig(up.URL()), WithClock(clock))
 	_, key := e.newKey("etabA")
-	resp := e.do("PUT", "/admin/budgets/etabA", master, `{"period":"day","max_cost":0.2}`)
+	resp := e.do("PUT", "/admin/budgets", master, `{"kind":"team","name":"etabA","period":"day","max_cost":0.2}`)
 	if out := readAll(t, resp); resp.StatusCode != 200 {
 		t.Fatalf("set budget: %d %s", resp.StatusCode, out)
 	}
@@ -333,7 +338,7 @@ func TestBudgetDeniesAndFailsClosed(t *testing.T) {
 	if err := e.srv.budget.refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	resp = e.do("DELETE", "/admin/budgets/etabA", master, "")
+	resp = e.do("DELETE", "/admin/budgets?kind=team&name=etabA", master, "")
 	readAll(t, resp)
 	resp = e.do("POST", "/v1/chat/completions", key, chat)
 	if readAll(t, resp); resp.StatusCode != 200 {
@@ -562,17 +567,30 @@ func TestAdminAPI(t *testing.T) {
 			t.Fatalf("bad key %s: %d", bad, resp.StatusCode)
 		}
 	}
-	for _, bad := range []string{`{"period":"year","max_cost":1}`, `{"period":"day","max_cost":-1}`} {
-		resp := e.do("PUT", "/admin/budgets/etabC", master, bad)
+	for _, bad := range []string{
+		`{"kind":"team","name":"etabC","period":"year","max_cost":1}`,
+		`{"kind":"team","name":"etabC","period":"day","max_cost":-1}`,
+		`{"kind":"user","name":"etabC","period":"day","max_cost":1}`,
+	} {
+		resp := e.do("PUT", "/admin/budgets", master, bad)
 		if readAll(t, resp); resp.StatusCode != 400 {
 			t.Fatalf("bad budget %s: %d", bad, resp.StatusCode)
 		}
 	}
-	resp = e.do("PUT", "/admin/budgets/nobody", master, `{"period":"day","max_cost":1}`)
-	if readAll(t, resp); resp.StatusCode != 404 {
-		t.Fatalf("budget for unknown team: %d", resp.StatusCode)
+	for _, missing := range []string{
+		`{"kind":"team","name":"nobody","period":"day","max_cost":1}`,
+		`{"kind":"org","name":"nobody","period":"day","max_cost":1}`,
+		`{"kind":"project","name":"etabC/nope","period":"day","max_cost":1}`,
+		`{"kind":"project","name":"noslash","period":"day","max_cost":1}`,
+		`{"kind":"key","name":"k_none","period":"day","max_cost":1}`,
+		`{"kind":"team","name":"etabC","model":"nope","period":"day","max_cost":1}`,
+	} {
+		resp = e.do("PUT", "/admin/budgets", master, missing)
+		if readAll(t, resp); resp.StatusCode != 404 {
+			t.Fatalf("budget for unknown target %s: %d", missing, resp.StatusCode)
+		}
 	}
-	resp = e.do("PUT", "/admin/budgets/etabC", master, `{"period":"month","max_cost":100}`)
+	resp = e.do("PUT", "/admin/budgets", master, `{"kind":"team","name":"etabC","period":"month","max_cost":100}`)
 	readAll(t, resp)
 	if out := readAll(t, e.do("GET", "/admin/budgets", master, "")); !strings.Contains(out, `"period":"month"`) {
 		t.Fatalf("budgets %s", out)
@@ -614,7 +632,7 @@ func TestAdminAPI(t *testing.T) {
 	if resp := e.do("GET", "/v1/models", secret, ""); readAll(t, resp) == "" || resp.StatusCode != 401 {
 		t.Fatalf("key of disabled org %d", resp.StatusCode)
 	}
-	for _, p := range []string{"/admin/keys/k_none", "/admin/teams/nobody", "/admin/budgets/nobody", "/admin/orgs/nobody", "/admin/teams/etabA/projects/nobody"} {
+	for _, p := range []string{"/admin/keys/k_none", "/admin/teams/nobody", "/admin/budgets?kind=team&name=nobody", "/admin/orgs/nobody", "/admin/teams/etabA/projects/nobody"} {
 		resp := e.do("DELETE", p, master, "")
 		if readAll(t, resp); resp.StatusCode != 404 {
 			t.Fatalf("DELETE %s: %d", p, resp.StatusCode)

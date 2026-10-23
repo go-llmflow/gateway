@@ -170,6 +170,8 @@ model "llama-3.3-70b" {
 | `store { … }` | `kind` (`memory` / `postgres`), `dsn_file`, `fail_closed` (default true), `queue_size`, `batch_size` |
 | `fairshare { half_life }` | usage decay half-life (default `"168h"`) |
 | `limits { … }`, `health { … }` | body and header size, timeouts, maximum request duration and response size; health-check interval, timeout, cooldown, path |
+| `tags { header, allowed }` | the request header clients may tag requests with, and the allowed tags |
+| `alerts { webhook_url, webhook_token_file, smtp { server, from, to, username, password_file } }` | where soft-budget alerts go |
 
 HCL design decisions:
 
@@ -204,6 +206,40 @@ completion × output) / 10⁶` GPU-hours, from the `usage` vLLM reports. For
 streams the gateway sets `stream_options.include_usage` and removes the usage
 chunk again if the client did not ask for it.
 
+## Budgets
+
+A budget caps the GPU-hours of one scope per `day`, `week` or `month` (UTC
+calendar), optionally for one model group only:
+
+```json
+{"kind": "team", "name": "lab-nlp", "model": "", "period": "month", "max_cost": 500, "soft_limit": 400}
+```
+
+| `kind` | `name` | set by |
+|---|---|---|
+| `org` | organisation | proxy admin |
+| `team` | team | the organisation's admins |
+| `project` | `team/project` | the team's admins |
+| `key` | key ID (with `model`: a per-model budget of that key) | the team's admins |
+| `tag` | tag | proxy admin |
+
+A request is refused (429, the message names the scope) as soon as one
+budget it falls under is exhausted: its organisation, team, project, key and
+every tag it carries, each for all models and for its own model. Tags come
+from the key (`"tags"` at key creation) and from one allow-listed request
+header (`tags { header, allowed }` in the configuration; at most 8, others
+refused with 400).
+
+`soft_limit` triggers one alert per budget and period, to a webhook (JSON
+POST, optional bearer token from a file) and/or by e-mail through an SMTP
+relay (`alerts { … }`); the "sent" mark is stored with the budget, so several
+gateways and restarts send it once. A temporary increase raises the limit
+until its expiry, whatever the period; setting the budget again keeps it.
+
+Spend is the stored records of the period plus what this gateway charged
+since: a request counts as pending until its record is stored, then as
+written until the next refresh query includes it.
+
 ## Admin API
 
 Admin routes take `Authorization: Bearer <master key>` or a user's admin
@@ -236,7 +272,8 @@ authentications count in the per-network failure limit.
 | `GET` / `POST /admin/teams/{team}/projects`, `DELETE /admin/teams/{team}/projects/{name}` | list, create `{"name"}`, disable (revokes its keys) |
 | `GET` / `PUT /admin/teams/{team}/models` | the model groups the team may use: `{"models":[…]}` (team admin and above; empty list = every configured model). A hidden model answers 404 like an unknown one and is left out of `/v1/models` |
 | `GET /admin/keys?team=`, `POST /admin/keys`, `DELETE /admin/keys/{id}` | list (no secrets), create `{"team","project","name","rpm","tpm","max_inflight"}` (`project` optional; the `llmf-…` secret is returned once), revoke |
-| `GET /admin/budgets`, `PUT` / `DELETE /admin/budgets/{team}` | `{"period": "day" \| "week" \| "month", "max_cost": <GPU-hours>}`, periods aligned on UTC |
+| `GET /admin/budgets`, `PUT /admin/budgets`, `DELETE /admin/budgets?kind=&name=&model=` | budgets on any scope (see below), listed with their current `spent` and effective `limit` |
+| `POST /admin/budgets/increase` | temporary increase `{"kind","name","model","amount","expires_at"}` (RFC 3339, within a year) |
 | `GET /admin/usage.csv?from=&to=` | per team and pool: requests, tokens, GPU-hours (same as `llmflow-gateway export`) |
 | `GET /admin/fairshare` | reservations, in-flight, borrowing, usage, LF and rank per pool and organisation |
 
@@ -345,8 +382,8 @@ Open defects (v0.1.0):
    live in memory: run one gateway replica per pool. Several replicas would each
    grant the full reservation.
 2. **Budgets lag.** Cost is known when a request ends, so a burst of long
-   requests can overspend by what is in flight; records still queued when the
-   budget state is refreshed are uncounted until the next refresh.
+   requests can overspend by what is in flight. Several gateways only see each
+   other's spend at their next refresh.
 3. **Priorities are fixed at admission.** A borrowing request already queued in
    vLLM keeps its priority when its team drops back under its reservation (vLLM
    has no API to re-prioritise a queued request).

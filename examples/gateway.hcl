@@ -64,6 +64,26 @@ org "etabB" {
   team "lab-chem" {}
 }
 
+# Request tags (in addition to the tags set on keys), for tag budgets and
+# reports. Only the listed tags are accepted.
+tags {
+  header  = "X-Llmflow-Tags"
+  allowed = ["eval", "prod", "teaching"]
+}
+
+# Soft-budget alerts: once per budget and period.
+alerts {
+  webhook_url        = "https://alerts.example.org/llmflow"
+  webhook_token_file = "/etc/llmflow/webhook.token"
+  smtp {
+    server        = "smtp.example.org:587"
+    from          = "llmflow@example.org"
+    to            = ["hpc-ops@example.org"]
+    username      = "llmflow"
+    password_file = "/etc/llmflow/smtp.password"
+  }
+}
+
 # C: sustainable concurrency of the pool, measured externally (the number of
 # concurrent requests vLLM keeps running without preempting).
 pool "b300" { capacity = 256 }
