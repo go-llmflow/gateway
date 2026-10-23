@@ -29,7 +29,7 @@ func RootCmd() *cobra.Command {
 		Short:        "OpenAI-compatible gateway with fair-share scheduling in front of vLLM",
 		SilenceUsage: true,
 	}
-	root.AddCommand(versionCmd(), checkConfigCmd())
+	root.AddCommand(versionCmd(), checkConfigCmd(), serveCmd(), exportCmd())
 	return root
 }
 
