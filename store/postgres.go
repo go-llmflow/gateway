@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS llmflow_usage (
 	stream            boolean NOT NULL
 );
 CREATE INDEX IF NOT EXISTS llmflow_usage_ts_team ON llmflow_usage (ts, team);
+ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS estimated boolean NOT NULL DEFAULT false;
 `
 
 // OpenPostgres connects and creates the schema if needed. The error never
@@ -256,14 +257,14 @@ func (p *Postgres) SpendSince(ctx context.Context, since time.Time) (map[string]
 }
 
 var usageCols = []string{"ts", "team", "key_id", "model", "pool", "upstream", "prompt_tokens",
-	"completion_tokens", "cached_tokens", "cost", "latency_ms", "status", "priority", "borrowing", "stream"}
+	"completion_tokens", "cached_tokens", "cost", "latency_ms", "status", "priority", "borrowing", "stream", "estimated"}
 
 // InsertRecords writes a batch with COPY.
 func (p *Postgres) InsertRecords(ctx context.Context, recs []Record) error {
 	rows := make([][]any, len(recs))
 	for i, r := range recs {
 		rows[i] = []any{r.Time, r.Team, r.KeyID, r.Model, r.Pool, r.Upstream, r.PromptTokens,
-			r.CompletionTokens, r.CachedTokens, r.Cost, r.LatencyMS, r.Status, r.Priority, r.Borrowing, r.Stream}
+			r.CompletionTokens, r.CachedTokens, r.Cost, r.LatencyMS, r.Status, r.Priority, r.Borrowing, r.Stream, r.Estimated}
 	}
 	_, err := p.pool.CopyFrom(ctx, pgx.Identifier{"llmflow_usage"}, usageCols, pgx.CopyFromRows(rows))
 	return err
@@ -271,7 +272,8 @@ func (p *Postgres) InsertRecords(ctx context.Context, recs []Record) error {
 
 func (p *Postgres) Usage(ctx context.Context, from, to time.Time) ([]TeamUsage, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT team, pool, count(*), sum(prompt_tokens), sum(completion_tokens), sum(cached_tokens), sum(cost)
+		SELECT team, pool, count(*), sum(prompt_tokens), sum(completion_tokens), sum(cached_tokens), sum(cost),
+		       count(*) FILTER (WHERE estimated)
 		FROM llmflow_usage WHERE ts >= $1 AND ts < $2
 		GROUP BY team, pool ORDER BY team, pool`, from, to)
 	if err != nil {
@@ -279,7 +281,7 @@ func (p *Postgres) Usage(ctx context.Context, from, to time.Time) ([]TeamUsage, 
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (TeamUsage, error) {
 		var u TeamUsage
-		err := r.Scan(&u.Team, &u.Pool, &u.Requests, &u.PromptTokens, &u.CompletionTokens, &u.CachedTokens, &u.GPUHours)
+		err := r.Scan(&u.Team, &u.Pool, &u.Requests, &u.PromptTokens, &u.CompletionTokens, &u.CachedTokens, &u.GPUHours, &u.EstimatedRequests)
 		return u, err
 	})
 }

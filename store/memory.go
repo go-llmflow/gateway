@@ -249,6 +249,9 @@ func (m *Memory) Usage(_ context.Context, from, to time.Time) ([]TeamUsage, erro
 		u.CompletionTokens += r.CompletionTokens
 		u.CachedTokens += r.CachedTokens
 		u.GPUHours += r.Cost
+		if r.Estimated {
+			u.EstimatedRequests++
+		}
 	}
 	out := make([]TeamUsage, 0, len(agg))
 	for _, u := range agg {

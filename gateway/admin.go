@@ -223,13 +223,13 @@ func (s *Server) usageCSV(w http.ResponseWriter, r *http.Request) {
 // names are restricted to [A-Za-z0-9_.-].
 func WriteUsageCSV(w io.Writer, from, to time.Time, us []store.TeamUsage) error {
 	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{"from", "to", "team", "pool", "requests", "prompt_tokens", "completion_tokens", "cached_tokens", "gpu_hours"})
+	_ = cw.Write([]string{"from", "to", "team", "pool", "requests", "prompt_tokens", "completion_tokens", "cached_tokens", "gpu_hours", "estimated_requests"})
 	for _, u := range us {
 		_ = cw.Write([]string{
 			from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339), u.Team, u.Pool,
 			strconv.FormatInt(u.Requests, 10), strconv.FormatInt(u.PromptTokens, 10),
 			strconv.FormatInt(u.CompletionTokens, 10), strconv.FormatInt(u.CachedTokens, 10),
-			strconv.FormatFloat(u.GPUHours, 'f', 6, 64),
+			strconv.FormatFloat(u.GPUHours, 'f', 6, 64), strconv.FormatInt(u.EstimatedRequests, 10),
 		})
 	}
 	cw.Flush()
