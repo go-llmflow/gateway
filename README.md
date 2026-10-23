@@ -12,8 +12,14 @@ Built for a 4-node HGX B300 cluster (32 GPUs) shared by two institutions, A
 - each institution is guaranteed its share of the pool's concurrency;
 - capacity the other institution does not use is borrowed, never left idle;
 - when the owner comes back, vLLM preempts the borrowers, not the owner;
-- virtual keys (hashed), budgets in GPU-hours, per-key RPM / TPM / in-flight limits;
-- per-request accounting in PostgreSQL and a CSV export to reconcile with Slurm `sreport`;
+- organisation → team → project → key, like the Slurm account tree, with
+  delegated administration (proxy, organisation and team admins, members,
+  viewers) and team-managed model lists;
+- virtual keys (hashed), per-key RPM / TPM / in-flight limits, budgets in
+  GPU-hours on every scope (organisation, team, project, key, tag, per model),
+  temporary increases and soft-budget alerts (webhook, e-mail);
+- per-request accounting in PostgreSQL and spend reports (JSON, CSV, and
+  pipe-delimited like `sreport --parsable2`) to reconcile with Slurm;
 - Prometheus metrics; streaming pass-through without buffering.
 
 ```sh
@@ -324,16 +330,19 @@ accounting and metrics all on the path), and reports latency percentiles:
 go test -run '^$' -bench Overhead -cpu 1 -benchtime 20000x ./gateway
 ```
 
-v0.1.0, 2026-10-23, Apple M4 Max, `-cpu 1`, 5 runs × 20 000 interleaved
-pairs, 1-minute load 7.8–8.1 (ranges are min–max over the runs):
+Apple M4 Max, `-cpu 1`, 5 runs × 20 000 interleaved pairs each (ranges are
+min–max over the runs):
 
-| | p50 | p99 |
+| | v0.1.0 (load 7.8–8.1) | v0.2.0 (load 6.3–7.5) |
 |---|---|---|
-| direct to the fake upstream | 37.1–37.8 µs | 102.2–105.8 µs |
-| through the gateway | 92.0–93.1 µs | 233.5–239.9 µs |
-| **added by the gateway** | **54.9–55.3 µs** | **131.2–134.2 µs** |
+| direct to the fake upstream, p50 / p99 | 37.1–37.8 / 102.2–105.8 µs | 35.2–36.6 / 88.4–113.8 µs |
+| through the gateway, p50 / p99 | 92.0–93.1 / 233.5–239.9 µs | 88.3–90.7 / 226.9–242.2 µs |
+| **added by the gateway, p50** | **54.9–55.3 µs** | **53.2–54.5 µs** |
+| **added by the gateway, p99** | **131.2–134.2 µs** | **128.4–143.9 µs** |
 
-An earlier run at load 15–16 gave the same added latency (54.1–55.1 µs p50).
+The v0.2.0 path adds the organisation hierarchy, team model lists, budget
+checks on every scope and tags; the added latency did not move. An earlier
+v0.1.0 run at load 15–16 gave 54.1–55.1 µs p50.
 LiteLLM's own overhead header read 3.2–4.9 ms on the same kind of upstream,
 about 60–90 times the gateway's added p50. The two numbers are not measured
 the same way (LiteLLM's is self-reported per request, ours is the end-to-end
@@ -379,7 +388,7 @@ Enforced:
   service container, fuzz smoke, `govulncheck`, `CGO_ENABLED=0` cross-builds
   for linux/amd64 and linux/arm64.
 
-Open defects (v0.1.0):
+Open defects (v0.2.0):
 
 1. **State is per process.** In-flight counts, rate limits and the key cache
    live in memory: run one gateway replica per pool. Several replicas would each
@@ -388,7 +397,9 @@ Open defects (v0.1.0):
    requests can overspend by what is in flight. Several gateways only see each
    other's spend at their next refresh.
 3. **Priorities are fixed at admission.** A borrowing request already queued in
-   vLLM keeps its priority when its team drops back under its reservation (vLLM
+   vLLM keeps its priority when its organisation drops back under its
+   reservation; teams inside an organisation share its reservation without
+   sub-shares of their own (vLLM
    has no API to re-prioritise a queued request).
 4. **Aborted requests are charged with an estimate.** vLLM's usage chunk comes
    last; when the client leaves before it (or before a non-streaming answer),
@@ -400,10 +411,16 @@ Open defects (v0.1.0):
 5. **Shared prefix cache.** Institutions share vLLM's prefix cache, a timing
    side channel between them; the gateway does not set vLLM's `cache_salt` yet.
 6. **Accounting can drop records** when the queue is full or a batch write fails
-   twice; both are counted in metrics, and budgets still see the cost in memory.
+   twice; both are counted in metrics; budgets count the cost until the next
+   refresh only.
 7. No TLS termination in the gateway (put it behind a TLS proxy); the admin API
    shares the client listener; `/v1/responses` is not proxied.
 8. `C` is static configuration; the gateway does not measure or adapt it.
+9. **Admin principals are read from the store on every admin request** (no
+   cache): fine for admin traffic, but the admin API fails with the store.
+   Role changes therefore apply at once.
+10. **Soft-budget alerts are sent once and not retried**: a webhook or SMTP
+    failure is logged, and the period is already marked as alerted.
 
 ## Development
 
