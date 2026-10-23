@@ -51,7 +51,7 @@ func TestValidKeysSurviveMissSpray(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := testConfig("http://127.0.0.1:1")
-	srv, err := New(cfg, cs, Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg)})
+	srv, err := New(cfg, cs, Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg), CacheSaltKey: testSaltKey})
 	if err != nil {
 		t.Fatal(err)
 	}

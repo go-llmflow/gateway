@@ -63,7 +63,7 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 				return "", errUnknownModel
 			}
 			return g.cfg.UpstreamModel, nil
-		})
+		}, s.isolation(key))
 		switch {
 		case errors.Is(err, errUnknownModel):
 			apiError(w, http.StatusNotFound, "model_not_found", "the model does not exist")

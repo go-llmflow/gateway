@@ -185,7 +185,7 @@ func TestSoftBudgetAlertsOncePerPeriod(t *testing.T) {
 	cfg := testConfig(up.URL())
 	cfg.Alerts = config.Alerts{WebhookURL: hook.URL, SMTP: &config.SMTP{Server: "relay.example.org:25", From: "llmflow@example.org", To: []string{"ops@example.org"}}}
 	st := store.NewMemory()
-	srv, err := New(cfg, st, Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg), WebhookToken: "hook-secret"})
+	srv, err := New(cfg, st, Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg), WebhookToken: "hook-secret", CacheSaltKey: testSaltKey})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -21,6 +21,7 @@ import (
 const (
 	master      = "master-secret-for-tests"
 	internalKey = "internal-vllm-key"
+	testSaltKey = "cache-salt-key-for-tests-0123456789abcdef"
 )
 
 type env struct {
@@ -38,6 +39,7 @@ func testConfig(upstreams ...string) *config.Config {
 	}
 	c, err := config.Parse([]byte(`
 master_key_file = "/unused"
+cache_salt_key_file = "/unused"
 budget_refresh  = "1h"
 key_cache_ttl   = "1h"
 health {
@@ -94,7 +96,7 @@ func testKeys(cfg *config.Config) map[string]string {
 func newEnv(t *testing.T, cfg *config.Config, opts ...Option) *env {
 	t.Helper()
 	st := store.NewMemory()
-	srv, err := New(cfg, st, Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg)}, opts...)
+	srv, err := New(cfg, st, Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg), CacheSaltKey: testSaltKey}, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -711,7 +713,7 @@ func TestMetricsTokenAndFormat(t *testing.T) {
 	up := newFakeVLLM(t)
 	cfg := testConfig(up.URL())
 	st := store.NewMemory()
-	srv, err := New(cfg, st, Secrets{MasterKey: master, MetricsToken: "mt", UpstreamKeys: testKeys(cfg)})
+	srv, err := New(cfg, st, Secrets{MasterKey: master, MetricsToken: "mt", UpstreamKeys: testKeys(cfg), CacheSaltKey: testSaltKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -738,7 +740,7 @@ func TestMetricsTokenAndFormat(t *testing.T) {
 	if _, err := New(cfg, st, Secrets{}); err == nil {
 		t.Fatal("empty master key accepted")
 	}
-	if _, err := New(cfg, st, Secrets{MasterKey: "m"}); err == nil {
+	if _, err := New(cfg, st, Secrets{MasterKey: "m", CacheSaltKey: testSaltKey}); err == nil {
 		t.Fatal("missing upstream key accepted")
 	}
 }

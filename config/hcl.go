@@ -33,6 +33,9 @@ type fileHCL struct {
 	ShutdownGrace        *string    `hcl:"shutdown_grace,optional"`
 	ShutdownGraceRange   hcl.Range  `hcl:"shutdown_grace,attr_value_range"`
 	ExposeOverheadHeader *bool      `hcl:"expose_overhead_header,optional"`
+	CacheIsolation       *string    `hcl:"cache_isolation,optional"`
+	CacheIsolationRange  hcl.Range  `hcl:"cache_isolation,attr_value_range"`
+	CacheSaltKeyFile     *string    `hcl:"cache_salt_key_file,optional"`
 	AuthFailures         *int       `hcl:"auth_failures_per_minute,optional"`
 	AuthFailuresRange    hcl.Range  `hcl:"auth_failures_per_minute,attr_value_range"`
 	Store                *storeHCL  `hcl:"store,block"`
@@ -270,6 +273,22 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	}
 	if c.MasterKeyFile == "" {
 		v.errf(raw.MasterKeyFileRange, "Missing master key file", "master_key_file must name a file")
+	}
+	c.CacheIsolation = strOr(raw.CacheIsolation, "org")
+	c.CacheSaltKeyFile = strOr(raw.CacheSaltKeyFile, "")
+	switch c.CacheIsolation {
+	case "org", "team", "key":
+		if c.CacheSaltKeyFile == "" {
+			r := raw.CacheIsolationRange
+			if raw.CacheIsolation == nil {
+				r = raw.MasterKeyFileRange
+			}
+			v.errf(r, "Missing cache salt key", "cache_isolation = %q needs cache_salt_key_file (a file holding a random secret): "+
+				"without it tenants share vLLM's prefix cache, a timing side channel", c.CacheIsolation)
+		}
+	case "none":
+	default:
+		v.errf(raw.CacheIsolationRange, "Invalid cache isolation", "cache_isolation = %q: want \"org\", \"team\", \"key\" or \"none\"", c.CacheIsolation)
 	}
 	c.AuthFailuresPerMinute = DefaultAuthFailuresPerMinute
 	if raw.AuthFailures != nil {

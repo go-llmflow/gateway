@@ -41,6 +41,7 @@ model "llama-batch" {
     key_file = "/etc/llmflow/vllm.key"
   }
 }
+cache_salt_key_file = "/etc/llmflow/cache-salt.key"
 `
 
 func parse(src string) (*Config, error) { return Parse([]byte(src), "test.hcl") }
@@ -68,6 +69,14 @@ func TestParseValid(t *testing.T) {
 	}
 	if kf := c.KeyFiles(); len(kf) != 2 {
 		t.Fatalf("key files %v", kf)
+	}
+	if c.CacheIsolation != "org" || c.CacheSaltKeyFile != "/etc/llmflow/cache-salt.key" {
+		t.Fatalf("cache isolation %q %q", c.CacheIsolation, c.CacheSaltKeyFile)
+	}
+	// "none" (one tenant) needs no key.
+	c, err = parse(strings.Replace(valid, `cache_salt_key_file = "/etc/llmflow/cache-salt.key"`, `cache_isolation = "none"`, 1))
+	if err != nil || c.CacheIsolation != "none" {
+		t.Fatalf("none: %v", err)
 	}
 }
 
@@ -161,6 +170,9 @@ func TestParseRejectsWithPosition(t *testing.T) {
 		{"duplicate upstream", strings.Replace(valid, `"gpu02"`, `"gpu01"`, 1), "Duplicate upstream"},
 		{"no model", "master_key_file = \"/m\"\n", "No model"},
 		{"retries", valid + "retries = 11\n", "Invalid retries"},
+		{"no cache salt key", strings.Replace(valid, `cache_salt_key_file = "/etc/llmflow/cache-salt.key"`, "", 1), "Missing cache salt key"},
+		{"no cache salt key for key scope", strings.Replace(valid, `cache_salt_key_file = "/etc/llmflow/cache-salt.key"`, `cache_isolation = "key"`, 1), "test.hcl:33:19: Missing cache salt key"},
+		{"bad cache isolation", valid + `cache_isolation = "user"` + "\n", "Invalid cache isolation"},
 		{"tag header", valid + "tags {\n  header = \"X Tags\"\n  allowed = [\"a\"]\n}\n", "Invalid header"},
 		{"tag name", valid + "tags {\n  header = \"X-Tags\"\n  allowed = [\"a b\"]\n}\n", "Invalid tag"},
 		{"no tags", valid + "tags {\n  header = \"X-Tags\"\n  allowed = []\n}\n", "Invalid tags"},

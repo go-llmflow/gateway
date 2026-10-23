@@ -33,6 +33,23 @@ var StrippedFields = []string{
 	"kv_transfer_params",
 	"ec_transfer_params",
 	"vllm_xargs",
+	// The prefix-cache salt is the gateway's: a client salt would let a
+	// caller join another tenant's cache (vLLM security guide: prefix-cache
+	// reuse is a timing side channel, CVE-2025-46570).
+	"cache_salt",
+}
+
+// Isolation is the per-tenant cache scoping the gateway applies (vLLM
+// security guide: "a gateway that authenticates callers and scopes
+// client-supplied cache identifiers" — cache_salt and multimodal uuids —
+// per tenant).
+type Isolation struct {
+	// CacheSalt, when not empty, is set as the body's cache_salt.
+	CacheSalt string
+	// ScopeUUID, when not nil, replaces every multimodal "uuid" of the
+	// message content parts by a tenant-scoped value, so two tenants
+	// presenting the same uuid never share a media cache entry.
+	ScopeUUID func(uuid string) string
 }
 
 // Request describes a rewritten request.
@@ -61,7 +78,7 @@ var (
 // stream_options.include_usage. The body is re-encoded from its parsed
 // form, so duplicate keys and escaped key spellings ("priority")
 // cannot survive: what vLLM parses is exactly what the gateway checked.
-func Rewrite(body []byte, resolve func(model string) (string, error)) ([]byte, Request, error) {
+func Rewrite(body []byte, resolve func(model string) (string, error), iso Isolation) ([]byte, Request, error) {
 	var req Request
 	var m map[string]json.RawMessage
 	dec := json.NewDecoder(bytes.NewReader(body))
@@ -90,6 +107,19 @@ func Rewrite(body []byte, resolve func(model string) (string, error)) ([]byte, R
 		if _, ok := m[f]; ok {
 			delete(m, f)
 			req.Stripped = append(req.Stripped, f)
+		}
+	}
+	if iso.CacheSalt != "" {
+		salt, _ := json.Marshal(iso.CacheSalt)
+		m["cache_salt"] = salt
+	}
+	if iso.ScopeUUID != nil {
+		if raw, ok := m["messages"]; ok {
+			scoped, err := scopeUUIDs(raw, iso.ScopeUUID)
+			if err != nil {
+				return nil, req, err
+			}
+			m["messages"] = scoped
 		}
 	}
 
@@ -138,3 +168,53 @@ func Rewrite(body []byte, resolve func(model string) (string, error)) ([]byte, R
 }
 
 func isNull(raw json.RawMessage) bool { return bytes.Equal(bytes.TrimSpace(raw), []byte("null")) }
+
+// ErrBadUUID reports a multimodal uuid that is not a string.
+var ErrBadUUID = errors.New(`a content part "uuid" must be a string`)
+
+// scopeUUIDs rewrites messages[].content[].uuid through scope. Messages
+// and parts are re-encoded from their parsed form, like the body.
+func scopeUUIDs(raw json.RawMessage, scope func(string) string) (json.RawMessage, error) {
+	var msgs []json.RawMessage
+	if err := json.Unmarshal(raw, &msgs); err != nil {
+		return raw, nil // not an array: vLLM will reject it; nothing to scope
+	}
+	changed := false
+	for i, mr := range msgs {
+		var msg map[string]json.RawMessage
+		if err := json.Unmarshal(mr, &msg); err != nil || msg == nil {
+			continue
+		}
+		var parts []json.RawMessage
+		if err := json.Unmarshal(msg["content"], &parts); err != nil {
+			continue // string content carries no uuid
+		}
+		partChanged := false
+		for j, pr := range parts {
+			var part map[string]json.RawMessage
+			if err := json.Unmarshal(pr, &part); err != nil || part == nil {
+				continue
+			}
+			u, ok := part["uuid"]
+			if !ok || isNull(u) {
+				continue
+			}
+			var s string
+			if err := json.Unmarshal(u, &s); err != nil {
+				return nil, ErrBadUUID
+			}
+			part["uuid"], _ = json.Marshal(scope(s))
+			parts[j], _ = json.Marshal(part)
+			partChanged = true
+		}
+		if partChanged {
+			msg["content"], _ = json.Marshal(parts)
+			msgs[i], _ = json.Marshal(msg)
+			changed = true
+		}
+	}
+	if !changed {
+		return raw, nil
+	}
+	return json.Marshal(msgs)
+}

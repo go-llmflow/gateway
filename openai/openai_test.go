@@ -27,9 +27,9 @@ func decode(t testing.TB, b []byte) map[string]any {
 
 func TestRewriteStripsClientPriority(t *testing.T) {
 	in := `{"model":"llama","priority":-100,"extra_body":{"priority":0},"request_id":"x",` +
-		`"kv_transfer_params":{"remote_host":"10.0.0.9"},"ec_transfer_params":{},"vllm_xargs":{"a":1},` +
+		`"kv_transfer_params":{"remote_host":"10.0.0.9"},"ec_transfer_params":{},"vllm_xargs":{"a":1},"cache_salt":"guess",` +
 		`"priority":-5,"messages":[{"role":"user","content":"hi"}],"max_tokens":64}`
-	out, req, err := Rewrite([]byte(in), resolveAll)
+	out, req, err := Rewrite([]byte(in), resolveAll, Isolation{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestRewriteStripsClientPriority(t *testing.T) {
 }
 
 func TestRewriteStreamUsage(t *testing.T) {
-	out, req, err := Rewrite([]byte(`{"model":"m","stream":true,"stream_options":{"continuous_usage_stats":false}}`), resolveAll)
+	out, req, err := Rewrite([]byte(`{"model":"m","stream":true,"stream_options":{"continuous_usage_stats":false}}`), resolveAll, Isolation{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,11 +59,11 @@ func TestRewriteStreamUsage(t *testing.T) {
 	if so["include_usage"] != true || so["continuous_usage_stats"] != false || req.ClientWantsUsage || !req.Stream {
 		t.Fatalf("%v %+v", so, req)
 	}
-	_, req, err = Rewrite([]byte(`{"model":"m","stream":true,"stream_options":{"include_usage":true},"max_completion_tokens":5,"max_tokens":9}`), resolveAll)
+	_, req, err = Rewrite([]byte(`{"model":"m","stream":true,"stream_options":{"include_usage":true},"max_completion_tokens":5,"max_tokens":9}`), resolveAll, Isolation{})
 	if err != nil || !req.ClientWantsUsage || req.MaxTokens != 5 {
 		t.Fatalf("%+v %v", req, err)
 	}
-	out, _, err = Rewrite([]byte(`{"model":"m","stream":false,"stream_options":null}`), resolveAll)
+	out, _, err = Rewrite([]byte(`{"model":"m","stream":false,"stream_options":null}`), resolveAll, Isolation{})
 	if err != nil || bytes.Contains(out, []byte("include_usage")) {
 		t.Fatalf("non-stream got include_usage: %s %v", out, err)
 	}
@@ -76,10 +76,43 @@ func TestRewriteRejects(t *testing.T) {
 		`{"model":"m","stream":true,"stream_options":[]}`,
 		`{"model":"m","stream":true,"stream_options":{"include_usage":"y"}}`,
 		`{"model":"unknown"}`,
+		`{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","uuid":7}]}]}`,
 	} {
-		if out, _, err := Rewrite([]byte(in), resolveAll); err == nil {
+		iso := Isolation{ScopeUUID: func(s string) string { return "S:" + s }}
+		if out, _, err := Rewrite([]byte(in), resolveAll, iso); err == nil {
 			t.Errorf("accepted %q -> %s", in, out)
 		}
+	}
+}
+
+// The gateway's salt replaces any client salt, and multimodal uuids are
+// scoped, wherever they sit in the content parts.
+func TestRewriteCacheIsolation(t *testing.T) {
+	in := `{"model":"m","cache_salt":"other-tenant","cache_salt":"again","messages":[` +
+		`{"role":"system","content":"plain text"},` +
+		`{"role":"user","content":[{"type":"text","text":"x"},{"type":"image_url","image_url":{"url":"http://i"},"uuid":"img-1"},` +
+		`{"type":"input_audio","uuid":null},{"type":"video_url","video_url":null,"uuid":"vid-2"}]}]}`
+	iso := Isolation{CacheSalt: "SALT", ScopeUUID: func(s string) string { return "S:" + s }}
+	out, req, err := Rewrite([]byte(in), resolveAll, iso)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decode(t, out)
+	if m["cache_salt"] != "SALT" || bytes.Contains(out, []byte("other-tenant")) || bytes.Contains(out, []byte("again")) {
+		t.Fatalf("salt: %s", out)
+	}
+	if !bytes.Contains(out, []byte(`"uuid":"S:img-1"`)) || !bytes.Contains(out, []byte(`"uuid":"S:vid-2"`)) ||
+		!bytes.Contains(out, []byte(`"uuid":null`)) || len(req.Stripped) != 1 {
+		t.Fatalf("uuids: %s %v", out, req.Stripped)
+	}
+	// Without isolation the client salt is still removed and nothing is set.
+	out, _, err = Rewrite([]byte(in), resolveAll, Isolation{})
+	if err != nil || bytes.Contains(out, []byte("cache_salt")) || !bytes.Contains(out, []byte(`"uuid":"img-1"`)) {
+		t.Fatalf("no isolation: %s %v", out, err)
+	}
+	// Messages that are not an array are left to vLLM to reject.
+	if _, _, err := Rewrite([]byte(`{"model":"m","messages":"x"}`), resolveAll, iso); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -90,18 +123,38 @@ func FuzzRewrite(f *testing.F) {
 		`{"model":"m","priority":1,"priority":2}`,
 		`{"model":"m","priority":3,"extra_body":{"priority":0}}`,
 		`{"model":"m","messages":[{"role":"user","content":"\u0000"}]}`,
+		`{"model":"m","cache_salt":"x","messages":[{"role":"user","content":[{"type":"image_url","uuid":"u"}]}]}`,
 	} {
 		f.Add([]byte(s))
 	}
+	iso := Isolation{CacheSalt: "SALT", ScopeUUID: func(s string) string { return "S:" + s }}
 	f.Fuzz(func(t *testing.T, in []byte) {
-		out, req, err := Rewrite(in, resolveAll)
+		out, req, err := Rewrite(in, resolveAll, iso)
 		if err != nil {
 			return
 		}
 		m := decode(t, out)
 		for _, k := range StrippedFields {
-			if _, ok := m[k]; ok {
+			if _, ok := m[k]; ok && k != "cache_salt" {
 				t.Fatalf("%s survived in %s", k, out)
+			}
+		}
+		if m["cache_salt"] != "SALT" {
+			t.Fatalf("cache_salt %v in %s", m["cache_salt"], out)
+		}
+		// Every multimodal uuid in the content parts is scoped.
+		if msgs, ok := m["messages"].([]any); ok {
+			for _, mm := range msgs {
+				msg, _ := mm.(map[string]any)
+				parts, _ := msg["content"].([]any)
+				for _, p := range parts {
+					part, _ := p.(map[string]any)
+					if u, ok := part["uuid"]; ok && u != nil {
+						if s, _ := u.(string); !strings.HasPrefix(s, "S:") {
+							t.Fatalf("unscoped uuid %v in %s", u, out)
+						}
+					}
+				}
 			}
 		}
 		if m["model"] != "up-"+req.Model {
@@ -114,7 +167,7 @@ func FuzzRewrite(f *testing.F) {
 			}
 		}
 		// Idempotent on its own output (modulo the model mapping).
-		out2, _, err := Rewrite(out, func(string) (string, error) { return "up-" + req.Model, nil })
+		out2, _, err := Rewrite(out, func(string) (string, error) { return "up-" + req.Model, nil }, Isolation{CacheSalt: "SALT"})
 		if err != nil || !bytes.Equal(out, out2) {
 			t.Fatalf("not idempotent: %v\n%s\n%s", err, out, out2)
 		}

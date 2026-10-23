@@ -20,6 +20,14 @@ expose_overhead_header = false
 # per minute before 429; 0 disables.
 auth_failures_per_minute = 60
 
+# Prefix-cache isolation (vLLM security guide: prefix-cache reuse is a timing
+# side channel between tenants). The gateway sets cache_salt on every request,
+# derived from this key and the tenant: "org" (default, one cache per
+# institution), "team", "key", or "none" (single tenant). Generate the key
+# once, e.g. 32 random bytes in base64, and keep it secret.
+cache_isolation     = "org"
+cache_salt_key_file = "/etc/llmflow/cache-salt.key"
+
 store {
   kind        = "postgres"            # or "memory" (state lost on restart)
   dsn_file    = "/etc/llmflow/pg.dsn" # e.g. postgres://llmflow@db:5432/llmflow?sslmode=verify-full

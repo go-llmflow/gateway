@@ -43,6 +43,11 @@ type Config struct {
 	BudgetRefresh     time.Duration
 	KeyCacheTTL       time.Duration
 	ExposeOverheadHdr bool
+	// CacheIsolation is the tenant scope of vLLM's prefix cache: "org"
+	// (default), "team", "key" or "none". CacheSaltKeyFile holds the HMAC
+	// key the per-scope cache_salt is derived from (required unless none).
+	CacheIsolation   string
+	CacheSaltKeyFile string
 	// Tags configures request tags; Alerts the soft-budget alert channels.
 	Tags   Tags
 	Alerts Alerts

@@ -31,6 +31,9 @@ type Secrets struct {
 	UpstreamKeys map[string]string
 	// MetricsToken, when set, is required as a bearer token on /metrics.
 	MetricsToken string
+	// CacheSaltKey is the HMAC key the per-tenant cache_salt values are
+	// derived from (at least 32 bytes; unused with cache_isolation none).
+	CacheSaltKey string
 	// WebhookToken and SMTPPassword authenticate soft-budget alerts.
 	WebhookToken string
 	SMTPPassword string
@@ -79,6 +82,9 @@ func WithLogger(l *slog.Logger) Option { return func(s *Server) { s.log = l } }
 func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*Server, error) {
 	if secrets.MasterKey == "" {
 		return nil, errors.New("gateway: empty master key")
+	}
+	if cfg.CacheIsolation != "none" && len(secrets.CacheSaltKey) < minCacheSaltKey {
+		return nil, fmt.Errorf("gateway: cache_isolation %q needs a cache salt key of at least %d bytes", cfg.CacheIsolation, minCacheSaltKey)
 	}
 	s := &Server{
 		cfg: cfg, st: st, secrets: secrets, now: time.Now,
