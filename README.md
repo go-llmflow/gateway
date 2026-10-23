@@ -138,7 +138,8 @@ See [`examples/gateway.hcl`](examples/gateway.hcl) (parsed by the test suite,
 so it stays valid):
 
 ```hcl
-master_key_file = "/etc/llmflow/master.key"
+master_key_file     = "/etc/llmflow/master.key"
+cache_salt_key_file = "/etc/llmflow/cache-salt.key" # per-institution prefix-cache salt
 
 org "etabA" {
   share = 0.8125
@@ -179,6 +180,7 @@ model "llama-3.3-70b" {
 | `fairshare { half_life }` | usage decay half-life (default `"168h"`) |
 | `limits { … }`, `health { … }` | body and header size, timeouts, maximum request duration and response size; health-check interval, timeout, cooldown, path |
 | `tags { header, allowed }` | the request header clients may tag requests with, and the allowed tags |
+| `cache_isolation`, `cache_salt_key_file` | prefix-cache tenant scope (`org` default, `team`, `key`, `none`) and the file holding the HMAC key (at least 32 bytes, required unless `none`); see Security |
 | `alerts { webhook_url, webhook_token_file, smtp { server, from, to, username, password_file } }` | where soft-budget alerts go |
 
 HCL design decisions:
@@ -360,6 +362,23 @@ Enforced:
   `X-Forwarded-*` never reach vLLM. Integration tests assert this against a
   recording fake vLLM; the rewrite and the SSE copier are fuzzed (`FuzzRewrite`,
   `FuzzCopySSE`, corpus in `openai/testdata/fuzz`, fuzz smoke in CI).
+- **Tenants do not share vLLM's prefix cache.** Prefix-cache reuse is a timing
+  side channel: a caller can test whether a guessed prompt prefix is cached
+  from the time to first token ([vLLM security guide](https://docs.vllm.ai/en/stable/usage/security/),
+  CVE-2025-46570). The gateway removes any client `cache_salt` and always sets
+  its own: `base64url(HMAC-SHA256(key, scope))`, 43 characters (256 bits), the
+  key read from `cache_salt_key_file`, the scope set by `cache_isolation`
+  (`org` by default, `team`, `key`, or `none` for a single tenant). vLLM mixes
+  the salt into the hash of the first KV block, and every later block hash
+  chains from it ([prefix caching design](https://docs.vllm.ai/en/stable/design/prefix_caching.html)),
+  so different scopes never share cached blocks. The salt is stable per scope
+  (a random salt per request would disable prefix caching); rotating the key
+  changes every salt and starts every tenant with a cold cache.
+  Multimodal `uuid` values of the message content parts are **scoped, not
+  stripped**, as the vLLM guide recommends: each becomes
+  `llmf-` + an HMAC of (scope, uuid), so a client keeps referring to media it
+  sent earlier, while the same uuid presented by two tenants names two
+  different cache entries.
 - **vLLM must only be reachable from the gateway**: its `--api-key` covers only
   `/v1`, `/v2` and `/inference`, and `/invocations` exposes the same inference
   without authentication (vLLM docs above). Firewall the vLLM ports.
@@ -408,8 +427,12 @@ Open defects (v0.2.0):
    record is flagged `estimated` (column in PostgreSQL and in the CSV export,
    metric `llmflow_usage_estimated_total`); the estimate undercounts tool-call
    and reasoning tokens.
-5. **Shared prefix cache.** Institutions share vLLM's prefix cache, a timing
-   side channel between them; the gateway does not set vLLM's `cache_salt` yet.
+5. **Prefix cache isolation is per scope, not absolute.** With the default
+   `cache_isolation = "org"`, users of the same institution share one prefix
+   cache and can still probe each other's prompts by timing; choose `team` or
+   `key` to narrow that, at the cost of less cache reuse. vLLM itself states
+   that `cache_salt` is "not an isolation boundary": tenants that need hard
+   isolation need their own vLLM instance.
 6. **Accounting can drop records** when the queue is full or a batch write fails
    twice; both are counted in metrics; budgets count the cost until the next
    refresh only.

@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"model\":\"m\",\"cache_salt\":\"a\",\"\\u0063ache_salt\":\"b\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"uuid\":\"u1\"},{\"type\":\"video_url\",\"video_url\":null,\"uuid\":\"u2\"},{\"uuid\":null}]},{\"role\":\"user\",\"content\":\"text\"}]}")

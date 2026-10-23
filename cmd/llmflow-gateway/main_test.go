@@ -39,8 +39,10 @@ func TestCheckConfig(t *testing.T) {
 	dir := t.TempDir()
 	mk := writeFile(t, dir, "master", "m-secret\n")
 	vk := writeFile(t, dir, "vllm", "v-secret\n")
+	sk := writeFile(t, dir, "salt", "0123456789abcdef0123456789abcdef-salt\n")
 	cfg := writeFile(t, dir, "c.hcl", `
 master_key_file = "`+mk+`"
+cache_salt_key_file = "`+sk+`"
 org "o" {
   share = 1
   team "a" {}

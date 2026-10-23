@@ -42,6 +42,11 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 			return s, fmt.Errorf("metrics_token_file: %w", err)
 		}
 	}
+	if c.CacheSaltKeyFile != "" {
+		if s.CacheSaltKey, err = config.ReadSecret(c.CacheSaltKeyFile); err != nil {
+			return s, fmt.Errorf("cache_salt_key_file: %w", err)
+		}
+	}
 	if f := c.Alerts.WebhookTokenFile; f != "" {
 		if s.WebhookToken, err = config.ReadSecret(f); err != nil {
 			return s, fmt.Errorf("alerts webhook_token_file: %w", err)

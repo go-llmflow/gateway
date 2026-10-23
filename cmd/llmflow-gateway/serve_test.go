@@ -23,9 +23,11 @@ func gatewayConfig(t *testing.T, extra string) string {
 	mk := writeFile(t, dir, "master", "m-secret\n")
 	vk := writeFile(t, dir, "vllm", "v-secret\n")
 	mt := writeFile(t, dir, "metrics", "mt\n")
+	sk := writeFile(t, dir, "salt", "0123456789abcdef0123456789abcdef-salt\n")
 	return writeFile(t, dir, "c.hcl", `
 listen             = "127.0.0.1:0"
 master_key_file    = "`+mk+`"
+cache_salt_key_file = "`+sk+`"
 metrics_token_file = "`+mt+`"
 org "o" {
   share = 1
