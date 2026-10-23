@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("master_key_file = file(\"/etc/shadow\")\nteam \"a\" { share = 0.5 + 0.5 }\nteam \"b\" { share = 1e-300 }\npool \"p\" { capacity = 1048577 }\nmodel \"m\" {\n  upstream_model = <<-EOT\n    org/m\n  EOT\n  upstream \"u\" { base_url = \"http://u:p@h\" }\n}\n")

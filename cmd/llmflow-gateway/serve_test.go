@@ -23,14 +23,19 @@ func gatewayConfig(t *testing.T, extra string) string {
 	mk := writeFile(t, dir, "master", "m-secret\n")
 	vk := writeFile(t, dir, "vllm", "v-secret\n")
 	mt := writeFile(t, dir, "metrics", "mt\n")
-	return writeFile(t, dir, "c.yaml", `
-listen: 127.0.0.1:0
-master_key_file: `+mk+`
-metrics_token_file: `+mt+`
-teams: [{name: a, share: 1}]
-pools: [{name: p, capacity: 4}]
-model_groups:
-  - {name: m, pool: p, upstreams: ["http://127.0.0.1:1"], api_key_file: `+vk+`}
+	return writeFile(t, dir, "c.hcl", `
+listen             = "127.0.0.1:0"
+master_key_file    = "`+mk+`"
+metrics_token_file = "`+mt+`"
+team "a" { share = 1 }
+pool "p" { capacity = 4 }
+model "m" {
+  pool = "p"
+  upstream "u" {
+    base_url = "http://127.0.0.1:1"
+    key_file = "`+vk+`"
+  }
+}
 `+extra)
 }
 
@@ -71,7 +76,7 @@ func TestServeErrors(t *testing.T) {
 	if _, err := run(t, "serve", "-c", "/nonexistent"); err == nil {
 		t.Fatal("missing config accepted")
 	}
-	cfg := gatewayConfig(t, "store: {kind: postgres, dsn_file: /nonexistent}\n")
+	cfg := gatewayConfig(t, "store {\n  kind = \"postgres\"\n  dsn_file = \"/nonexistent\"\n}\n")
 	if _, err := run(t, "serve", "-c", cfg); err == nil || !strings.Contains(err.Error(), "dsn_file") {
 		t.Fatalf("missing dsn file: %v", err)
 	}

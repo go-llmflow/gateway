@@ -32,46 +32,58 @@ type env struct {
 }
 
 func testConfig(upstreams ...string) *config.Config {
-	ups := `["` + strings.Join(upstreams, `","`) + `"]`
+	var ups strings.Builder
+	for i, u := range upstreams {
+		fmt.Fprintf(&ups, "  upstream \"u%d\" { base_url = %q }\n", i, u)
+	}
 	c, err := config.Parse([]byte(`
-master_key_file: /unused
-health: {interval: 1h, cooldown: 1h}
-budget_refresh: 1h
-key_cache_ttl: 1h
-limits: {max_body_bytes: 4096}
-teams:
-  - {name: etabA, share: 0.75}
-  - {name: etabB, share: 0.25}
-pools:
-  - {name: b300, capacity: 4}
-model_groups:
-  - name: llama
-    upstream_model: meta/llama
-    pool: b300
-    upstreams: ` + ups + `
-    api_key_file: /unused
-    cost: {input_per_mtok: 1000, output_per_mtok: 5000, cached_per_mtok: 100}
-  - name: llama-batch
-    upstream_model: meta/llama
-    pool: b300
-    class: batch
-    upstreams: ` + ups + `
-    api_key_file: /unused
-`))
+master_key_file = "/unused"
+budget_refresh  = "1h"
+key_cache_ttl   = "1h"
+health {
+  interval = "1h"
+  cooldown = "1h"
+}
+limits { max_body_bytes = 4096 }
+team "etabA" { share = 0.75 }
+team "etabB" { share = 0.25 }
+pool "b300" { capacity = 4 }
+model "llama" {
+  upstream_model = "meta/llama"
+  pool           = "b300"
+  key_file       = "/unused"
+  cost {
+    input_per_mtok  = 1000
+    output_per_mtok = 5000
+    cached_per_mtok = 100
+  }
+`+ups.String()+`}
+model "llama-batch" {
+  upstream_model = "meta/llama"
+  pool           = "b300"
+  class          = "batch"
+  key_file       = "/unused"
+`+ups.String()+`}
+`), "test.hcl")
 	if err != nil {
 		panic(err)
 	}
 	return c
 }
 
+// testKeys maps every key file of the configuration to the internal key.
+func testKeys(cfg *config.Config) map[string]string {
+	keys := map[string]string{}
+	for _, f := range cfg.KeyFiles() {
+		keys[f] = internalKey
+	}
+	return keys
+}
+
 func newEnv(t *testing.T, cfg *config.Config, opts ...Option) *env {
 	t.Helper()
 	st := store.NewMemory()
-	keys := map[string]string{}
-	for _, g := range cfg.ModelGroups {
-		keys[g.Name] = internalKey
-	}
-	srv, err := New(cfg, st, Secrets{MasterKey: master, UpstreamKeys: keys}, opts...)
+	srv, err := New(cfg, st, Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg)}, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +617,7 @@ func TestMetricsTokenAndFormat(t *testing.T) {
 	up := newFakeVLLM(t)
 	cfg := testConfig(up.URL())
 	st := store.NewMemory()
-	srv, err := New(cfg, st, Secrets{MasterKey: master, MetricsToken: "mt", UpstreamKeys: map[string]string{"llama": "k", "llama-batch": "k"}})
+	srv, err := New(cfg, st, Secrets{MasterKey: master, MetricsToken: "mt", UpstreamKeys: testKeys(cfg)})
 	if err != nil {
 		t.Fatal(err)
 	}

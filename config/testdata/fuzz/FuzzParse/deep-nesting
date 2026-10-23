@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("master_key_file = [[[[[[[[[[[[[[[[[[[[\"x\"]]]]]]]]]]]]]]]]]]]\nmodel \"m\" { cost { input_per_mtok = 1/0 } }\n")
