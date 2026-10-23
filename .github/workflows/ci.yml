@@ -35,6 +35,22 @@ jobs:
       - name: test
         run: go test -race -count=1 -coverprofile=cover.out ./...
 
+  fuzz:
+    name: fuzz smoke ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [FuzzRewrite, FuzzCopySSE]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+      - name: fuzz
+        run: go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=30s ./openai
+
   build:
     name: cross-build CGO_ENABLED=0 ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
