@@ -8,8 +8,8 @@ github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6N
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/go-authn/oidc v0.4.1 h1:G1tjLAswrPUvOraciHrb+vOYSSHdMuCKBryrHrLTWHo=
-github.com/go-authn/oidc v0.4.1/go.mod h1:d46Qe8EHpNA5hadeFlUUYMHCDkYzwwNAP6AYu9KdxYk=
+github.com/go-authn/oidc v0.4.2 h1:sTcoLgpH4jaNhkQ5MwkmTRLI1Iwi1cGPyGunkMnZqiQ=
+github.com/go-authn/oidc v0.4.2/go.mod h1:d46Qe8EHpNA5hadeFlUUYMHCDkYzwwNAP6AYu9KdxYk=
 github.com/go-authn/rp v0.1.1 h1:Ci7w4h2jngGk8qjShTehLcWVXmGigDjyI6zxxe0pLr0=
 github.com/go-authn/rp v0.1.1/go.mod h1:qM5qA1GxsYUlv0Y/wGcxDdk9tuUYKTNEn+3hJtp9YPI=
 github.com/go-authn/scim v0.1.0 h1:3X9+b5KHRjiefLcf4s6dZDYFkw0INgqGhZBzVmi08hc=
