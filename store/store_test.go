@@ -134,6 +134,43 @@ func contract(t *testing.T, s Store) {
 		t.Fatalf("revoke unknown: %v", err)
 	}
 
+	// Rotation with a grace period: both secrets find the key, which keeps
+	// its ID; the old one only as the previous secret.
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	_, h3 := NewKeySecret()
+	must(s.RotateKey(ctx, id2, h3, at.Add(time.Hour), at))
+	for _, hh := range [][32]byte{h2, h3} {
+		k, err := s.KeyByHash(ctx, hh)
+		must(err)
+		if k.ID != id2 || k.Hash != h3 || k.PrevHash != h2 || !k.PrevExpires.Equal(at.Add(time.Hour)) || !k.RotatedAt.Equal(at) {
+			t.Fatalf("rotated key %+v", k)
+		}
+		if !k.Matches(hh, at) || k.Matches(h2, at.Add(2*time.Hour)) || !k.Matches(h3, at.Add(2*time.Hour)) {
+			t.Fatal("Matches")
+		}
+	}
+	// Without grace the old secrets are gone at once.
+	_, h4 := NewKeySecret()
+	must(s.RotateKey(ctx, id2, h4, time.Time{}, at))
+	for _, hh := range [][32]byte{h2, h3} {
+		if _, err := s.KeyByHash(ctx, hh); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("old secret after rotation without grace: %v", err)
+		}
+	}
+	if k, err := s.KeyByHash(ctx, h4); err != nil || !k.PrevExpires.IsZero() {
+		t.Fatalf("rotated without grace: %+v %v", k, err)
+	}
+	if err := s.RotateKey(ctx, id2, h4, time.Time{}, at); !errors.Is(err, ErrExists) {
+		t.Fatalf("rotate to a taken hash: %v", err)
+	}
+	if err := s.RotateKey(ctx, id, HashSecret("r"), time.Time{}, at); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("rotate a revoked key: %v", err)
+	}
+	if err := s.RotateKey(ctx, "k_none", HashSecret("r"), time.Time{}, at); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("rotate unknown: %v", err)
+	}
+	h2 = h4 // later checks use the current secret
+
 	teamB := BudgetKey{Kind: ScopeTeam, Name: "etabB"}
 	must(s.SetBudget(ctx, Budget{BudgetKey: teamB, Period: Month, MaxCost: 100}))
 	must(s.SetBudget(ctx, Budget{BudgetKey: teamB, Period: Day, MaxCost: 5, SoftLimit: 4}))

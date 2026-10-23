@@ -46,6 +46,7 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	h("GET /admin/keys", s.listKeys)
 	h("POST /admin/keys", s.createKey)
 	h("DELETE /admin/keys/{id}", s.revokeKey)
+	h("POST /admin/keys/{id}/rotate", s.rotateKey)
 	h("GET /admin/users", s.listUsers)
 	h("POST /admin/users", s.createUser)
 	h("DELETE /admin/users/{name}", s.disableUser)
@@ -486,6 +487,62 @@ func (s *Server) revokeKey(w http.ResponseWriter, r *http.Request, p *principal)
 	}
 	s.keys.forget(func(c store.Key) bool { return c.ID == k.ID })
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// maxGracePeriod bounds how long a replaced secret may stay valid.
+const maxGracePeriod = 30 * 24 * time.Hour
+
+// rotateKey gives a key a new secret, returned once. The key keeps its ID,
+// so its budgets, limits, allowlists and reports continue. The old secret
+// stays valid for grace_period ("24h"; absent or "0s": revoked at once).
+func (s *Server) rotateKey(w http.ResponseWriter, r *http.Request, p *principal) {
+	var in struct {
+		GracePeriod string `json:"grace_period"`
+	}
+	if r.ContentLength != 0 && !readJSON(w, r, &in) {
+		return
+	}
+	var grace time.Duration
+	if in.GracePeriod != "" {
+		d, err := time.ParseDuration(in.GracePeriod)
+		if err != nil || d < 0 || d > maxGracePeriod {
+			apiError(w, http.StatusBadRequest, "invalid_request_error", "grace_period: a Go duration between 0s and 720h")
+			return
+		}
+		grace = d
+	}
+	k, err := s.st.GetKey(r.Context(), r.PathValue("id"))
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	t, ok := s.team(w, r, k.Team)
+	if !ok {
+		return
+	}
+	if !p.teamAdmin(t) && !(p.teamMember(t) && k.Owner != "" && k.Owner == p.name) {
+		forbidden(w)
+		return
+	}
+	secret, hash := store.NewKeySecret()
+	now := s.now()
+	if err := s.st.RotateKey(r.Context(), k.ID, hash, now.Add(grace), now); err != nil {
+		storeError(w, err)
+		return
+	}
+	s.keys.forget(func(c store.Key) bool { return c.ID == k.ID })
+	s.audit("key.rotated", "key", k.ID, "team", k.Team, "by", p.name, "grace_period", grace.String())
+	out := map[string]any{"id": k.ID, "key": secret}
+	if grace > 0 {
+		out["previous_expires_at"] = now.Add(grace).UTC()
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// audit logs an administrative event. (A tamper-evident audit log is M3;
+// until then the event goes to the server log with audit=true.)
+func (s *Server) audit(event string, args ...any) {
+	s.log.Info("audit: "+event, append([]any{"audit", true, "event", event}, args...)...)
 }
 
 // ---- users, tokens, roles ----
