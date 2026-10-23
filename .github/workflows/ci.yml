@@ -58,6 +58,8 @@ jobs:
           - { target: FuzzRewrite, pkg: ./openai }
           - { target: FuzzCopySSE, pkg: ./openai }
           - { target: FuzzParse, pkg: ./config }
+          - { target: FuzzRef, pkg: ./secret }
+          - { target: FuzzParseKV2, pkg: ./secret }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

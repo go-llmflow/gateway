@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-llmflow/gateway/secret"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/gohcl"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
@@ -47,6 +48,18 @@ type fileHCL struct {
 	Alerts               *alertsHCL `hcl:"alerts,block"`
 	Pools                []poolHCL  `hcl:"pool,block"`
 	Models               []modelHCL `hcl:"model,block"`
+	Vault                *vaultHCL  `hcl:"vault,block"`
+}
+
+type vaultHCL struct {
+	Address       string    `hcl:"address"`
+	AddressRange  hcl.Range `hcl:"address,attr_value_range"`
+	TokenFile     string    `hcl:"token_file"`
+	TokenRange    hcl.Range `hcl:"token_file,attr_value_range"`
+	CAFile        *string   `hcl:"ca_file,optional"`
+	Namespace     *string   `hcl:"namespace,optional"`
+	CacheTTL      *string   `hcl:"cache_ttl,optional"`
+	CacheTTLRange hcl.Range `hcl:"cache_ttl,attr_value_range"`
 }
 
 type storeHCL struct {
@@ -542,7 +555,49 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		v.errf(hcl.Range{Filename: raw.MasterKeyFileRange.Filename, Start: hcl.InitialPos, End: hcl.InitialPos},
 			"No model", "at least one model block is required")
 	}
+
+	if vb := raw.Vault; vb != nil {
+		c.Vault = &Vault{Address: vb.Address, TokenFile: vb.TokenFile, CAFile: strOr(vb.CAFile, ""), Namespace: strOr(vb.Namespace, "")}
+		if err := secret.ValidateAddress(vb.Address); err != nil {
+			v.errf(vb.AddressRange, "Invalid vault address", "%v", err)
+		}
+		if r, err := secret.Parse(vb.TokenFile); err != nil || r.IsVault() {
+			v.errf(vb.TokenRange, "Invalid vault token file", "token_file must be a file, not a vault reference")
+		}
+		c.Vault.CacheTTL = v.dur(vb.CacheTTL, vb.CacheTTLRange, "cache_ttl", 5*time.Minute)
+	}
+	// Every *_file attribute is a secret reference: a file, or a field of
+	// an OpenBao/Vault KV v2 secret (package secret).
+	for _, ref := range c.SecretRefs() {
+		r, err := secret.Parse(ref)
+		switch {
+		case err != nil:
+			v.errf(raw.MasterKeyFileRange, "Invalid secret reference", "%v", err)
+		case r.IsVault() && c.Vault == nil:
+			v.errf(raw.MasterKeyFileRange, "Vault reference without vault block", "%s needs a vault { address, token_file } block", ref)
+		}
+	}
 	return c, v.diags
+}
+
+// SecretRefs lists every secret reference of the configuration.
+func (c *Config) SecretRefs() []string {
+	var out []string
+	add := func(s string) {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	add(c.MasterKeyFile)
+	add(c.MetricsTokenFile)
+	add(c.Store.DSNFile)
+	add(c.CacheSaltKeyFile)
+	add(c.Alerts.WebhookTokenFile)
+	if c.Alerts.SMTP != nil {
+		add(c.Alerts.SMTP.PasswordFile)
+	}
+	out = append(out, c.KeyFiles()...)
+	return out
 }
 
 // validHeaderName accepts RFC 9110 token characters.
