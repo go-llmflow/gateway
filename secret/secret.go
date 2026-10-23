@@ -16,6 +16,7 @@
 package secret
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -289,6 +290,59 @@ func (r *Resolver) read(ctx context.Context, p Ref) (map[string]string, error) {
 		return nil, fmt.Errorf("secret %s: vault answered %d", p, resp.StatusCode)
 	}
 	return parseKV2(body)
+}
+
+// Write stores value in the field a vault reference names, leaving the
+// secret's other fields alone: PATCH with a JSON merge patch (KV v2 "Patch
+// secret", Content-Type application/merge-patch+json), or, when the secret
+// does not exist yet, POST (KV v2 "Create/Update secret"). The token needs
+// the patch and create capabilities on that path. File references and
+// versioned references are refused: a key rotation writes only to vault.
+func (r *Resolver) Write(ctx context.Context, p Ref, value string) error {
+	if !p.IsVault() || p.Version != 0 {
+		return fmt.Errorf("secret %s: only an unversioned vault reference can be written", p)
+	}
+	if r.vault == nil {
+		return fmt.Errorf("secret %s: no vault block in the configuration", p)
+	}
+	body, err := json.Marshal(map[string]any{"data": map[string]string{p.Field: value}})
+	if err != nil {
+		return err
+	}
+	status, err := r.send(ctx, http.MethodPatch, p, body, "application/merge-patch+json")
+	if err == nil && status == http.StatusNotFound {
+		status, err = r.send(ctx, http.MethodPost, p, body, "application/json")
+	}
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK && status != http.StatusNoContent {
+		return fmt.Errorf("secret %s: vault answered %d to the write", p, status)
+	}
+	r.mu.Lock()
+	delete(r.cache, p.Mount+"/"+p.Path+"?0")
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *Resolver) send(ctx context.Context, method string, p Ref, body []byte, ctype string) (int, error) {
+	u := strings.TrimRight(r.vault.Address, "/") + "/v1/" + p.Mount + "/data/" + p.Path
+	req, err := http.NewRequestWithContext(ctx, method, u, bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("X-Vault-Token", r.vault.Token)
+	if r.vault.Namespace != "" {
+		req.Header.Set("X-Vault-Namespace", r.vault.Namespace)
+	}
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("secret %s: %w", p, err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxVaultBody))
+	return resp.StatusCode, nil
 }
 
 // parseKV2 extracts data.data from a KV v2 read answer. Values must be

@@ -298,17 +298,19 @@ func (p *Postgres) CreateKey(ctx context.Context, k Key) error {
 	return nil
 }
 
-const keyCols = `k.id, k.hash, coalesce(t.org, ''), k.team, k.project, k.owner, k.tags, k.name, k.rpm, k.tpm, k.max_inflight, k.created_at, k.revoked, k.prev_hash, k.prev_expires, k.rotated_at`
+const keyCols = `k.id, k.hash, coalesce(t.org, ''), k.team, k.project, k.owner, k.tags, k.name, k.rpm, k.tpm, k.max_inflight, k.created_at, k.revoked, k.prev_hash, k.prev_expires, k.rotated_at, k.rotate_every, k.rotate_grace, k.rotate_target`
 const keyFrom = ` FROM llmflow_keys k LEFT JOIN llmflow_teams t ON t.name = k.team `
 
 func scanKey(r pgx.Row) (Key, error) {
 	var k Key
 	var h, ph []byte
 	var pe, ra *time.Time
-	err := r.Scan(&k.ID, &h, &k.Org, &k.Team, &k.Project, &k.Owner, &k.Tags, &k.Name, &k.RPM, &k.TPM, &k.MaxInFlight, &k.CreatedAt, &k.Revoked, &ph, &pe, &ra)
+	var every, grace int64
+	err := r.Scan(&k.ID, &h, &k.Org, &k.Team, &k.Project, &k.Owner, &k.Tags, &k.Name, &k.RPM, &k.TPM, &k.MaxInFlight, &k.CreatedAt, &k.Revoked, &ph, &pe, &ra, &every, &grace, &k.Rotation.Target)
 	if err != nil {
 		return k, err
 	}
+	k.Rotation.Every, k.Rotation.Grace = Duration(every), Duration(grace)
 	if ra != nil {
 		k.RotatedAt = ra.UTC()
 	}

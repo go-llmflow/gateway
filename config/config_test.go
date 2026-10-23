@@ -209,6 +209,9 @@ func TestParseRejectsWithPosition(t *testing.T) {
 		{"sso unknown role", valid + ssoBlock("https://idp.example", "https://gw.example/admin/callback", "role {\n    value = \"g\"\n    role = \"root\"\n  }"), "Invalid role"},
 		{"sso no openid", valid + strings.Replace(ssoBlock("https://idp.example", "https://gw.example/admin/callback", ""), "sso {", "sso {\n  scopes = [\"profile\"]", 1), "Invalid scopes"},
 		{"sso long session", valid + strings.Replace(ssoBlock("https://idp.example", "https://gw.example/admin/callback", ""), "sso {", "sso {\n  session_ttl = \"720h\"", 1), "Session too long"},
+		{"rotation without vault", valid + "key_rotation { vault_prefix = \"secret/llmflow/keys\" }\n", "Key rotation without vault block"},
+		{"rotation bad prefix", valid + "key_rotation { vault_prefix = \"secret/../x\" }\n", "Invalid vault_prefix"},
+		{"rotation interval", valid + "key_rotation {\n  vault_prefix = \"secret/k\"\n  check_interval = \"1s\"\n}\n", "Invalid check_interval"},
 		{"jwt negative rpm", valid + strings.Replace(jwtBlock("https://idp.example", "a"), "jwt {", "jwt {\n  rpm = -1", 1), "Invalid limit"},
 		{"syntax", valid + "team {", "test.hcl:"},
 		{"string for number", strings.Replace(valid, "capacity = 256", `capacity = "many"`, 1), "Unsuitable value type"},
@@ -271,6 +274,21 @@ vault {
 	}
 	if !slices.Contains(c.SecretRefs(), "vault:secret/llmflow#sso") {
 		t.Fatal("client_secret_file is not a secret reference")
+	}
+}
+
+func TestParseKeyRotation(t *testing.T) {
+	c, err := parse(valid + `key_rotation { vault_prefix = "/secret/llmflow/keys/" }
+vault {
+  address    = "https://bao.example:8200"
+  token_file = "/t"
+}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.KeyRotation == nil || c.KeyRotation.VaultPrefix != "secret/llmflow/keys" || c.KeyRotation.CheckInterval != time.Hour {
+		t.Fatalf("%+v", c.KeyRotation)
 	}
 }
 

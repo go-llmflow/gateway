@@ -2,11 +2,14 @@ package secret
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -167,6 +170,87 @@ func TestVault(t *testing.T) {
 	n = hits.Load()
 	if _, err := r.Resolve(ctx, "vault:secret/llmflow/master#key"); err != nil || hits.Load() == n {
 		t.Fatalf("expired entry not refetched: %v", err)
+	}
+}
+
+// A write patches one field and keeps the others, creates a secret that
+// does not exist yet, and is refused for files and versions.
+func TestVaultWrite(t *testing.T) {
+	var mu sync.Mutex
+	store := map[string]map[string]any{"/v1/secret/data/keys/a": {"other": "keep", "key": "old"}}
+	var methods []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Header.Get("X-Vault-Token") != "tok" {
+			http.Error(w, "", http.StatusForbidden)
+			return
+		}
+		methods = append(methods, r.Method+" "+r.Header.Get("Content-Type"))
+		var in struct{ Data map[string]any }
+		switch r.Method {
+		case http.MethodGet:
+			d, ok := store[r.URL.Path]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"data": d}})
+		case http.MethodPatch:
+			d, ok := store[r.URL.Path]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			for k, v := range in.Data {
+				d[k] = v
+			}
+		case http.MethodPost:
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			store[r.URL.Path] = in.Data
+		}
+	}))
+	t.Cleanup(srv.Close)
+	r, err := New(&VaultConfig{Address: srv.URL, Token: "tok", CacheTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if v, _ := r.Resolve(ctx, "vault:secret/keys/a#key"); v != "old" {
+		t.Fatalf("before: %q", v)
+	}
+	ref, _ := Parse("vault:secret/keys/a#key")
+	if err := r.Write(ctx, ref, "new"); err != nil {
+		t.Fatal(err)
+	}
+	// The write invalidates the cached read.
+	if v, _ := r.Resolve(ctx, "vault:secret/keys/a#key"); v != "new" {
+		t.Fatalf("after: %q", v)
+	}
+	if v, _ := r.Resolve(ctx, "vault:secret/keys/a#other"); v != "keep" {
+		t.Fatalf("other field: %q", v)
+	}
+	ref, _ = Parse("vault:secret/keys/b#key")
+	if err := r.Write(ctx, ref, "created"); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := r.Resolve(ctx, "vault:secret/keys/b#key"); v != "created" {
+		t.Fatalf("created: %q", v)
+	}
+	if !slices.Contains(methods, "PATCH application/merge-patch+json") || !slices.Contains(methods, "POST application/json") {
+		t.Fatalf("methods %v", methods)
+	}
+	for _, s := range []string{"/etc/x", "vault:secret/keys/a#key?version=1"} {
+		ref, _ := Parse(s)
+		if err := r.Write(ctx, ref, "x"); err == nil {
+			t.Errorf("write to %s accepted", s)
+		}
+	}
+	bad, _ := New(&VaultConfig{Address: srv.URL, Token: "wrong"})
+	ref, _ = Parse("vault:secret/keys/a#key")
+	if err := bad.Write(ctx, ref, "x"); err == nil {
+		t.Fatal("write with a wrong token accepted")
 	}
 }
 
