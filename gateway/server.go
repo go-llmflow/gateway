@@ -260,7 +260,7 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 			}
 			return float64(t.Borrowing) / float64(t.InFlight)
 		}},
-		{"llmflow_reserved", "Reserved concurrency share x C.", func(t fairshare.TeamStat) float64 { return t.Reserved }},
+		{"llmflow_reserved", "Within-share slots: share x C apportioned to integers by largest remainder.", func(t fairshare.TeamStat) float64 { return float64(t.Reserved) }},
 		{"llmflow_fairshare_usage", "Decayed usage (cost units) used for the fair-share ranking.", func(t fairshare.TeamStat) float64 { return t.Usage }},
 		{"llmflow_fairshare_level", "Level fairshare LF = S/U (+Inf when the team has no usage).", func(t fairshare.TeamStat) float64 { return t.LevelFairshare }},
 	}

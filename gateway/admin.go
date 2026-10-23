@@ -240,7 +240,7 @@ func (s *Server) fairshareState(w http.ResponseWriter, _ *http.Request) {
 	type teamOut struct {
 		Team           string  `json:"team"`
 		Share          float64 `json:"share"`
-		Reserved       float64 `json:"reserved"`
+		Reserved       int     `json:"reserved"`
 		InFlight       int     `json:"inflight"`
 		Borrowing      int     `json:"borrowing"`
 		InFlightTokens int64   `json:"inflight_tokens"`

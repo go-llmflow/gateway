@@ -76,6 +76,7 @@ type Pool struct {
 type team struct {
 	name           string
 	share          float64
+	reserved       int // within-share slots (Apportion)
 	inflight       int
 	borrowing      int
 	inflightTokens int64
@@ -101,14 +102,58 @@ func NewPool(name string, capacity int, shares map[string]float64, halfLife time
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	reserved := Apportion(capacity, names, shares)
 	for _, n := range names {
-		p.addTeam(n, shares[n])
+		p.addTeam(n, shares[n], reserved[n])
 	}
 	return p
 }
 
-func (p *Pool) addTeam(name string, share float64) *team {
-	t := &team{name: name, share: share}
+// Apportion divides the C slots of a pool into integer reservations with
+// the largest-remainder (Hamilton) method: every team first gets
+// floor(share × C), then the slots left up to floor(Σ share × C) go one
+// each to the largest fractional parts (ties broken by name order). The
+// sum never exceeds C, and equals C when the shares sum to 1. Rounding
+// each quota up instead (the first version) could promise more
+// within-share slots than C: with C = 10 and 0.8125 / 0.1875 it gave
+// 9 + 2 = 11, so one of B's guaranteed requests could wait in vLLM's queue
+// at equal priority behind A's ninth.
+func Apportion(capacity int, names []string, shares map[string]float64) map[string]int {
+	const eps = 1e-9
+	out := make(map[string]int, len(names))
+	type rem struct {
+		name string
+		frac float64
+	}
+	var rems []rem
+	total, given := 0.0, 0
+	for _, n := range names {
+		s := shares[n]
+		if !(s > 0) {
+			out[n] = 0
+			continue
+		}
+		q := s * float64(capacity)
+		total += q
+		f := math.Floor(q + eps)
+		out[n] = int(f)
+		given += int(f)
+		rems = append(rems, rem{n, q - f})
+	}
+	seats := int(math.Floor(total + eps))
+	if seats > capacity {
+		seats = capacity
+	}
+	sort.SliceStable(rems, func(i, j int) bool { return rems[i].frac > rems[j].frac })
+	for i := 0; given < seats && i < len(rems); i++ {
+		out[rems[i].name]++
+		given++
+	}
+	return out
+}
+
+func (p *Pool) addTeam(name string, share float64, reserved int) *team {
+	t := &team{name: name, share: share, reserved: reserved}
 	p.teams[name] = t
 	p.order = append(p.order, t)
 	return t
@@ -140,7 +185,7 @@ func (p *Pool) Acquire(teamName string, class Class, estTokens int64) *Grant {
 	p.advance()
 	t := p.teams[teamName]
 	if t == nil {
-		t = p.addTeam(teamName, 0)
+		t = p.addTeam(teamName, 0, 0)
 	}
 	g := &Grant{pool: p, team: t, tokens: estTokens}
 	// The test is on the number of within-share requests in flight, not
@@ -150,7 +195,7 @@ func (p *Pool) Acquire(teamName string, class Class, estTokens int64) *Grant {
 	// reservation again, and every request after the first ones would be
 	// sent as a borrower. TestSaturationConvergesToShares fails with the
 	// total-count rule (B obtains 4 % instead of 18.75 %).
-	if float64(t.inflight-t.borrowing) < t.share*float64(p.capacity) {
+	if t.inflight-t.borrowing < t.reserved {
 		g.Priority = WithinShareBase + int(class)
 	} else {
 		p.rank()
@@ -265,7 +310,7 @@ func sameLF(a, b float64) bool {
 type TeamStat struct {
 	Team           string
 	Share          float64
-	Reserved       float64
+	Reserved       int // within-share slots, see Apportion
 	InFlight       int
 	Borrowing      int
 	InFlightTokens int64
@@ -283,7 +328,7 @@ func (p *Pool) Snapshot() []TeamStat {
 	out := make([]TeamStat, 0, len(p.order))
 	for _, t := range p.order {
 		out = append(out, TeamStat{
-			Team: t.name, Share: t.share, Reserved: t.share * float64(p.capacity),
+			Team: t.name, Share: t.share, Reserved: t.reserved,
 			InFlight: t.inflight, Borrowing: t.borrowing, InFlightTokens: t.inflightTokens,
 			Usage: t.usage, LevelFairshare: t.lf, Rank: t.rank,
 		})

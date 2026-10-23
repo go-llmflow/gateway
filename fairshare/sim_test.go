@@ -187,11 +187,17 @@ const (
 )
 
 func simulate(t *testing.T, sc scenario, steps, warmup int) simResult {
+	return simulateC(t, sc, steps, warmup, simCapacity, simKV, nil)
+}
+
+// simulateC runs a scenario on a pool of capacity c and an engine of kv
+// blocks, calling observe after every step when it is not nil.
+func simulateC(t *testing.T, sc scenario, steps, warmup, c, kv int, observe func(*engine)) simResult {
 	t.Helper()
 	clock := time.Unix(0, 0)
 	now := func() time.Time { return clock }
-	pool := NewPool("b300", simCapacity, map[string]float64{"etabA": 0.8125, "etabB": 0.1875}, 2000*time.Second, now)
-	e := newEngine(simKV)
+	pool := NewPool("b300", c, map[string]float64{"etabA": 0.8125, "etabB": 0.1875}, 2000*time.Second, now)
+	e := newEngine(kv)
 	e.measureFrom = warmup
 	res := simResult{e: e, pool: pool}
 	submit := func(team string) {
@@ -215,6 +221,9 @@ func simulate(t *testing.T, sc scenario, steps, warmup int) simResult {
 		for _, r := range e.step() {
 			r.grant.Release(float64(simPrompt + simLength))
 			submit(r.team)
+		}
+		if observe != nil {
+			observe(e)
 		}
 		clock = clock.Add(time.Second)
 	}
@@ -250,10 +259,10 @@ func TestAloneTeamGetsEverything(t *testing.T) {
 			if team == "etabB" {
 				reserved = r.pool.Snapshot()[1].Reserved
 			}
-			if avgRunning < 1.5*reserved {
-				t.Fatalf("%s runs %.1f requests on average, reservation %.1f: borrowing did not happen", team, avgRunning, reserved)
+			if avgRunning < 1.5*float64(reserved) {
+				t.Fatalf("%s runs %.1f requests on average, reservation %d: borrowing did not happen", team, avgRunning, reserved)
 			}
-			t.Logf("%s alone: KV utilisation %.3f, mean running %.1f (reservation %.1f), preemptions %d",
+			t.Logf("%s alone: KV utilisation %.3f, mean running %.1f (reservation %d), preemptions %d",
 				team, util, avgRunning, reserved, len(r.e.preempted))
 		})
 	}
