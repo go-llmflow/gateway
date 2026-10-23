@@ -27,7 +27,10 @@ func gatewayConfig(t *testing.T, extra string) string {
 listen             = "127.0.0.1:0"
 master_key_file    = "`+mk+`"
 metrics_token_file = "`+mt+`"
-team "a" { share = 1 }
+org "o" {
+  share = 1
+  team "a" {}
+}
 pool "p" { capacity = 4 }
 model "m" {
   pool = "p"

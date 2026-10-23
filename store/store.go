@@ -1,7 +1,13 @@
-// Package store holds the gateway's persistent state: teams, virtual keys
-// (hashed), budgets and per-request usage records. Two implementations
-// share one contract test: Memory (tests, trials; state is lost on
-// restart) and Postgres (pgx).
+// Package store holds the gateway's persistent state: the tenant
+// hierarchy (organisation → team → project), virtual keys (hashed),
+// budgets and per-request usage records. Two implementations share one
+// contract test: Memory (tests, trials; state is lost on restart) and
+// Postgres (pgx).
+//
+// The hierarchy mirrors the Slurm account tree (sacctmgr: accounts nested
+// under a parent account, users associated with accounts): an organisation
+// is an institution, a team a lab, a project a piece of work inside a team.
+// Keys belong to a team and optionally to one of its projects.
 package store
 
 import (
@@ -15,10 +21,29 @@ import (
 var (
 	ErrNotFound = errors.New("not found")
 	ErrExists   = errors.New("already exists")
+	// ErrConflict reports an existing object that differs from the
+	// request (e.g. a team that already belongs to another organisation).
+	ErrConflict = errors.New("conflicts with an existing object")
 )
 
-// Team is a tenant.
+// Org is an organisation (an institution), the top of the hierarchy.
+type Org struct {
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	Disabled  bool      `json:"disabled"`
+}
+
+// Team is a group (a lab) inside an organisation.
 type Team struct {
+	Name      string    `json:"name"`
+	Org       string    `json:"org"`
+	CreatedAt time.Time `json:"created_at"`
+	Disabled  bool      `json:"disabled"`
+}
+
+// Project is a unit of work inside a team, with its own keys and budget.
+type Project struct {
+	Team      string    `json:"team"`
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
 	Disabled  bool      `json:"disabled"`
@@ -27,9 +52,12 @@ type Team struct {
 // Key is a virtual key. The secret itself is never stored, only its
 // SHA-256.
 type Key struct {
-	ID          string    `json:"id"`
-	Hash        [32]byte  `json:"-"`
+	ID   string   `json:"id"`
+	Hash [32]byte `json:"-"`
+	// Org is resolved from the team when the key is read.
+	Org         string    `json:"org"`
 	Team        string    `json:"team"`
+	Project     string    `json:"project,omitempty"`
 	Name        string    `json:"name"`
 	RPM         int       `json:"rpm"`
 	TPM         int       `json:"tpm"`
@@ -77,7 +105,9 @@ type Budget struct {
 // Record is one finished request.
 type Record struct {
 	Time             time.Time
+	Org              string
 	Team             string
+	Project          string
 	KeyID            string
 	Model            string
 	Pool             string
@@ -113,16 +143,41 @@ type TeamUsage struct {
 // Store is the persistence contract.
 type Store interface {
 	Ping(ctx context.Context) error
-	CreateTeam(ctx context.Context, name string) error
-	ListTeams(ctx context.Context) ([]Team, error)
-	// DisableTeam disables a team and revokes all its keys.
+
+	CreateOrg(ctx context.Context, name string) error
+	ListOrgs(ctx context.Context) ([]Org, error)
+	// DisableOrg disables an organisation, its teams and projects, and
+	// revokes all their keys.
+	DisableOrg(ctx context.Context, name string) error
+
+	// CreateTeam creates a team in an enabled organisation, re-enables a
+	// disabled team of the same organisation, adopts a team created
+	// without organisation (v0.1 databases), and returns ErrExists for an
+	// enabled team of the same organisation, ErrConflict for a team of
+	// another organisation, ErrNotFound for an unknown or disabled org.
+	CreateTeam(ctx context.Context, name, org string) error
+	GetTeam(ctx context.Context, name string) (Team, error)
+	// ListTeams lists the teams of an organisation, or all with org "".
+	ListTeams(ctx context.Context, org string) ([]Team, error)
+	// DisableTeam disables a team and its projects and revokes its keys.
 	DisableTeam(ctx context.Context, name string) error
+
+	CreateProject(ctx context.Context, team, name string) error
+	ListProjects(ctx context.Context, team string) ([]Project, error)
+	// DisableProject disables a project and revokes its keys.
+	DisableProject(ctx context.Context, team, name string) error
+
+	// CreateKey stores a key of an enabled team (and project, when set).
 	CreateKey(ctx context.Context, k Key) error
+	// ListKeys lists keys, filtered by team when team is not "".
 	ListKeys(ctx context.Context, team string) ([]Key, error)
+	GetKey(ctx context.Context, id string) (Key, error)
 	RevokeKey(ctx context.Context, id string) error
-	// KeyByHash returns the key with that hash, revoked or not, or
-	// ErrNotFound. The caller must still compare hashes in constant time.
+	// KeyByHash returns the key with that hash, revoked or not, with its
+	// Org filled in, or ErrNotFound. The caller must still compare hashes
+	// in constant time.
 	KeyByHash(ctx context.Context, hash [32]byte) (Key, error)
+
 	SetBudget(ctx context.Context, b Budget) error
 	DeleteBudget(ctx context.Context, team string) error
 	Budgets(ctx context.Context) ([]Budget, error)

@@ -45,8 +45,14 @@ health {
   cooldown = "1h"
 }
 limits { max_body_bytes = 4096 }
-team "etabA" { share = 0.75 }
-team "etabB" { share = 0.25 }
+org "etabA" {
+  share = 0.75
+  team "etabA" {}
+}
+org "etabB" {
+  share = 0.25
+  team "etabB" {}
+}
 pool "b300" { capacity = 4 }
 model "llama" {
   upstream_model = "meta/llama"
@@ -187,6 +193,10 @@ func TestBorrowingPriorityAndBatchClass(t *testing.T) {
 	up := newFakeVLLM(t)
 	up.gate = make(chan struct{})
 	e := newEnv(t, testConfig(up.URL()))
+	// Registered after newEnv, so it runs first: a failed assertion must
+	// not leave requests hanging and the test server waiting for them.
+	release := sync.OnceFunc(func() { close(up.gate) })
+	t.Cleanup(release)
 	_, key := e.newKey("etabB") // share 0.25 of C=4: one reserved slot
 
 	var wg sync.WaitGroup
@@ -211,11 +221,11 @@ func TestBorrowingPriorityAndBatchClass(t *testing.T) {
 	}
 	resp := e.do("GET", "/metrics", "", "")
 	m := readAll(t, resp)
-	if !strings.Contains(m, `llmflow_inflight_borrowing{pool="b300",team="etabB"} 1`) ||
-		!strings.Contains(m, `llmflow_borrowed_fraction{pool="b300",team="etabB"} 0.5`) {
+	if !strings.Contains(m, `llmflow_inflight_borrowing{pool="b300",org="etabB"} 1`) ||
+		!strings.Contains(m, `llmflow_borrowed_fraction{pool="b300",org="etabB"} 0.5`) {
 		t.Fatalf("metrics:\n%s", m)
 	}
-	close(up.gate)
+	release()
 	wg.Wait()
 	close(results)
 	var got []string
@@ -477,23 +487,69 @@ func TestAdminAPI(t *testing.T) {
 			t.Fatalf("admin with %q: %d", tok, resp.StatusCode)
 		}
 	}
-	resp := e.do("POST", "/admin/teams", master, `{"name":"etabC"}`)
+	resp := e.do("POST", "/admin/orgs", master, `{"name":"orgC"}`)
+	if readAll(t, resp); resp.StatusCode != 201 {
+		t.Fatalf("create org %d", resp.StatusCode)
+	}
+	resp = e.do("POST", "/admin/teams", master, `{"name":"etabC","org":"orgC"}`)
 	if readAll(t, resp); resp.StatusCode != 201 {
 		t.Fatalf("create team %d", resp.StatusCode)
 	}
-	for _, bad := range []string{`{"name":"a b"}`, `{"name":"x","extra":1}`, `nope`} {
+	for _, bad := range []string{`{"name":"a b","org":"orgC"}`, `{"name":"x","org":"orgC","extra":1}`, `nope`, `{"name":"x"}`} {
 		resp := e.do("POST", "/admin/teams", master, bad)
 		if readAll(t, resp); resp.StatusCode != 400 {
 			t.Fatalf("bad team %s: %d", bad, resp.StatusCode)
 		}
 	}
-	resp = e.do("POST", "/admin/teams", master, `{"name":"etabC"}`)
+	for _, bad := range []string{`{"name":"a b"}`, `{}`} {
+		resp := e.do("POST", "/admin/orgs", master, bad)
+		if readAll(t, resp); resp.StatusCode != 400 {
+			t.Fatalf("bad org %s: %d", bad, resp.StatusCode)
+		}
+	}
+	resp = e.do("POST", "/admin/teams", master, `{"name":"x","org":"nope"}`)
+	if readAll(t, resp); resp.StatusCode != 404 {
+		t.Fatalf("team in unknown org %d", resp.StatusCode)
+	}
+	resp = e.do("POST", "/admin/teams", master, `{"name":"etabC","org":"orgC"}`)
 	if readAll(t, resp); resp.StatusCode != 409 {
 		t.Fatalf("duplicate team %d", resp.StatusCode)
 	}
-	out := readAll(t, e.do("GET", "/admin/teams", master, ""))
-	if !strings.Contains(out, `"name":"etabA"`) || !strings.Contains(out, `"share":0.75`) || !strings.Contains(out, `"name":"etabC"`) {
-		t.Fatalf("teams %s", out)
+	resp = e.do("POST", "/admin/teams", master, `{"name":"etabC","org":"etabA"}`)
+	if readAll(t, resp); resp.StatusCode != 409 {
+		t.Fatalf("team moved to another org %d", resp.StatusCode)
+	}
+	out := readAll(t, e.do("GET", "/admin/orgs", master, ""))
+	if !strings.Contains(out, `"name":"etabA"`) || !strings.Contains(out, `"share":0.75`) || !strings.Contains(out, `"name":"orgC"`) {
+		t.Fatalf("orgs %s", out)
+	}
+	out = readAll(t, e.do("GET", "/admin/teams?org=orgC", master, ""))
+	if !strings.Contains(out, `"name":"etabC"`) || strings.Contains(out, `"name":"etabA"`) {
+		t.Fatalf("teams of orgC %s", out)
+	}
+	// Projects.
+	resp = e.do("POST", "/admin/teams/etabC/projects", master, `{"name":"eval"}`)
+	if readAll(t, resp); resp.StatusCode != 201 {
+		t.Fatalf("create project %d", resp.StatusCode)
+	}
+	resp = e.do("POST", "/admin/teams/etabC/projects", master, `{"name":"a/b"}`)
+	if readAll(t, resp); resp.StatusCode != 400 {
+		t.Fatalf("bad project %d", resp.StatusCode)
+	}
+	if out := readAll(t, e.do("GET", "/admin/teams/etabC/projects", master, "")); !strings.Contains(out, `"name":"eval"`) {
+		t.Fatalf("projects %s", out)
+	}
+	if resp := e.do("GET", "/admin/teams/nobody/projects", master, ""); readAll(t, resp) == "" || resp.StatusCode != 404 {
+		t.Fatalf("projects of unknown team %d", resp.StatusCode)
+	}
+	resp = e.do("POST", "/admin/keys", master, `{"team":"etabC","project":"eval"}`)
+	projKey := readAll(t, resp)
+	if resp.StatusCode != 201 || !strings.Contains(projKey, `"project":"eval"`) {
+		t.Fatalf("project key %d %s", resp.StatusCode, projKey)
+	}
+	resp = e.do("POST", "/admin/keys", master, `{"team":"etabC","project":"nope"}`)
+	if readAll(t, resp); resp.StatusCode != 404 {
+		t.Fatalf("key in unknown project %d", resp.StatusCode)
 	}
 	_, secret := e.newKey("etabC")
 	out = readAll(t, e.do("GET", "/admin/keys?team=etabC", master, ""))
@@ -535,10 +591,30 @@ func TestAdminAPI(t *testing.T) {
 		t.Fatalf("bad range %d", resp.StatusCode)
 	}
 	out = readAll(t, e.do("GET", "/admin/fairshare", master, ""))
-	if !strings.Contains(out, `"b300"`) || !strings.Contains(out, `"team":"etabC"`) {
+	if !strings.Contains(out, `"b300"`) || !strings.Contains(out, `"org":"orgC"`) {
 		t.Fatalf("fairshare %s", out)
 	}
-	for _, p := range []string{"/admin/keys/k_none", "/admin/teams/nobody", "/admin/budgets/nobody"} {
+	// Disabling the project, then the organisation, revokes their keys.
+	var pk struct{ Key string }
+	if err := json.Unmarshal([]byte(projKey), &pk); err != nil {
+		t.Fatal(err)
+	}
+	if resp := e.do("GET", "/v1/models", pk.Key, ""); readAll(t, resp) == "" || resp.StatusCode != 200 {
+		t.Fatalf("project key %d", resp.StatusCode)
+	}
+	if resp := e.do("DELETE", "/admin/teams/etabC/projects/eval", master, ""); readAll(t, resp) != "" || resp.StatusCode != 204 {
+		t.Fatalf("disable project %d", resp.StatusCode)
+	}
+	if resp := e.do("GET", "/v1/models", pk.Key, ""); readAll(t, resp) == "" || resp.StatusCode != 401 {
+		t.Fatalf("key of disabled project %d", resp.StatusCode)
+	}
+	if resp := e.do("DELETE", "/admin/orgs/orgC", master, ""); readAll(t, resp) != "" || resp.StatusCode != 204 {
+		t.Fatalf("disable org %d", resp.StatusCode)
+	}
+	if resp := e.do("GET", "/v1/models", secret, ""); readAll(t, resp) == "" || resp.StatusCode != 401 {
+		t.Fatalf("key of disabled org %d", resp.StatusCode)
+	}
+	for _, p := range []string{"/admin/keys/k_none", "/admin/teams/nobody", "/admin/budgets/nobody", "/admin/orgs/nobody", "/admin/teams/etabA/projects/nobody"} {
 		resp := e.do("DELETE", p, master, "")
 		if readAll(t, resp); resp.StatusCode != 404 {
 			t.Fatalf("DELETE %s: %d", p, resp.StatusCode)
@@ -633,7 +709,7 @@ func TestMetricsTokenAndFormat(t *testing.T) {
 		t.Fatalf("content type %q", resp.Header.Get("Content-Type"))
 	}
 	for _, want := range []string{
-		"# TYPE llmflow_inflight gauge", `llmflow_reserved{pool="b300",team="etabA"} 3`,
+		"# TYPE llmflow_inflight gauge", `llmflow_reserved{pool="b300",org="etabA"} 3`,
 		`llmflow_overhead_seconds_bucket{le="+Inf"} 0`, "llmflow_overhead_seconds_count 0",
 		`llmflow_upstream_healthy{group="llama",upstream="http://127.0.0.1:`,
 	} {

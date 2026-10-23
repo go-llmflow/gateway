@@ -16,18 +16,27 @@ import (
 var osExit = os.Exit
 
 func main() {
-	if err := RootCmd().Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		osExit(1)
+	osExit(execute(RootCmd()))
+}
+
+// execute runs a command and prints its error exactly once, through the
+// command's error stream. Cobra's own "Error:" line is silenced; without
+// that every error appeared twice.
+func execute(cmd *cobra.Command) int {
+	if err := cmd.Execute(); err != nil {
+		fmt.Fprintln(cmd.ErrOrStderr(), err)
+		return 1
 	}
+	return 0
 }
 
 // RootCmd returns the top-level command.
 func RootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:          "llmflow-gateway",
-		Short:        "OpenAI-compatible gateway with fair-share scheduling in front of vLLM",
-		SilenceUsage: true,
+		Use:           "llmflow-gateway",
+		Short:         "OpenAI-compatible gateway with fair-share scheduling in front of vLLM",
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
 	root.AddCommand(versionCmd(), checkConfigCmd(), serveCmd(), exportCmd())
 	return root
@@ -61,8 +70,12 @@ func checkConfigCmd() *cobra.Command {
 			if _, err := readSecrets(c); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "ok: %d teams, %d pools, %d models\n",
-				len(c.Teams), len(c.Pools), len(c.ModelGroups))
+			teams := 0
+			for _, o := range c.Orgs {
+				teams += len(o.Teams)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "ok: %d orgs, %d teams, %d pools, %d models\n",
+				len(c.Orgs), teams, len(c.Pools), len(c.ModelGroups))
 			return nil
 		},
 	}

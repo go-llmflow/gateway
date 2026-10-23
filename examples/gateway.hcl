@@ -50,8 +50,19 @@ health {
   path     = "/health"
 }
 
-team "etabA" { share = 0.8125 } # 26 of 32 GPUs
-team "etabB" { share = 0.1875 } #  6 of 32 GPUs
+# Organisations (institutions) hold the shares of every pool, like the top
+# accounts of a Slurm account tree. Teams (labs) sit under them; more teams
+# and their projects can be created through the admin API.
+org "etabA" {
+  share = 0.8125 # 26 of 32 GPUs
+  team "lab-nlp" {}
+  team "lab-vision" {}
+}
+
+org "etabB" {
+  share = 0.1875 #  6 of 32 GPUs
+  team "lab-chem" {}
+}
 
 # C: sustainable concurrency of the pool, measured externally (the number of
 # concurrent requests vLLM keeps running without preempting).

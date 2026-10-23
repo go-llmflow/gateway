@@ -16,11 +16,26 @@ type Postgres struct {
 	pool *pgxpool.Pool
 }
 
+// schema is idempotent; the ALTER TABLE statements upgrade a v0.1.0
+// database in place.
 const schema = `
+CREATE TABLE IF NOT EXISTS llmflow_orgs (
+	name       text PRIMARY KEY,
+	created_at timestamptz NOT NULL DEFAULT now(),
+	disabled   boolean NOT NULL DEFAULT false
+);
 CREATE TABLE IF NOT EXISTS llmflow_teams (
 	name       text PRIMARY KEY,
 	created_at timestamptz NOT NULL DEFAULT now(),
 	disabled   boolean NOT NULL DEFAULT false
+);
+ALTER TABLE llmflow_teams ADD COLUMN IF NOT EXISTS org text NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS llmflow_projects (
+	team       text NOT NULL REFERENCES llmflow_teams(name),
+	name       text NOT NULL,
+	created_at timestamptz NOT NULL DEFAULT now(),
+	disabled   boolean NOT NULL DEFAULT false,
+	PRIMARY KEY (team, name)
 );
 CREATE TABLE IF NOT EXISTS llmflow_keys (
 	id           text PRIMARY KEY,
@@ -33,6 +48,7 @@ CREATE TABLE IF NOT EXISTS llmflow_keys (
 	created_at   timestamptz NOT NULL DEFAULT now(),
 	revoked      boolean NOT NULL DEFAULT false
 );
+ALTER TABLE llmflow_keys ADD COLUMN IF NOT EXISTS project text NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS llmflow_budgets (
 	team     text PRIMARY KEY REFERENCES llmflow_teams(name),
 	period   text NOT NULL,
@@ -58,10 +74,12 @@ CREATE TABLE IF NOT EXISTS llmflow_usage (
 );
 CREATE INDEX IF NOT EXISTS llmflow_usage_ts_team ON llmflow_usage (ts, team);
 ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS estimated boolean NOT NULL DEFAULT false;
+ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS org text NOT NULL DEFAULT '';
+ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS project text NOT NULL DEFAULT '';
 `
 
-// OpenPostgres connects and creates the schema if needed. The error never
-// contains the DSN.
+// OpenPostgres connects and creates or upgrades the schema. The error
+// never contains the DSN.
 func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
@@ -88,12 +106,22 @@ func fkViolation(err error) bool {
 	return errors.As(err, &pe) && pe.Code == "23503"
 }
 
+func affected(tag pgconn.CommandTag, err error) error {
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (p *Postgres) Ping(ctx context.Context) error { return p.pool.Ping(ctx) }
 
-func (p *Postgres) CreateTeam(ctx context.Context, name string) error {
+func (p *Postgres) CreateOrg(ctx context.Context, name string) error {
 	tag, err := p.pool.Exec(ctx, `
-		INSERT INTO llmflow_teams (name) VALUES ($1)
-		ON CONFLICT (name) DO UPDATE SET disabled = false WHERE llmflow_teams.disabled`, name)
+		INSERT INTO llmflow_orgs (name) VALUES ($1)
+		ON CONFLICT (name) DO UPDATE SET disabled = false WHERE llmflow_orgs.disabled`, name)
 	if err != nil {
 		return err
 	}
@@ -103,35 +131,146 @@ func (p *Postgres) CreateTeam(ctx context.Context, name string) error {
 	return nil
 }
 
-func (p *Postgres) ListTeams(ctx context.Context) ([]Team, error) {
-	rows, err := p.pool.Query(ctx, `SELECT name, created_at, disabled FROM llmflow_teams ORDER BY name`)
+func (p *Postgres) ListOrgs(ctx context.Context) ([]Org, error) {
+	rows, err := p.pool.Query(ctx, `SELECT name, created_at, disabled FROM llmflow_orgs ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Team, error) {
-		var t Team
-		err := r.Scan(&t.Name, &t.CreatedAt, &t.Disabled)
-		return t, err
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Org, error) {
+		var o Org
+		err := r.Scan(&o.Name, &o.CreatedAt, &o.Disabled)
+		return o, err
 	})
 }
 
-func (p *Postgres) DisableTeam(ctx context.Context, name string) error {
-	tx, err := p.pool.Begin(ctx)
-	if err != nil {
-		return err
+func (p *Postgres) DisableOrg(ctx context.Context, name string) error {
+	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		if err := affected(tx.Exec(ctx, `UPDATE llmflow_orgs SET disabled = true WHERE name = $1`, name)); err != nil {
+			return err
+		}
+		for _, q := range []string{
+			`UPDATE llmflow_projects SET disabled = true WHERE team IN (SELECT name FROM llmflow_teams WHERE org = $1)`,
+			`UPDATE llmflow_keys SET revoked = true WHERE team IN (SELECT name FROM llmflow_teams WHERE org = $1)`,
+			`UPDATE llmflow_teams SET disabled = true WHERE org = $1`,
+		} {
+			if _, err := tx.Exec(ctx, q, name); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (p *Postgres) CreateTeam(ctx context.Context, name, org string) error {
+	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		var disabled bool
+		err := tx.QueryRow(ctx, `SELECT disabled FROM llmflow_orgs WHERE name = $1 FOR SHARE`, org).Scan(&disabled)
+		if errors.Is(err, pgx.ErrNoRows) || err == nil && disabled {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		var curOrg string
+		err = tx.QueryRow(ctx, `SELECT org, disabled FROM llmflow_teams WHERE name = $1 FOR UPDATE`, name).Scan(&curOrg, &disabled)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			_, err = tx.Exec(ctx, `INSERT INTO llmflow_teams (name, org) VALUES ($1, $2)`, name, org)
+			if uniqueViolation(err) {
+				return ErrExists
+			}
+			return err
+		case err != nil:
+			return err
+		case curOrg == "":
+			_, err = tx.Exec(ctx, `UPDATE llmflow_teams SET org = $2, disabled = false WHERE name = $1`, name, org)
+			return err
+		case curOrg != org:
+			return ErrConflict
+		case disabled:
+			_, err = tx.Exec(ctx, `UPDATE llmflow_teams SET disabled = false WHERE name = $1`, name)
+			return err
+		}
+		return ErrExists
+	})
+}
+
+func scanTeam(r pgx.Row) (Team, error) {
+	var t Team
+	err := r.Scan(&t.Name, &t.Org, &t.CreatedAt, &t.Disabled)
+	return t, err
+}
+
+func (p *Postgres) GetTeam(ctx context.Context, name string) (Team, error) {
+	t, err := scanTeam(p.pool.QueryRow(ctx, `SELECT name, org, created_at, disabled FROM llmflow_teams WHERE name = $1`, name))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Team{}, ErrNotFound
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
-	tag, err := tx.Exec(ctx, `UPDATE llmflow_teams SET disabled = true WHERE name = $1`, name)
+	return t, err
+}
+
+func (p *Postgres) ListTeams(ctx context.Context, org string) ([]Team, error) {
+	rows, err := p.pool.Query(ctx, `SELECT name, org, created_at, disabled FROM llmflow_teams WHERE $1 = '' OR org = $1 ORDER BY name`, org)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Team, error) { return scanTeam(r) })
+}
+
+func (p *Postgres) DisableTeam(ctx context.Context, name string) error {
+	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		if err := affected(tx.Exec(ctx, `UPDATE llmflow_teams SET disabled = true WHERE name = $1`, name)); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE llmflow_projects SET disabled = true WHERE team = $1`, name); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE llmflow_keys SET revoked = true WHERE team = $1`, name)
+		return err
+	})
+}
+
+func (p *Postgres) CreateProject(ctx context.Context, team, name string) error {
+	tag, err := p.pool.Exec(ctx, `
+		INSERT INTO llmflow_projects (team, name)
+		SELECT $1, $2 WHERE EXISTS (SELECT 1 FROM llmflow_teams WHERE name = $1 AND NOT disabled)
+		ON CONFLICT (team, name) DO UPDATE SET disabled = false WHERE llmflow_projects.disabled`, team, name)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
+		var exists bool
+		if err := p.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM llmflow_projects WHERE team = $1 AND name = $2)`, team, name).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			return ErrExists
+		}
 		return ErrNotFound
 	}
-	if _, err := tx.Exec(ctx, `UPDATE llmflow_keys SET revoked = true WHERE team = $1`, name); err != nil {
-		return err
+	return nil
+}
+
+func (p *Postgres) ListProjects(ctx context.Context, team string) ([]Project, error) {
+	rows, err := p.pool.Query(ctx, `SELECT team, name, created_at, disabled FROM llmflow_projects WHERE team = $1 ORDER BY name`, team)
+	if err != nil {
+		return nil, err
 	}
-	return tx.Commit(ctx)
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Project, error) {
+		var pr Project
+		err := r.Scan(&pr.Team, &pr.Name, &pr.CreatedAt, &pr.Disabled)
+		return pr, err
+	})
+}
+
+func (p *Postgres) DisableProject(ctx context.Context, team, name string) error {
+	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		if err := affected(tx.Exec(ctx, `UPDATE llmflow_projects SET disabled = true WHERE team = $1 AND name = $2`, team, name)); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE llmflow_keys SET revoked = true WHERE team = $1 AND project = $2`, team, name)
+		return err
+	})
 }
 
 func (p *Postgres) CreateKey(ctx context.Context, k Key) error {
@@ -139,10 +278,11 @@ func (p *Postgres) CreateKey(ctx context.Context, k Key) error {
 		k.CreatedAt = time.Now().UTC()
 	}
 	tag, err := p.pool.Exec(ctx, `
-		INSERT INTO llmflow_keys (id, hash, team, name, rpm, tpm, max_inflight, created_at)
-		SELECT $1, $2, $3, $4, $5, $6, $7, $8
-		WHERE EXISTS (SELECT 1 FROM llmflow_teams WHERE name = $3 AND NOT disabled)`,
-		k.ID, k.Hash[:], k.Team, k.Name, k.RPM, k.TPM, k.MaxInFlight, k.CreatedAt)
+		INSERT INTO llmflow_keys (id, hash, team, project, name, rpm, tpm, max_inflight, created_at)
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
+		WHERE EXISTS (SELECT 1 FROM llmflow_teams WHERE name = $3 AND NOT disabled)
+		  AND ($4 = '' OR EXISTS (SELECT 1 FROM llmflow_projects WHERE team = $3 AND name = $4 AND NOT disabled))`,
+		k.ID, k.Hash[:], k.Team, k.Project, k.Name, k.RPM, k.TPM, k.MaxInFlight, k.CreatedAt)
 	switch {
 	case uniqueViolation(err):
 		return ErrExists
@@ -156,12 +296,13 @@ func (p *Postgres) CreateKey(ctx context.Context, k Key) error {
 	return nil
 }
 
-const keyCols = `id, hash, team, name, rpm, tpm, max_inflight, created_at, revoked`
+const keyCols = `k.id, k.hash, coalesce(t.org, ''), k.team, k.project, k.name, k.rpm, k.tpm, k.max_inflight, k.created_at, k.revoked`
+const keyFrom = ` FROM llmflow_keys k LEFT JOIN llmflow_teams t ON t.name = k.team `
 
 func scanKey(r pgx.Row) (Key, error) {
 	var k Key
 	var h []byte
-	err := r.Scan(&k.ID, &h, &k.Team, &k.Name, &k.RPM, &k.TPM, &k.MaxInFlight, &k.CreatedAt, &k.Revoked)
+	err := r.Scan(&k.ID, &h, &k.Org, &k.Team, &k.Project, &k.Name, &k.RPM, &k.TPM, &k.MaxInFlight, &k.CreatedAt, &k.Revoked)
 	if err != nil {
 		return k, err
 	}
@@ -173,26 +314,27 @@ func scanKey(r pgx.Row) (Key, error) {
 }
 
 func (p *Postgres) ListKeys(ctx context.Context, team string) ([]Key, error) {
-	rows, err := p.pool.Query(ctx, `SELECT `+keyCols+` FROM llmflow_keys WHERE $1 = '' OR team = $1 ORDER BY id`, team)
+	rows, err := p.pool.Query(ctx, `SELECT `+keyCols+keyFrom+`WHERE $1 = '' OR k.team = $1 ORDER BY k.id`, team)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Key, error) { return scanKey(r) })
 }
 
+func (p *Postgres) GetKey(ctx context.Context, id string) (Key, error) {
+	k, err := scanKey(p.pool.QueryRow(ctx, `SELECT `+keyCols+keyFrom+`WHERE k.id = $1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Key{}, ErrNotFound
+	}
+	return k, err
+}
+
 func (p *Postgres) RevokeKey(ctx context.Context, id string) error {
-	tag, err := p.pool.Exec(ctx, `UPDATE llmflow_keys SET revoked = true WHERE id = $1`, id)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return affected(p.pool.Exec(ctx, `UPDATE llmflow_keys SET revoked = true WHERE id = $1`, id))
 }
 
 func (p *Postgres) KeyByHash(ctx context.Context, h [32]byte) (Key, error) {
-	k, err := scanKey(p.pool.QueryRow(ctx, `SELECT `+keyCols+` FROM llmflow_keys WHERE hash = $1`, h[:]))
+	k, err := scanKey(p.pool.QueryRow(ctx, `SELECT `+keyCols+keyFrom+`WHERE k.hash = $1`, h[:]))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Key{}, ErrNotFound
 	}
@@ -214,14 +356,7 @@ func (p *Postgres) SetBudget(ctx context.Context, b Budget) error {
 }
 
 func (p *Postgres) DeleteBudget(ctx context.Context, team string) error {
-	tag, err := p.pool.Exec(ctx, `DELETE FROM llmflow_budgets WHERE team = $1`, team)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return affected(p.pool.Exec(ctx, `DELETE FROM llmflow_budgets WHERE team = $1`, team))
 }
 
 func (p *Postgres) Budgets(ctx context.Context) ([]Budget, error) {
@@ -256,14 +391,14 @@ func (p *Postgres) SpendSince(ctx context.Context, since time.Time) (map[string]
 	return out, rows.Err()
 }
 
-var usageCols = []string{"ts", "team", "key_id", "model", "pool", "upstream", "prompt_tokens",
+var usageCols = []string{"ts", "org", "team", "project", "key_id", "model", "pool", "upstream", "prompt_tokens",
 	"completion_tokens", "cached_tokens", "cost", "latency_ms", "status", "priority", "borrowing", "stream", "estimated"}
 
 // InsertRecords writes a batch with COPY.
 func (p *Postgres) InsertRecords(ctx context.Context, recs []Record) error {
 	rows := make([][]any, len(recs))
 	for i, r := range recs {
-		rows[i] = []any{r.Time, r.Team, r.KeyID, r.Model, r.Pool, r.Upstream, r.PromptTokens,
+		rows[i] = []any{r.Time, r.Org, r.Team, r.Project, r.KeyID, r.Model, r.Pool, r.Upstream, r.PromptTokens,
 			r.CompletionTokens, r.CachedTokens, r.Cost, r.LatencyMS, r.Status, r.Priority, r.Borrowing, r.Stream, r.Estimated}
 	}
 	_, err := p.pool.CopyFrom(ctx, pgx.Identifier{"llmflow_usage"}, usageCols, pgx.CopyFromRows(rows))

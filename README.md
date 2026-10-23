@@ -67,7 +67,8 @@ priority number. The gateway's job is to choose that number.
 ### Reservation with borrowing
 
 Each pool has a capacity **C**: the concurrency it sustains without preemption,
-measured externally. Each team owns an integer reservation, obtained by
+measured externally. Each organisation (institution) owns an integer
+reservation, shared by all its teams and projects, obtained by
 apportioning C over the shares with the largest-remainder (Hamilton) method:
 `floor(share × C)` each, then the slots left up to `floor(Σ share × C)` to the
 largest fractional parts. Reservations never sum to more than C (C = 256 gives
@@ -131,8 +132,15 @@ so it stays valid):
 ```hcl
 master_key_file = "/etc/llmflow/master.key"
 
-team "etabA" { share = 0.8125 }
-team "etabB" { share = 0.1875 }
+org "etabA" {
+  share = 0.8125
+  team "lab-nlp" {}
+  team "lab-vision" {}
+}
+org "etabB" {
+  share = 0.1875
+  team "lab-chem" {}
+}
 
 pool "b300" { capacity = 256 }
 
@@ -156,7 +164,7 @@ model "llama-3.3-70b" {
 
 | block / attribute | meaning |
 |---|---|
-| `team "<name>" { share }` | fraction of every pool reserved for the team (sum ≤ 1) |
+| `org "<name>" { share, team "<name>" {} … }` | an organisation (institution) with the fraction of every pool reserved for it (sum ≤ 1) and the teams (labs) declared under it; team names are global |
 | `pool "<name>" { capacity }` | C, sustainable concurrency of the pool (1..1048576) |
 | `model "<name>" { … }` | client model name → `upstream_model`, `pool`, `class` (`interactive` / `batch`), `key_file`, `cost { input_per_mtok, output_per_mtok, cached_per_mtok }` in GPU-hours per million tokens, and `upstream "<name>" { base_url, key_file }` blocks |
 | `store { … }` | `kind` (`memory` / `postgres`), `dsn_file`, `fail_closed` (default true), `queue_size`, `batch_size` |
@@ -174,8 +182,9 @@ HCL design decisions:
   literal `%{` must be written `%%{` (a lone `$` or `%` needs nothing). This
   applies to every value, URLs, paths and model names included; tests cover
   both the refusal and the escapes.
-- **Labelled blocks** for the things that have names: `team`, `pool`,
-  `model`, `upstream`. Duplicate labels are errors.
+- **Labelled blocks** for the things that have names: `org`, `team`, `pool`,
+  `model`, `upstream`. Duplicate labels are errors. Teams nest inside their
+  organisation, mirroring the Slurm account tree.
 - **Every diagnostic carries `file:line:column`**, from the parser, the
   decoder (unknown attributes, wrong types) and the semantic checks (share sum,
   capacity bounds, unknown pool, invalid URL, durations). `check-config` prints
@@ -201,11 +210,13 @@ All admin routes require `Authorization: Bearer <master key>`.
 
 | route | |
 |---|---|
-| `GET` / `POST /admin/teams`, `DELETE /admin/teams/{name}` | list, create `{"name"}`, disable (revokes all its keys) |
-| `GET /admin/keys?team=`, `POST /admin/keys`, `DELETE /admin/keys/{id}` | list (no secrets), create `{"team","name","rpm","tpm","max_inflight"}` (the `llmf-…` secret is returned once), revoke |
+| `GET` / `POST /admin/orgs`, `DELETE /admin/orgs/{name}` | list (with configured share), create `{"name"}` (an organisation created here has no share: it only borrows), disable (its teams, projects and keys too) |
+| `GET /admin/teams?org=`, `POST /admin/teams`, `DELETE /admin/teams/{name}` | list, create `{"name","org"}`, disable (its projects and keys too) |
+| `GET` / `POST /admin/teams/{team}/projects`, `DELETE /admin/teams/{team}/projects/{name}` | list, create `{"name"}`, disable (revokes its keys) |
+| `GET /admin/keys?team=`, `POST /admin/keys`, `DELETE /admin/keys/{id}` | list (no secrets), create `{"team","project","name","rpm","tpm","max_inflight"}` (`project` optional; the `llmf-…` secret is returned once), revoke |
 | `GET /admin/budgets`, `PUT` / `DELETE /admin/budgets/{team}` | `{"period": "day" \| "week" \| "month", "max_cost": <GPU-hours>}`, periods aligned on UTC |
 | `GET /admin/usage.csv?from=&to=` | per team and pool: requests, tokens, GPU-hours (same as `llmflow-gateway export`) |
-| `GET /admin/fairshare` | reservations, in-flight, borrowing, usage, LF and rank per pool and team |
+| `GET /admin/fairshare` | reservations, in-flight, borrowing, usage, LF and rank per pool and organisation |
 
 Client routes: `POST /v1/chat/completions`, `/v1/completions`,
 `/v1/embeddings`, `GET /v1/models`. `GET /healthz` returns 503 when the budget
@@ -216,7 +227,7 @@ state is stale and fail-closed is on.
 `GET /metrics` (Prometheus text format 0.0.4, optional bearer token):
 `llmflow_inflight`, `llmflow_inflight_borrowing`, `llmflow_borrowed_fraction`,
 `llmflow_reserved`, `llmflow_inflight_tokens`, `llmflow_fairshare_usage`,
-`llmflow_fairshare_level` (per pool and team); `llmflow_upstream_healthy`,
+`llmflow_fairshare_level` (per pool and organisation, label `org`); `llmflow_upstream_healthy`,
 `llmflow_upstream_inflight`; `llmflow_requests_total`, `llmflow_tokens_total`,
 `llmflow_gpu_hours_total`, `llmflow_denied_total`,
 `llmflow_upstream_retries_total`; histograms `llmflow_overhead_seconds` and
