@@ -201,10 +201,20 @@ HCL design decisions:
   decoder (unknown attributes, wrong types) and the semantic checks (share sum,
   capacity bounds, unknown pool, invalid URL, durations). `check-config` prints
   them one per line.
-- **Secrets only by file.** `master_key_file`, `metrics_token_file`,
-  `store.dsn_file`, and `key_file` on a model (default for its upstreams) or on
-  an upstream (override). An upstream URL with credentials is rejected. Nothing
-  is read from the environment or the command line.
+- **Secrets only by reference.** Every `*_file` attribute (`master_key_file`,
+  `metrics_token_file`, `store.dsn_file`, `cache_salt_key_file`, `key_file`,
+  `alerts.webhook_token_file`, `smtp.password_file`) is a secret reference:
+  a path (or `file:/path`), or a field of an OpenBao / HashiCorp Vault KV v2
+  secret, `vault:<mount>/<path>#<field>` with an optional `?version=N`. Vault
+  references need a `vault { address, token_file, ca_file, namespace,
+  cache_ttl }` block: `https` only (plain http is accepted for loopback
+  test servers), the token itself from a file, no redirect followed, reads
+  cached for `cache_ttl` (default 5 minutes) and bounded in size. The read is
+  `GET /v1/<mount>/data/<path>` with `X-Vault-Token`, the fields under
+  `data.data` (OpenBao KV v2 API, "Read secret version"). Mount, path
+  segments and field are restricted to `[A-Za-z0-9._-]`, so a reference
+  cannot leave the mount. An upstream URL with credentials is rejected.
+  Nothing is read from the environment or the command line.
 - **Durations are strings** in Go syntax (`"30s"`, `"168h"`), positive.
 - **Absent and zero differ**: `retries = 0` disables retries; leaving it out
   takes the default (2).

@@ -73,6 +73,12 @@ func TestParseValid(t *testing.T) {
 	if c.CacheIsolation != "org" || c.CacheSaltKeyFile != "/etc/llmflow/cache-salt.key" {
 		t.Fatalf("cache isolation %q %q", c.CacheIsolation, c.CacheSaltKeyFile)
 	}
+	// Secret references may name OpenBao/Vault fields once a vault block exists.
+	c, err = parse(strings.Replace(valid, `"/etc/llmflow/cache-salt.key"`, `"vault:secret/llmflow/salt#key?version=2"`, 1) +
+		"vault {\n  address = \"https://bao.example:8200\"\n  token_file = \"/etc/llmflow/bao.token\"\n  namespace = \"hpc\"\n  cache_ttl = \"1m\"\n}\n")
+	if err != nil || c.Vault == nil || c.Vault.CacheTTL != time.Minute || c.Vault.Namespace != "hpc" || len(c.SecretRefs()) < 3 {
+		t.Fatalf("vault: %+v %v", c, err)
+	}
 	// "none" (one tenant) needs no key.
 	c, err = parse(strings.Replace(valid, `cache_salt_key_file = "/etc/llmflow/cache-salt.key"`, `cache_isolation = "none"`, 1))
 	if err != nil || c.CacheIsolation != "none" {
@@ -173,6 +179,10 @@ func TestParseRejectsWithPosition(t *testing.T) {
 		{"no cache salt key", strings.Replace(valid, `cache_salt_key_file = "/etc/llmflow/cache-salt.key"`, "", 1), "Missing cache salt key"},
 		{"no cache salt key for key scope", strings.Replace(valid, `cache_salt_key_file = "/etc/llmflow/cache-salt.key"`, `cache_isolation = "key"`, 1), "test.hcl:33:19: Missing cache salt key"},
 		{"bad cache isolation", valid + `cache_isolation = "user"` + "\n", "Invalid cache isolation"},
+		{"vault ref without block", strings.Replace(valid, `"/etc/llmflow/cache-salt.key"`, `"vault:secret/llmflow#salt"`, 1), "Vault reference without vault block"},
+		{"bad secret ref", strings.Replace(valid, `"/etc/llmflow/cache-salt.key"`, `"vault:secret/../x#k"`, 1), "Invalid secret reference"},
+		{"vault cleartext", valid + "vault {\n  address = \"http://bao.example:8200\"\n  token_file = \"/t\"\n}\n", "Invalid vault address"},
+		{"vault token from vault", valid + "vault {\n  address = \"https://bao.example:8200\"\n  token_file = \"vault:a/b#c\"\n}\n", "Invalid vault token file"},
 		{"tag header", valid + "tags {\n  header = \"X Tags\"\n  allowed = [\"a\"]\n}\n", "Invalid header"},
 		{"tag name", valid + "tags {\n  header = \"X-Tags\"\n  allowed = [\"a b\"]\n}\n", "Invalid tag"},
 		{"no tags", valid + "tags {\n  header = \"X-Tags\"\n  allowed = []\n}\n", "Invalid tags"},

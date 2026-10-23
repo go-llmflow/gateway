@@ -14,54 +14,84 @@ import (
 
 	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/gateway"
+	"github.com/go-llmflow/gateway/secret"
 	"github.com/go-llmflow/gateway/store"
 	"github.com/spf13/cobra"
 )
+
+// resolver returns the secret resolver of a configuration: files, and the
+// OpenBao/Vault server when a vault block is present.
+func resolver(c *config.Config) (*secret.Resolver, error) {
+	if c.Vault == nil {
+		return secret.New(nil)
+	}
+	file, _ := secret.New(nil)
+	tok, err := file.Resolve(context.Background(), c.Vault.TokenFile)
+	if err != nil {
+		return nil, fmt.Errorf("vault token_file: %w", err)
+	}
+	return secret.New(&secret.VaultConfig{Address: c.Vault.Address, Token: tok, CAFile: c.Vault.CAFile,
+		Namespace: c.Vault.Namespace, CacheTTL: c.Vault.CacheTTL})
+}
 
 // openStore opens the configured store.
 func openStore(ctx context.Context, c *config.Config) (store.Store, error) {
 	if c.Store.Kind != "postgres" {
 		return store.NewMemory(), nil
 	}
-	dsn, err := config.ReadSecret(c.Store.DSNFile)
+	res, err := resolver(c)
+	if err != nil {
+		return nil, err
+	}
+	dsn, err := res.Resolve(ctx, c.Store.DSNFile)
 	if err != nil {
 		return nil, fmt.Errorf("store.dsn_file: %w", err)
 	}
 	return store.OpenPostgres(ctx, dsn)
 }
 
-// readSecrets reads every secret file the configuration names.
+// readSecrets resolves every secret reference the configuration names.
 func readSecrets(c *config.Config) (gateway.Secrets, error) {
 	var s gateway.Secrets
-	var err error
-	if s.MasterKey, err = config.ReadSecret(c.MasterKeyFile); err != nil {
-		return s, fmt.Errorf("master_key_file: %w", err)
+	res, err := resolver(c)
+	if err != nil {
+		return s, err
 	}
-	if c.MetricsTokenFile != "" {
-		if s.MetricsToken, err = config.ReadSecret(c.MetricsTokenFile); err != nil {
-			return s, fmt.Errorf("metrics_token_file: %w", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	get := func(name, ref string, dst *string) error {
+		if ref == "" {
+			return nil
 		}
-	}
-	if c.CacheSaltKeyFile != "" {
-		if s.CacheSaltKey, err = config.ReadSecret(c.CacheSaltKeyFile); err != nil {
-			return s, fmt.Errorf("cache_salt_key_file: %w", err)
+		v, err := res.Resolve(ctx, ref)
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
 		}
+		*dst = v
+		return nil
 	}
-	if f := c.Alerts.WebhookTokenFile; f != "" {
-		if s.WebhookToken, err = config.ReadSecret(f); err != nil {
-			return s, fmt.Errorf("alerts webhook_token_file: %w", err)
-		}
+	if err := get("master_key_file", c.MasterKeyFile, &s.MasterKey); err != nil {
+		return s, err
 	}
-	if c.Alerts.SMTP != nil && c.Alerts.SMTP.PasswordFile != "" {
-		if s.SMTPPassword, err = config.ReadSecret(c.Alerts.SMTP.PasswordFile); err != nil {
-			return s, fmt.Errorf("alerts smtp password_file: %w", err)
+	if err := get("metrics_token_file", c.MetricsTokenFile, &s.MetricsToken); err != nil {
+		return s, err
+	}
+	if err := get("cache_salt_key_file", c.CacheSaltKeyFile, &s.CacheSaltKey); err != nil {
+		return s, err
+	}
+	if err := get("alerts webhook_token_file", c.Alerts.WebhookTokenFile, &s.WebhookToken); err != nil {
+		return s, err
+	}
+	if c.Alerts.SMTP != nil {
+		if err := get("alerts smtp password_file", c.Alerts.SMTP.PasswordFile, &s.SMTPPassword); err != nil {
+			return s, err
 		}
 	}
 	s.UpstreamKeys = map[string]string{}
 	for _, f := range c.KeyFiles() {
-		k, err := config.ReadSecret(f)
-		if err != nil {
-			return s, fmt.Errorf("key_file: %w", err)
+		var k string
+		if err := get("key_file", f, &k); err != nil {
+			return s, err
 		}
 		s.UpstreamKeys[f] = k
 	}

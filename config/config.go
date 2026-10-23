@@ -55,6 +55,18 @@ type Config struct {
 	// client network (IPv4 address, IPv6 /64) may make per minute before it
 	// gets 429; 0 disables the limit.
 	AuthFailuresPerMinute int
+	// Vault, when set, is the OpenBao/Vault server that vault: secret
+	// references are read from.
+	Vault *Vault
+}
+
+// Vault reaches an OpenBao or HashiCorp Vault KV v2 engine.
+type Vault struct {
+	Address   string
+	TokenFile string // a file reference, never a vault: one
+	CAFile    string
+	Namespace string
+	CacheTTL  time.Duration
 }
 
 // Tags lets clients label requests through one header, restricted to an
