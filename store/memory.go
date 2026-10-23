@@ -326,6 +326,33 @@ func (m *Memory) RevokeKey(_ context.Context, id string) error {
 	return nil
 }
 
+func (m *Memory) RotateKey(_ context.Context, id string, newHash [32]byte, prevExpires, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Fail != nil {
+		return m.Fail
+	}
+	k, ok := m.keys[id]
+	if !ok || k.Revoked {
+		return ErrNotFound
+	}
+	if _, taken := m.byHash[newHash]; taken {
+		return ErrExists
+	}
+	if !k.PrevExpires.IsZero() {
+		delete(m.byHash, k.PrevHash)
+	}
+	k.PrevHash, k.PrevExpires = [32]byte{}, time.Time{}
+	if prevExpires.After(at) {
+		k.PrevHash, k.PrevExpires = k.Hash, prevExpires
+	} else {
+		delete(m.byHash, k.Hash)
+	}
+	k.Hash, k.RotatedAt = newHash, at
+	m.byHash[newHash] = id
+	return nil
+}
+
 func (m *Memory) KeyByHash(_ context.Context, h [32]byte) (Key, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

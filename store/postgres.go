@@ -89,7 +89,7 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 	if err != nil {
 		return nil, fmt.Errorf("postgres: connect: %w", err)
 	}
-	for _, s := range []string{schema, usersSchema, modelsSchema, budgetsSchema, allowSchema} {
+	for _, s := range []string{schema, usersSchema, modelsSchema, budgetsSchema, allowSchema, rotationSchema} {
 		if _, err := pool.Exec(ctx, s); err != nil {
 			pool.Close()
 			return nil, fmt.Errorf("postgres: schema: %w", err)
@@ -298,15 +298,23 @@ func (p *Postgres) CreateKey(ctx context.Context, k Key) error {
 	return nil
 }
 
-const keyCols = `k.id, k.hash, coalesce(t.org, ''), k.team, k.project, k.owner, k.tags, k.name, k.rpm, k.tpm, k.max_inflight, k.created_at, k.revoked`
+const keyCols = `k.id, k.hash, coalesce(t.org, ''), k.team, k.project, k.owner, k.tags, k.name, k.rpm, k.tpm, k.max_inflight, k.created_at, k.revoked, k.prev_hash, k.prev_expires, k.rotated_at`
 const keyFrom = ` FROM llmflow_keys k LEFT JOIN llmflow_teams t ON t.name = k.team `
 
 func scanKey(r pgx.Row) (Key, error) {
 	var k Key
-	var h []byte
-	err := r.Scan(&k.ID, &h, &k.Org, &k.Team, &k.Project, &k.Owner, &k.Tags, &k.Name, &k.RPM, &k.TPM, &k.MaxInFlight, &k.CreatedAt, &k.Revoked)
+	var h, ph []byte
+	var pe, ra *time.Time
+	err := r.Scan(&k.ID, &h, &k.Org, &k.Team, &k.Project, &k.Owner, &k.Tags, &k.Name, &k.RPM, &k.TPM, &k.MaxInFlight, &k.CreatedAt, &k.Revoked, &ph, &pe, &ra)
 	if err != nil {
 		return k, err
+	}
+	if ra != nil {
+		k.RotatedAt = ra.UTC()
+	}
+	if pe != nil && len(ph) == len(k.PrevHash) {
+		k.PrevExpires = pe.UTC()
+		copy(k.PrevHash[:], ph)
 	}
 	if len(k.Tags) == 0 {
 		k.Tags = nil
@@ -339,7 +347,7 @@ func (p *Postgres) RevokeKey(ctx context.Context, id string) error {
 }
 
 func (p *Postgres) KeyByHash(ctx context.Context, h [32]byte) (Key, error) {
-	k, err := scanKey(p.pool.QueryRow(ctx, `SELECT `+keyCols+keyFrom+`WHERE k.hash = $1`, h[:]))
+	k, err := scanKey(p.pool.QueryRow(ctx, `SELECT `+keyCols+keyFrom+`WHERE k.hash = $1 OR k.prev_hash = $1`, h[:]))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Key{}, ErrNotFound
 	}

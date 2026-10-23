@@ -225,7 +225,7 @@ func (s *Server) lookup(ctx context.Context, secret string) (store.Key, bool, er
 		s.keys.putValid(h, k)
 		found = true
 	}
-	if !found || k.Revoked || !store.HashEqual(k.Hash, h) {
+	if !found || k.Revoked || !k.Matches(h, s.now()) {
 		return store.Key{}, false, nil
 	}
 	return k, true, nil

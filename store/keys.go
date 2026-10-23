@@ -26,6 +26,12 @@ func GenerateKey() (secret, id string, hash [32]byte) {
 	return secret, id, HashSecret(secret)
 }
 
+// NewKeySecret makes a new secret for an existing key (rotation).
+func NewKeySecret() (secret string, hash [32]byte) {
+	secret, _, hash = GenerateKey()
+	return secret, hash
+}
+
 // HashSecret hashes a presented key.
 func HashSecret(secret string) [32]byte { return sha256.Sum256([]byte(secret)) }
 

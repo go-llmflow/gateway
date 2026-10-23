@@ -68,6 +68,20 @@ type Key struct {
 	MaxInFlight int       `json:"max_inflight"`
 	CreatedAt   time.Time `json:"created_at"`
 	Revoked     bool      `json:"revoked"`
+	// PrevHash is the secret replaced by the last rotation, valid until
+	// PrevExpires (zero: no previous secret).
+	PrevHash    [32]byte  `json:"-"`
+	PrevExpires time.Time `json:"prev_expires_at,omitzero"`
+	RotatedAt   time.Time `json:"rotated_at,omitzero"`
+}
+
+// Matches reports whether h is the key's secret, or its previous secret
+// still inside the rotation grace period at now.
+func (k Key) Matches(h [32]byte, now time.Time) bool {
+	if HashEqual(k.Hash, h) {
+		return true
+	}
+	return !k.PrevExpires.IsZero() && now.Before(k.PrevExpires) && HashEqual(k.PrevHash, h)
 }
 
 // Period is a budget period, aligned on UTC calendar boundaries.
@@ -159,9 +173,14 @@ type Store interface {
 	ListKeys(ctx context.Context, team string) ([]Key, error)
 	GetKey(ctx context.Context, id string) (Key, error)
 	RevokeKey(ctx context.Context, id string) error
-	// KeyByHash returns the key with that hash, revoked or not, with its
-	// Org filled in, or ErrNotFound. The caller must still compare hashes
-	// in constant time.
+	// RotateKey gives a key a new secret hash. The current one becomes
+	// the previous secret, valid until prevExpires (a zero or past time
+	// drops it at once). ErrNotFound for an unknown or revoked key,
+	// ErrExists when the new hash is already some key's.
+	RotateKey(ctx context.Context, id string, newHash [32]byte, prevExpires, at time.Time) error
+	// KeyByHash returns the key whose current or previous hash is hash,
+	// revoked or not, with its Org filled in, or ErrNotFound. The caller
+	// must still check it with Key.Matches.
 	KeyByHash(ctx context.Context, hash [32]byte) (Key, error)
 
 	CreateUser(ctx context.Context, name string) error
