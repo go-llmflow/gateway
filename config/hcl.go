@@ -53,6 +53,42 @@ type fileHCL struct {
 	TrustedProxies       []string   `hcl:"trusted_proxies,optional"`
 	TrustedProxiesRange  hcl.Range  `hcl:"trusted_proxies,attr_value_range"`
 	Routes               *routesHCL `hcl:"routes,block"`
+	JWT                  *jwtHCL    `hcl:"jwt,block"`
+}
+
+type jwtHCL struct {
+	Issuer          string      `hcl:"issuer"`
+	IssuerRange     hcl.Range   `hcl:"issuer,attr_value_range"`
+	Audience        string      `hcl:"audience"`
+	AudienceRange   hcl.Range   `hcl:"audience,attr_value_range"`
+	JWKSURL         *string     `hcl:"jwks_url,optional"`
+	JWKSURLRange    hcl.Range   `hcl:"jwks_url,attr_value_range"`
+	Type            *string     `hcl:"type,optional"`
+	UsernameClaim   *string     `hcl:"username_claim,optional"`
+	GroupsClaim     *string     `hcl:"groups_claim,optional"`
+	ClockSkew       *string     `hcl:"clock_skew,optional"`
+	ClockSkewRange  hcl.Range   `hcl:"clock_skew,attr_value_range"`
+	MinRefresh      *string     `hcl:"min_refresh,optional"`
+	MinRefreshRange hcl.Range   `hcl:"min_refresh,attr_value_range"`
+	RPM             *int        `hcl:"rpm,optional"`
+	TPM             *int        `hcl:"tpm,optional"`
+	MaxInFlight     *int        `hcl:"max_inflight,optional"`
+	LimitsRange     hcl.Range   `hcl:",def_range"`
+	Maps            []jwtMapHCL `hcl:"map,block"`
+}
+
+type jwtMapHCL struct {
+	Claim     *string   `hcl:"claim,optional"`
+	Value     string    `hcl:"value"`
+	Team      string    `hcl:"team"`
+	TeamRange hcl.Range `hcl:"team,attr_value_range"`
+	Project   *string   `hcl:"project,optional"`
+	DefRange  hcl.Range `hcl:",def_range"`
+}
+
+// validIssuer accepts https URLs (http only to loopback, for tests).
+func validIssuer(raw string) bool {
+	return secret.ValidateAddress(raw) == nil && !strings.ContainsAny(raw, "?#")
 }
 
 type routeHCL struct {
@@ -615,6 +651,49 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		set(rt.Admin, &c.Routes.Admin, "routes.admin.allow")
 		set(rt.Metrics, &c.Routes.Metrics, "routes.metrics.allow")
 		set(rt.Healthz, &c.Routes.Healthz, "routes.healthz.allow")
+	}
+	if j := raw.JWT; j != nil {
+		cj := &JWT{Issuer: j.Issuer, Audience: j.Audience, JWKSURL: strOr(j.JWKSURL, ""), Type: strOr(j.Type, ""),
+			UsernameClaim: strOr(j.UsernameClaim, ""), GroupsClaim: strOr(j.GroupsClaim, ""),
+			ClockSkew:  v.dur(j.ClockSkew, j.ClockSkewRange, "clock_skew", time.Minute),
+			MinRefresh: v.dur(j.MinRefresh, j.MinRefreshRange, "min_refresh", time.Minute)}
+		if !validIssuer(j.Issuer) {
+			v.errf(j.IssuerRange, "Invalid issuer", "issuer %q: want an https URL (it is compared exactly with the token's iss)", j.Issuer)
+		}
+		if j.Audience == "" {
+			v.errf(j.AudienceRange, "Missing audience", "a verifier without an audience accepts every token the issuer signed")
+		}
+		if cj.JWKSURL != "" && !validIssuer(cj.JWKSURL) {
+			v.errf(j.JWKSURLRange, "Invalid jwks_url", "jwks_url %q: want an https URL", cj.JWKSURL)
+		}
+		if cj.ClockSkew > 10*time.Minute {
+			v.errf(j.ClockSkewRange, "Clock skew too large", "clock_skew %v: at most 10m", cj.ClockSkew)
+		}
+		for _, p := range []*int{j.RPM, j.TPM, j.MaxInFlight} {
+			if p != nil && *p < 0 {
+				v.errf(j.LimitsRange, "Invalid limit", "rpm, tpm and max_inflight must be non-negative")
+			}
+		}
+		if j.RPM != nil {
+			cj.RPM = *j.RPM
+		}
+		if j.TPM != nil {
+			cj.TPM = *j.TPM
+		}
+		if j.MaxInFlight != nil {
+			cj.MaxInFlight = *j.MaxInFlight
+		}
+		if len(j.Maps) == 0 {
+			v.errf(j.LimitsRange, "No map", "a jwt block needs at least one map { value, team } block")
+		}
+		for _, m := range j.Maps {
+			cm := JWTMap{Claim: strOr(m.Claim, "groups"), Value: m.Value, Team: m.Team, Project: strOr(m.Project, "")}
+			if !ValidName(m.Team) || cm.Project != "" && !ValidName(cm.Project) || m.Value == "" {
+				v.errf(m.DefRange, "Invalid map", "map needs a value and a valid team (and project) name")
+			}
+			cj.Maps = append(cj.Maps, cm)
+		}
+		c.JWT = cj
 	}
 	// Every *_file attribute is a secret reference: a file, or a field of
 	// an OpenBao/Vault KV v2 secret (package secret).

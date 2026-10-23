@@ -1,8 +1,9 @@
 module github.com/go-llmflow/gateway
 
-go 1.26.0
+go 1.27.1
 
 require (
+	github.com/go-authn/oidc v0.4.1
 	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/spf13/cobra v1.10.2

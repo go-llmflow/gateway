@@ -217,6 +217,27 @@ HCL design decisions:
   segments and field are restricted to `[A-Za-z0-9._-]`, so a reference
   cannot leave the mount. An upstream URL with credentials is rejected.
   Nothing is read from the environment or the command line.
+- **Access tokens** (optional), besides virtual keys; see Security:
+
+  ```hcl
+  jwt {
+    issuer   = "https://sso.example.org/realms/research"  # exact iss, https
+    audience = "llmflow"                                   # required
+    type     = "at+jwt"           # optional: refuse ID tokens
+    # jwks_url, username_claim, groups_claim, clock_skew ("1m"), min_refresh ("1m")
+    rpm = 60                      # limits per person, like a key's
+    map {                         # first match wins
+      value = "lab-physics"       # claim defaults to "groups"
+      team  = "etabA"
+    }
+    map {
+      claim   = "department"
+      value   = "chemistry"
+      team    = "etabB"
+      project = "eval"
+    }
+  }
+  ```
 - **Durations are strings** in Go syntax (`"30s"`, `"168h"`), positive.
 - **Absent and zero differ**: `retries = 0` disables retries; leaving it out
   takes the default (2).
@@ -405,6 +426,29 @@ Enforced:
   match the client, else 403 with one generic message; they are loaded with
   the budget state, so the request path never queries the store. The address
   parser is fuzzed (`FuzzClientAddr`).
+- **OpenID Connect access tokens on the inference API.** With a `jwt { … }`
+  block, a bearer token that has the JWS compact shape (three dot-separated
+  segments) is verified by [`github.com/go-authn/oidc`](https://github.com/go-authn/oidc)
+  v0.4.1 instead of being looked up as a virtual key. That library does the
+  JOSE work and its refusals: no `alg: none`, no HMAC algorithm (so the
+  issuer's public key cannot be used as an HS256 secret), `iss` compared
+  whole, `aud` and `exp` required, bounded clock skew, an optional `typ`
+  check (`type = "at+jwt"` refuses ID tokens, RFC 9068 §4), keys fetched over
+  https only, and at most one key-set fetch per `min_refresh` however many
+  unknown `kid`s arrive. Discovery happens at start-up: a gateway whose issuer
+  does not answer does not start. The gateway only maps the verified identity:
+  the `map` blocks are tried in order, the first whose `claim` (default
+  `groups`; a string or a list of strings) holds `value` gives the team and
+  optional project. Each person is one synthetic key, `jwt-` + a hash of
+  (issuer, subject), so rate limits (`rpm`, `tpm`, `max_inflight` of the
+  block), budgets, IP allowlists and spend reports apply as to a key. Every
+  refusal is the same 401 body; the reason (expired, wrong audience, unmapped
+  …) is logged on the server only. A verified token is cached until its
+  `exp` or `key_cache_ttl`, whichever comes first. Integration tests run the
+  gateway against a fake provider (alg none, HS256 with the public key,
+  expired, wrong audience or issuer, unmapped group, an unknown-`kid` flood,
+  an ID token where an access token is required), and `FuzzJWTBearer`
+  fuzzes the bearer path with the verifier in the loop.
 - **vLLM must only be reachable from the gateway**: its `--api-key` covers only
   `/v1`, `/v2` and `/inference`, and `/invocations` exposes the same inference
   without authentication (vLLM docs above). Firewall the vLLM ports.

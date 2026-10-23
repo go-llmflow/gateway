@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"net/http"
 	"net/netip"
@@ -85,6 +86,17 @@ func (c *keyCache) putValid(h [32]byte, k store.Key) {
 	}
 	delete(c.missing, h)
 	c.valid[h] = validEntry{key: k, expires: c.now().Add(c.ttl)}
+}
+
+// putValidUntil caches an entry no longer than until (a token's expiry).
+func (c *keyCache) putValidUntil(h [32]byte, k store.Key, until time.Time) {
+	c.putValid(h, k)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e := c.valid[h]; until.Before(e.expires) {
+		e.expires = until
+		c.valid[h] = e
+	}
 }
 
 func (c *keyCache) putMissing(h [32]byte) {
@@ -236,14 +248,40 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (store.Key
 	if secret == "" {
 		return fail(http.StatusUnauthorized, "authentication_error", "missing bearer token")
 	}
+	isJWT := s.jwt != nil && looksLikeJWT(secret)
 	if haveNet && s.authFails.blocked(cn) {
-		if k, found, cached := s.keys.get(store.HashSecret(secret)); !(cached && found && !k.Revoked) {
+		var k store.Key
+		var found, cached bool
+		if isJWT {
+			k, found, cached = s.jwtCache.get(sha256.Sum256([]byte(secret)))
+		} else {
+			k, found, cached = s.keys.get(store.HashSecret(secret))
+		}
+		if !(cached && found && !k.Revoked) {
 			s.met.denied.add(1, "", "auth_failures")
 			apiError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "too many failed authentications from this address")
 			return store.Key{}, false
 		}
 	}
-	k, ok, err := s.lookup(r.Context(), secret)
+	var k store.Key
+	var ok bool
+	var err error
+	if isJWT {
+		k, err = s.lookupJWT(r.Context(), secret)
+		switch {
+		case err == nil:
+			ok = true
+		case errors.Is(err, errAuthUnavailable):
+			s.log.Error("jwt: team lookup failed", "err", err)
+			err = errAuthUnavailable // the client sees no store detail
+		default:
+			// One refusal whatever the check; the reason stays here.
+			s.log.Warn("jwt refused", "reason", err.Error())
+			err = nil
+		}
+	} else {
+		k, ok, err = s.lookup(r.Context(), secret)
+	}
 	if err != nil {
 		return fail(http.StatusServiceUnavailable, "service_unavailable", err.Error())
 	}

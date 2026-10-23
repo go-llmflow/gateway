@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -193,6 +194,14 @@ func TestParseRejectsWithPosition(t *testing.T) {
 		{"smtp to", valid + "alerts {\n  smtp {\n    server = \"h:25\"\n    from = \"a@b.c\"\n    to = []\n  }\n}\n", "Invalid address"},
 		{"smtp creds", valid + "alerts {\n  smtp {\n    server = \"h:25\"\n    from = \"a@b.c\"\n    to = [\"d@e.f\"]\n    username = \"u\"\n  }\n}\n", "Incomplete SMTP credentials"},
 		{"body limit", valid + "limits { max_body_bytes = 0 }\n", "Invalid body limit"},
+		{"jwt cleartext issuer", valid + jwtBlock("http://idp.example", "llmflow"), "Invalid issuer"},
+		{"jwt issuer query", valid + jwtBlock("https://idp.example?x=1", "llmflow"), "Invalid issuer"},
+		{"jwt no audience", valid + jwtBlock("https://idp.example", ""), "Missing audience"},
+		{"jwt no map", valid + "jwt {\n  issuer = \"https://idp.example\"\n  audience = \"a\"\n}\n", "No map"},
+		{"jwt bad team", valid + strings.Replace(jwtBlock("https://idp.example", "a"), `team = "etabA"`, `team = "a b"`, 1), "Invalid map"},
+		{"jwt skew", valid + strings.Replace(jwtBlock("https://idp.example", "a"), "jwt {", "jwt {\n  clock_skew = \"1h\"", 1), "Clock skew too large"},
+		{"jwt jwks cleartext", valid + strings.Replace(jwtBlock("https://idp.example", "a"), "jwt {", "jwt {\n  jwks_url = \"http://keys.example/k\"", 1), "Invalid jwks_url"},
+		{"jwt negative rpm", valid + strings.Replace(jwtBlock("https://idp.example", "a"), "jwt {", "jwt {\n  rpm = -1", 1), "Invalid limit"},
 		{"syntax", valid + "team {", "test.hcl:"},
 		{"string for number", strings.Replace(valid, "capacity = 256", `capacity = "many"`, 1), "Unsuitable value type"},
 	}
@@ -210,6 +219,45 @@ func TestParseRejectsWithPosition(t *testing.T) {
 				t.Fatalf("error %q does not contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func jwtBlock(issuer, aud string) string {
+	return fmt.Sprintf("jwt {\n  issuer = %q\n  audience = %q\n  map {\n    value = \"lab-a\"\n    team = \"etabA\"\n  }\n}\n", issuer, aud)
+}
+
+func TestParseJWT(t *testing.T) {
+	c, err := parse(valid + `jwt {
+  issuer         = "https://idp.example/realms/r"
+  audience       = "llmflow"
+  type           = "at+jwt"
+  username_claim = "email"
+  rpm            = 60
+  map {
+    value = "lab-a"
+    team  = "etabA"
+  }
+  map {
+    claim   = "department"
+    value   = "physics"
+    team    = "etabB"
+    project = "p1"
+  }
+}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := c.JWT
+	if j == nil || j.Issuer != "https://idp.example/realms/r" || j.Type != "at+jwt" || j.UsernameClaim != "email" || j.RPM != 60 ||
+		j.ClockSkew != time.Minute || j.MinRefresh != time.Minute || len(j.Maps) != 2 ||
+		j.Maps[0] != (JWTMap{Claim: "groups", Value: "lab-a", Team: "etabA"}) ||
+		j.Maps[1] != (JWTMap{Claim: "department", Value: "physics", Team: "etabB", Project: "p1"}) {
+		t.Fatalf("%+v", j)
+	}
+	// Loopback issuers are accepted over http (tests, a local IdP).
+	if _, err := parse(valid + jwtBlock("http://127.0.0.1:9000", "a")); err != nil {
+		t.Fatal(err)
 	}
 }
 
