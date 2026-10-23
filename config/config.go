@@ -65,6 +65,9 @@ type Config struct {
 	TrustedProxies []netip.Prefix
 	// Routes restricts route classes to client networks.
 	Routes Routes
+	// JWT, when set, accepts OpenID Connect access tokens on the inference
+	// API besides virtual keys.
+	JWT *JWT
 }
 
 // Routes holds the network restrictions per route class. A nil list means
@@ -74,6 +77,22 @@ type Routes struct {
 	Admin     []netip.Prefix
 	Metrics   []netip.Prefix
 	Healthz   []netip.Prefix
+}
+
+// JWT configures access tokens from one OpenID Connect issuer.
+type JWT struct {
+	Issuer, Audience, JWKSURL, Type string
+	UsernameClaim, GroupsClaim      string
+	ClockSkew, MinRefresh           time.Duration
+	// Limits applied to every token holder, like a key's.
+	RPM, TPM, MaxInFlight int
+	// Maps are tried in order; the first match names the team.
+	Maps []JWTMap
+}
+
+// JWTMap maps a claim value to a team (and optionally a project).
+type JWTMap struct {
+	Claim, Value, Team, Project string
 }
 
 // LoopbackOnly is the default for /metrics and /healthz.

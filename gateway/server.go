@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-authn/oidc"
 	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/fairshare"
 	"github.com/go-llmflow/gateway/store"
@@ -63,6 +64,11 @@ type Server struct {
 	// alerts (nil when no channel is configured).
 	allowedTags map[string]bool
 	alerts      *alerter
+	// jwt verifies OpenID Connect access tokens (nil: virtual keys only);
+	// jwtCache keeps verified tokens until their expiry or the key TTL.
+	jwt       *oidc.Verifier
+	jwtCache  *keyCache
+	jwtClient *http.Client
 
 	cancel context.CancelFunc
 	bg     sync.WaitGroup
@@ -76,6 +82,10 @@ func WithClock(now func() time.Time) Option { return func(s *Server) { s.now = n
 
 // WithLogger sets the logger (default: discard).
 func WithLogger(l *slog.Logger) Option { return func(s *Server) { s.log = l } }
+
+// WithJWTClient sets the HTTP client used for OIDC discovery and the key
+// set (a private CA, a proxy).
+func WithJWTClient(c *http.Client) Option { return func(s *Server) { s.jwtClient = c } }
 
 // New builds a server. Call Start to run its background loops and Close to
 // stop them.
@@ -166,6 +176,10 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 	s.rec.done = s.budget.persisted
 	s.keys = newKeyCache(cfg.KeyCacheTTL, s.now)
 	s.authFails = newFailLimiter(cfg.AuthFailuresPerMinute, s.now)
+	s.jwtCache = newKeyCache(cfg.KeyCacheTTL, s.now)
+	if s.jwtClient == nil {
+		s.jwtClient = defaultJWTClient()
+	}
 	return s, nil
 }
 
@@ -184,6 +198,9 @@ func (s *Server) Start(ctx context.Context) error {
 				return fmt.Errorf("gateway: ensure team %s: %w", t, err)
 			}
 		}
+	}
+	if err := s.startJWT(ctx); err != nil {
+		return err
 	}
 	if err := s.budget.refresh(ctx); err != nil {
 		s.log.Error("initial budget refresh failed", "err", err)

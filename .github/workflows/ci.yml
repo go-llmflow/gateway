@@ -61,6 +61,7 @@ jobs:
           - { target: FuzzRef, pkg: ./secret }
           - { target: FuzzParseKV2, pkg: ./secret }
           - { target: FuzzClientAddr, pkg: ./gateway }
+          - { target: FuzzJWTBearer, pkg: ./gateway }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
