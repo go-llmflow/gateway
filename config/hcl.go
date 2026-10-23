@@ -37,7 +37,7 @@ type fileHCL struct {
 	Limits               *limitsHCL `hcl:"limits,block"`
 	FairShare            *fairHCL   `hcl:"fairshare,block"`
 	Health               *healthHCL `hcl:"health,block"`
-	Teams                []teamHCL  `hcl:"team,block"`
+	Orgs                 []orgHCL   `hcl:"org,block"`
 	Pools                []poolHCL  `hcl:"pool,block"`
 	Models               []modelHCL `hcl:"model,block"`
 }
@@ -89,12 +89,19 @@ type healthHCL struct {
 	PathRange     hcl.Range `hcl:"path,attr_value_range"`
 }
 
-type teamHCL struct {
-	Name       string    `hcl:"name,label"`
-	NameRange  hcl.Range `hcl:"name,label_range"`
-	Share      float64   `hcl:"share"`
-	ShareRange hcl.Range `hcl:"share,attr_value_range"`
-	DefRange   hcl.Range `hcl:",def_range"`
+type orgHCL struct {
+	Name       string       `hcl:"name,label"`
+	NameRange  hcl.Range    `hcl:"name,label_range"`
+	Share      float64      `hcl:"share"`
+	ShareRange hcl.Range    `hcl:"share,attr_value_range"`
+	Teams      []orgTeamHCL `hcl:"team,block"`
+	DefRange   hcl.Range    `hcl:",def_range"`
+}
+
+type orgTeamHCL struct {
+	Name      string    `hcl:"name,label"`
+	NameRange hcl.Range `hcl:"name,label_range"`
+	DefRange  hcl.Range `hcl:",def_range"`
 }
 
 type poolHCL struct {
@@ -329,29 +336,40 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		}
 	}
 
-	// teams
-	teams := map[string]bool{}
+	// organisations and their teams
+	orgs, teams := map[string]bool{}, map[string]bool{}
 	sum := 0.0
-	for _, t := range raw.Teams {
-		if !ValidName(t.Name) {
-			v.errf(t.NameRange, "Invalid team name", "%q: want [A-Za-z0-9_.-]{1,64}", t.Name)
+	for _, o := range raw.Orgs {
+		if !ValidName(o.Name) {
+			v.errf(o.NameRange, "Invalid organisation name", "%q: want [A-Za-z0-9_.-]{1,64}", o.Name)
 		}
-		if teams[t.Name] {
-			v.errf(t.DefRange, "Duplicate team", "team %q is declared twice", t.Name)
+		if orgs[o.Name] {
+			v.errf(o.DefRange, "Duplicate organisation", "org %q is declared twice", o.Name)
 		}
-		teams[t.Name] = true
-		if !(t.Share >= 0 && t.Share <= 1) {
-			v.errf(t.ShareRange, "Invalid share", "team %q share = %v: want 0..1", t.Name, t.Share)
+		orgs[o.Name] = true
+		if !(o.Share >= 0 && o.Share <= 1) {
+			v.errf(o.ShareRange, "Invalid share", "org %q share = %v: want 0..1", o.Name, o.Share)
 		}
-		sum += t.Share
-		c.Teams = append(c.Teams, Team{Name: t.Name, Share: t.Share})
+		sum += o.Share
+		org := Org{Name: o.Name, Share: o.Share}
+		for _, t := range o.Teams {
+			if !ValidName(t.Name) {
+				v.errf(t.NameRange, "Invalid team name", "%q: want [A-Za-z0-9_.-]{1,64}", t.Name)
+			}
+			if teams[t.Name] {
+				v.errf(t.DefRange, "Duplicate team", "team %q is declared twice (team names are global)", t.Name)
+			}
+			teams[t.Name] = true
+			org.Teams = append(org.Teams, t.Name)
+		}
+		c.Orgs = append(c.Orgs, org)
 	}
 	if sum > 1+1e-9 {
 		r := hcl.Range{}
-		if n := len(raw.Teams); n > 0 {
-			r = raw.Teams[n-1].ShareRange
+		if n := len(raw.Orgs); n > 0 {
+			r = raw.Orgs[n-1].ShareRange
 		}
-		v.errf(r, "Shares exceed the pool", "team shares sum to %v: want at most 1", sum)
+		v.errf(r, "Shares exceed the pool", "organisation shares sum to %v: want at most 1", sum)
 	}
 
 	// pools

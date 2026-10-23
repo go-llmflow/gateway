@@ -22,9 +22,15 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 			f(w, r)
 		})
 	}
+	h("GET /admin/orgs", s.listOrgs)
+	h("POST /admin/orgs", s.createOrg)
+	h("DELETE /admin/orgs/{name}", s.disableOrg)
 	h("GET /admin/teams", s.listTeams)
 	h("POST /admin/teams", s.createTeam)
 	h("DELETE /admin/teams/{name}", s.disableTeam)
+	h("GET /admin/teams/{team}/projects", s.listProjects)
+	h("POST /admin/teams/{team}/projects", s.createProject)
+	h("DELETE /admin/teams/{team}/projects/{name}", s.disableProject)
 	h("GET /admin/keys", s.listKeys)
 	h("POST /admin/keys", s.createKey)
 	h("DELETE /admin/keys/{id}", s.revokeKey)
@@ -57,29 +63,37 @@ func storeError(w http.ResponseWriter, err error) {
 		apiError(w, http.StatusNotFound, "not_found", "not found")
 	case errors.Is(err, store.ErrExists):
 		apiError(w, http.StatusConflict, "conflict", "already exists")
+	case errors.Is(err, store.ErrConflict):
+		apiError(w, http.StatusConflict, "conflict", "conflicts with an existing object")
 	default:
 		apiError(w, http.StatusServiceUnavailable, "service_unavailable", "store error")
 	}
 }
 
-func (s *Server) listTeams(w http.ResponseWriter, r *http.Request) {
-	ts, err := s.st.ListTeams(r.Context())
+func badName(w http.ResponseWriter, what string) {
+	apiError(w, http.StatusBadRequest, "invalid_request_error", what+" name: want [A-Za-z0-9_.-]{1,64}")
+}
+
+func (s *Server) listOrgs(w http.ResponseWriter, r *http.Request) {
+	os, err := s.st.ListOrgs(r.Context())
 	if err != nil {
 		storeError(w, err)
 		return
 	}
-	type team struct {
-		store.Team
+	type org struct {
+		store.Org
+		// Share is the configured share of every pool (0 for an
+		// organisation created through the API: it only borrows).
 		Share float64 `json:"share"`
 	}
-	out := make([]team, 0, len(ts))
-	for _, t := range ts {
-		out = append(out, team{t, s.cfg.TeamShare(t.Name)})
+	out := make([]org, 0, len(os))
+	for _, o := range os {
+		out = append(out, org{o, s.cfg.OrgShare(o.Name)})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
-func (s *Server) createTeam(w http.ResponseWriter, r *http.Request) {
+func (s *Server) createOrg(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name string `json:"name"`
 	}
@@ -87,14 +101,99 @@ func (s *Server) createTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !config.ValidName(in.Name) {
-		apiError(w, http.StatusBadRequest, "invalid_request_error", "team name: want [A-Za-z0-9_.-]{1,64}")
+		badName(w, "organisation")
 		return
 	}
-	if err := s.st.CreateTeam(r.Context(), in.Name); err != nil {
+	if err := s.st.CreateOrg(r.Context(), in.Name); err != nil {
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"name": in.Name, "share": s.cfg.TeamShare(in.Name)})
+	writeJSON(w, http.StatusCreated, map[string]any{"name": in.Name, "share": s.cfg.OrgShare(in.Name)})
+}
+
+func (s *Server) disableOrg(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := s.st.DisableOrg(r.Context(), name); err != nil {
+		storeError(w, err)
+		return
+	}
+	s.keys.forget(func(k store.Key) bool { return k.Org == name })
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) listTeams(w http.ResponseWriter, r *http.Request) {
+	ts, err := s.st.ListTeams(r.Context(), r.URL.Query().Get("org"))
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ts)
+}
+
+func (s *Server) createTeam(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name string `json:"name"`
+		Org  string `json:"org"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	if !config.ValidName(in.Name) {
+		badName(w, "team")
+		return
+	}
+	if !config.ValidName(in.Org) {
+		badName(w, "organisation")
+		return
+	}
+	if err := s.st.CreateTeam(r.Context(), in.Name, in.Org); err != nil {
+		storeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"name": in.Name, "org": in.Org})
+}
+
+func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
+	team := r.PathValue("team")
+	if _, err := s.st.GetTeam(r.Context(), team); err != nil {
+		storeError(w, err)
+		return
+	}
+	ps, err := s.st.ListProjects(r.Context(), team)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ps)
+}
+
+func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	if !config.ValidName(in.Name) {
+		badName(w, "project")
+		return
+	}
+	team := r.PathValue("team")
+	if err := s.st.CreateProject(r.Context(), team, in.Name); err != nil {
+		storeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"team": team, "name": in.Name})
+}
+
+func (s *Server) disableProject(w http.ResponseWriter, r *http.Request) {
+	team, name := r.PathValue("team"), r.PathValue("name")
+	if err := s.st.DisableProject(r.Context(), team, name); err != nil {
+		storeError(w, err)
+		return
+	}
+	s.keys.forget(func(k store.Key) bool { return k.Team == team && k.Project == name })
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) disableTeam(w http.ResponseWriter, r *http.Request) {
@@ -122,6 +221,7 @@ func (s *Server) listKeys(w http.ResponseWriter, r *http.Request) {
 func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Team        string `json:"team"`
+		Project     string `json:"project"`
 		Name        string `json:"name"`
 		RPM         int    `json:"rpm"`
 		TPM         int    `json:"tpm"`
@@ -135,14 +235,14 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secret, id, hash := store.GenerateKey()
-	k := store.Key{ID: id, Hash: hash, Team: in.Team, Name: in.Name, RPM: in.RPM, TPM: in.TPM, MaxInFlight: in.MaxInFlight}
+	k := store.Key{ID: id, Hash: hash, Team: in.Team, Project: in.Project, Name: in.Name, RPM: in.RPM, TPM: in.TPM, MaxInFlight: in.MaxInFlight}
 	if err := s.st.CreateKey(r.Context(), k); err != nil {
 		storeError(w, err)
 		return
 	}
-	s.log.Info("key created", "key", id, "team", in.Team)
+	s.log.Info("key created", "key", id, "team", in.Team, "project", in.Project)
 	// The secret is returned once and never logged or stored.
-	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "team": in.Team, "key": secret})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "team": in.Team, "project": in.Project, "key": secret})
 }
 
 func (s *Server) revokeKey(w http.ResponseWriter, r *http.Request) {
@@ -238,7 +338,7 @@ func WriteUsageCSV(w io.Writer, from, to time.Time, us []store.TeamUsage) error 
 
 func (s *Server) fairshareState(w http.ResponseWriter, _ *http.Request) {
 	type teamOut struct {
-		Team           string  `json:"team"`
+		Org            string  `json:"org"`
 		Share          float64 `json:"share"`
 		Reserved       int     `json:"reserved"`
 		InFlight       int     `json:"inflight"`

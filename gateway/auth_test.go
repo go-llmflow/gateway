@@ -40,7 +40,10 @@ func (c *countingStore) lookups(h [32]byte) int {
 func TestValidKeysSurviveMissSpray(t *testing.T) {
 	cs := &countingStore{Memory: store.NewMemory(), byHash: map[[32]byte]int{}}
 	ctx := context.Background()
-	if err := cs.CreateTeam(ctx, "etabA"); err != nil {
+	if err := cs.CreateOrg(ctx, "etabA"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.CreateTeam(ctx, "etabA", "etabA"); err != nil {
 		t.Fatal(err)
 	}
 	secret, id, h := store.GenerateKey()

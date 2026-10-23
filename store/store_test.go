@@ -21,15 +21,75 @@ func contract(t *testing.T, s Store) {
 			t.Fatal(err)
 		}
 	}
-	must(s.CreateTeam(ctx, "etabA"))
-	must(s.CreateTeam(ctx, "etabB"))
-	if err := s.CreateTeam(ctx, "etabA"); !errors.Is(err, ErrExists) {
+	must(s.CreateOrg(ctx, "orgA"))
+	must(s.CreateOrg(ctx, "orgB"))
+	if err := s.CreateOrg(ctx, "orgA"); !errors.Is(err, ErrExists) {
+		t.Fatalf("duplicate org: %v", err)
+	}
+	orgs, err := s.ListOrgs(ctx)
+	must(err)
+	if len(orgs) != 2 || orgs[0].Name != "orgA" || orgs[0].Disabled {
+		t.Fatalf("orgs %+v", orgs)
+	}
+	if err := s.CreateTeam(ctx, "etabA", "nobody"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("team in unknown org: %v", err)
+	}
+	must(s.CreateTeam(ctx, "etabA", "orgA"))
+	must(s.CreateTeam(ctx, "etabB", "orgB"))
+	if err := s.CreateTeam(ctx, "etabA", "orgA"); !errors.Is(err, ErrExists) {
 		t.Fatalf("duplicate team: %v", err)
 	}
-	teams, err := s.ListTeams(ctx)
+	if err := s.CreateTeam(ctx, "etabA", "orgB"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("team moved to another org: %v", err)
+	}
+	teams, err := s.ListTeams(ctx, "")
 	must(err)
-	if len(teams) != 2 || teams[0].Name != "etabA" || teams[0].Disabled {
+	if len(teams) != 2 || teams[0].Name != "etabA" || teams[0].Org != "orgA" || teams[0].Disabled {
 		t.Fatalf("teams %+v", teams)
+	}
+	teams, err = s.ListTeams(ctx, "orgB")
+	must(err)
+	if len(teams) != 1 || teams[0].Name != "etabB" {
+		t.Fatalf("teams of orgB %+v", teams)
+	}
+	if tm, err := s.GetTeam(ctx, "etabB"); err != nil || tm.Org != "orgB" {
+		t.Fatalf("GetTeam %+v %v", tm, err)
+	}
+	if _, err := s.GetTeam(ctx, "nobody"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetTeam unknown: %v", err)
+	}
+
+	// Projects.
+	must(s.CreateProject(ctx, "etabA", "llm-eval"))
+	if err := s.CreateProject(ctx, "etabA", "llm-eval"); !errors.Is(err, ErrExists) {
+		t.Fatalf("duplicate project: %v", err)
+	}
+	if err := s.CreateProject(ctx, "nobody", "x"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("project of unknown team: %v", err)
+	}
+	ps, err := s.ListProjects(ctx, "etabA")
+	must(err)
+	if len(ps) != 1 || ps[0].Name != "llm-eval" || ps[0].Team != "etabA" {
+		t.Fatalf("projects %+v", ps)
+	}
+	if err := s.CreateKey(ctx, Key{ID: "k_np", Hash: HashSecret("np"), Team: "etabA", Project: "nope"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("key in unknown project: %v", err)
+	}
+	_, pid, ph := GenerateKey()
+	must(s.CreateKey(ctx, Key{ID: pid, Hash: ph, Team: "etabA", Project: "llm-eval"}))
+	if pk, err := s.GetKey(ctx, pid); err != nil || pk.Project != "llm-eval" || pk.Org != "orgA" {
+		t.Fatalf("project key %+v %v", pk, err)
+	}
+	must(s.DisableProject(ctx, "etabA", "llm-eval"))
+	if pk, _ := s.KeyByHash(ctx, ph); !pk.Revoked {
+		t.Fatal("disabling a project must revoke its keys")
+	}
+	if err := s.DisableProject(ctx, "etabA", "nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("disable unknown project: %v", err)
+	}
+	must(s.CreateProject(ctx, "etabA", "llm-eval")) // re-enable
+	if _, err := s.GetKey(ctx, "k_none"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetKey unknown: %v", err)
 	}
 
 	secret, id, h := GenerateKey()
@@ -48,7 +108,7 @@ func contract(t *testing.T, s Store) {
 	}
 	k, err := s.KeyByHash(ctx, HashSecret(secret))
 	must(err)
-	if k.ID != id || k.Team != "etabA" || k.RPM != 60 || k.TPM != 1000 || k.MaxInFlight != 4 || k.Revoked || k.Hash != h {
+	if k.ID != id || k.Team != "etabA" || k.Org != "orgA" || k.Project != "" || k.RPM != 60 || k.TPM != 1000 || k.MaxInFlight != 4 || k.Revoked || k.Hash != h {
 		t.Fatalf("key %+v", k)
 	}
 	if _, err := s.KeyByHash(ctx, HashSecret("wrong")); !errors.Is(err, ErrNotFound) {
@@ -56,14 +116,14 @@ func contract(t *testing.T, s Store) {
 	}
 	_, id2, h2 := GenerateKey()
 	must(s.CreateKey(ctx, Key{ID: id2, Hash: h2, Team: "etabB"}))
-	keys, err := s.ListKeys(ctx, "etabA")
+	keys, err := s.ListKeys(ctx, "etabB")
 	must(err)
-	if len(keys) != 1 {
+	if len(keys) != 1 || keys[0].Org != "orgB" {
 		t.Fatalf("keys %+v", keys)
 	}
 	keys, err = s.ListKeys(ctx, "")
 	must(err)
-	if len(keys) != 2 {
+	if len(keys) != 3 {
 		t.Fatalf("all keys %+v", keys)
 	}
 	must(s.RevokeKey(ctx, id))
@@ -118,11 +178,29 @@ func contract(t *testing.T, s Store) {
 	if err := s.DisableTeam(ctx, "nobody"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("disable unknown: %v", err)
 	}
-	must(s.CreateTeam(ctx, "etabB")) // re-enable
+	must(s.CreateTeam(ctx, "etabB", "orgB")) // re-enable
 	must(s.DeleteBudget(ctx, "etabB"))
 	if err := s.DeleteBudget(ctx, "etabB"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete missing budget: %v", err)
 	}
+
+	// Disabling an organisation disables its teams and revokes their keys.
+	_, id3, h3 := GenerateKey()
+	must(s.CreateKey(ctx, Key{ID: id3, Hash: h3, Team: "etabB"}))
+	must(s.DisableOrg(ctx, "orgB"))
+	if k, _ := s.KeyByHash(ctx, h3); !k.Revoked {
+		t.Fatal("disabling an org must revoke its keys")
+	}
+	if tm, _ := s.GetTeam(ctx, "etabB"); !tm.Disabled {
+		t.Fatal("disabling an org must disable its teams")
+	}
+	if err := s.CreateTeam(ctx, "etabC", "orgB"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("team in disabled org: %v", err)
+	}
+	if err := s.DisableOrg(ctx, "nobody"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("disable unknown org: %v", err)
+	}
+	must(s.CreateOrg(ctx, "orgB")) // re-enable
 }
 
 func TestMemoryContract(t *testing.T) {
@@ -142,17 +220,22 @@ func TestMemoryFaults(t *testing.T) {
 	boom := errors.New("boom")
 	m.SetFail(boom)
 	checks := []error{
-		m.Ping(ctx), m.CreateTeam(ctx, "a"), m.DisableTeam(ctx, "a"), m.CreateKey(ctx, Key{}),
+		m.Ping(ctx), m.CreateOrg(ctx, "o"), m.DisableOrg(ctx, "o"), m.CreateTeam(ctx, "a", "o"), m.DisableTeam(ctx, "a"),
+		m.CreateProject(ctx, "a", "p"), m.DisableProject(ctx, "a", "p"), m.CreateKey(ctx, Key{}),
 		m.RevokeKey(ctx, "a"), m.SetBudget(ctx, Budget{Period: Day}), m.DeleteBudget(ctx, "a"),
 		m.InsertRecords(ctx, nil),
 	}
-	_, e1 := m.ListTeams(ctx)
+	_, e1 := m.ListTeams(ctx, "")
 	_, e2 := m.ListKeys(ctx, "")
 	_, e3 := m.KeyByHash(ctx, [32]byte{})
 	_, e4 := m.Budgets(ctx)
 	_, e5 := m.SpendSince(ctx, time.Time{})
 	_, e6 := m.Usage(ctx, time.Time{}, time.Time{})
-	for i, err := range append(checks, e1, e2, e3, e4, e5, e6) {
+	_, e7 := m.ListOrgs(ctx)
+	_, e8 := m.GetTeam(ctx, "a")
+	_, e9 := m.ListProjects(ctx, "a")
+	_, e10 := m.GetKey(ctx, "a")
+	for i, err := range append(checks, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10) {
 		if !errors.Is(err, boom) {
 			t.Fatalf("call %d: %v", i, err)
 		}
@@ -197,9 +280,7 @@ func TestPostgresContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.pool.Exec(ctx, `DROP TABLE IF EXISTS llmflow_usage, llmflow_budgets, llmflow_keys, llmflow_teams`); err != nil {
-		t.Fatal(err)
-	}
+	dropAll(t, p)
 	p.Close()
 	p, err = OpenPostgres(ctx, dsn)
 	if err != nil {
@@ -210,5 +291,67 @@ func TestPostgresContract(t *testing.T) {
 
 	if _, err := OpenPostgres(ctx, "postgres://u:hunter2@[::1"); err == nil || strings.Contains(err.Error(), "hunter2") {
 		t.Fatalf("bad DSN error leaks or passes: %v", err)
+	}
+}
+
+func dropAll(t *testing.T, p *Postgres) {
+	t.Helper()
+	if _, err := p.pool.Exec(context.Background(),
+		`DROP TABLE IF EXISTS llmflow_usage, llmflow_budgets, llmflow_keys, llmflow_projects, llmflow_teams, llmflow_orgs`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A v0.1.0 database (teams without organisation, keys without project,
+// usage without org/project/estimated) is upgraded in place, and its teams
+// are adopted by the organisation the configuration puts them in.
+func TestPostgresUpgradeFromV010(t *testing.T) {
+	dsn := os.Getenv("LLMFLOW_TEST_PG_DSN")
+	if dsn == "" {
+		t.Skip("LLMFLOW_TEST_PG_DSN not set")
+	}
+	ctx := context.Background()
+	p, err := OpenPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropAll(t, p)
+	h := HashSecret("old-key")
+	for _, q := range []string{
+		`CREATE TABLE llmflow_teams (name text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now(), disabled boolean NOT NULL DEFAULT false)`,
+		`CREATE TABLE llmflow_keys (id text PRIMARY KEY, hash bytea NOT NULL UNIQUE, team text NOT NULL REFERENCES llmflow_teams(name),
+			name text NOT NULL DEFAULT '', rpm integer NOT NULL DEFAULT 0, tpm integer NOT NULL DEFAULT 0,
+			max_inflight integer NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now(), revoked boolean NOT NULL DEFAULT false)`,
+		`CREATE TABLE llmflow_usage (id bigserial PRIMARY KEY, ts timestamptz NOT NULL, team text NOT NULL, key_id text NOT NULL,
+			model text NOT NULL, pool text NOT NULL, upstream text NOT NULL, prompt_tokens bigint NOT NULL, completion_tokens bigint NOT NULL,
+			cached_tokens bigint NOT NULL, cost double precision NOT NULL, latency_ms double precision NOT NULL, status integer NOT NULL,
+			priority integer NOT NULL, borrowing boolean NOT NULL, stream boolean NOT NULL)`,
+		`INSERT INTO llmflow_teams (name) VALUES ('etabA')`,
+	} {
+		if _, err := p.pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := p.pool.Exec(ctx, `INSERT INTO llmflow_keys (id, hash, team) VALUES ('k_old', $1, 'etabA')`, h[:]); err != nil {
+		t.Fatal(err)
+	}
+	p.Close()
+	p, err = OpenPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	defer p.Close()
+	if err := p.CreateOrg(ctx, "orgA"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.CreateTeam(ctx, "etabA", "orgA"); err != nil {
+		t.Fatalf("adopt v0.1 team: %v", err)
+	}
+	k, err := p.KeyByHash(ctx, h)
+	if err != nil || k.Org != "orgA" || k.Project != "" || k.Revoked {
+		t.Fatalf("old key after upgrade: %+v %v", k, err)
+	}
+	if err := p.InsertRecords(ctx, []Record{{Time: time.Now(), Org: "orgA", Team: "etabA", KeyID: "k_old", Estimated: true}}); err != nil {
+		t.Fatalf("insert after upgrade: %v", err)
 	}
 }

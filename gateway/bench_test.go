@@ -81,9 +81,6 @@ func BenchmarkOverhead(b *testing.B) {
 	defer srv.Close(context.Background())
 	gw := httptest.NewServer(srv.Handler())
 	defer gw.Close()
-	if err := st.CreateTeam(context.Background(), "etabA"); err != nil && err != store.ErrExists {
-		b.Fatal(err)
-	}
 	secret, id, h := store.GenerateKey()
 	if err := st.CreateKey(context.Background(), store.Key{ID: id, Hash: h, Team: "etabA"}); err != nil {
 		b.Fatal(err)

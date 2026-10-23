@@ -36,7 +36,7 @@ type Config struct {
 	FairShare         FairShare
 	Health            Health
 	Retries           int
-	Teams             []Team
+	Orgs              []Org
 	Pools             []Pool
 	ModelGroups       []ModelGroup
 	ShutdownGrace     time.Duration
@@ -92,10 +92,13 @@ type Health struct {
 	Path     string
 }
 
-// Team is a tenant (an institution) with its share of every pool.
-type Team struct {
+// Org is an organisation (an institution) with its share of every pool
+// and the teams (labs) declared under it. Teams and projects can also be
+// created through the admin API.
+type Org struct {
 	Name  string
 	Share float64
+	Teams []string
 }
 
 // Pool is a capacity domain whose sustainable concurrency C is measured
@@ -250,11 +253,12 @@ func ValidName(s string) bool {
 // FailClosed reports whether budget enforcement fails closed.
 func (c *Config) FailClosed() bool { return c.Store.FailClosed == nil || *c.Store.FailClosed }
 
-// TeamShare returns the configured share of a team (0 when unknown).
-func (c *Config) TeamShare(name string) float64 {
-	for _, t := range c.Teams {
-		if t.Name == name {
-			return t.Share
+// OrgShare returns the configured share of an organisation (0 when
+// unknown).
+func (c *Config) OrgShare(name string) float64 {
+	for _, o := range c.Orgs {
+		if o.Name == name {
+			return o.Share
 		}
 	}
 	return 0

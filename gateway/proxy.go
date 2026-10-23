@@ -90,7 +90,7 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			return
 		}
 		promptEst := int64(len(out) / 4)
-		grant := g.pool.Acquire(key.Team, g.class, promptEst+req.MaxTokens)
+		grant := g.pool.Acquire(key.Org, g.class, promptEst+req.MaxTokens)
 
 		// Everything below ends in finish, which charges what vLLM did.
 		// The usage vLLM reports is used when it arrives. When it does not
@@ -150,7 +150,7 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 				upstreamLabel = redactURL(u.base)
 			}
 			s.rec.record(store.Record{
-				Time: end.UTC(), Team: key.Team, KeyID: key.ID, Model: g.cfg.Name, Pool: g.cfg.Pool,
+				Time: end.UTC(), Org: key.Org, Team: key.Team, Project: key.Project, KeyID: key.ID, Model: g.cfg.Name, Pool: g.cfg.Pool,
 				Upstream: upstreamLabel, PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
 				CachedTokens: usage.Cached(), Cost: cost, LatencyMS: float64(end.Sub(t0).Microseconds()) / 1000,
 				Status: status, Priority: grant.Priority, Borrowing: grant.Borrowing, Stream: req.Stream,

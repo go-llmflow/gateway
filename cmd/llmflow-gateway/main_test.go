@@ -41,7 +41,10 @@ func TestCheckConfig(t *testing.T) {
 	vk := writeFile(t, dir, "vllm", "v-secret\n")
 	cfg := writeFile(t, dir, "c.hcl", `
 master_key_file = "`+mk+`"
-team "a" { share = 1 }
+org "o" {
+  share = 1
+  team "a" {}
+}
 pool "p" { capacity = 4 }
 model "m" {
   pool     = "p"
@@ -50,7 +53,7 @@ model "m" {
 }
 `)
 	out, err := run(t, "check-config", "--config", cfg)
-	if err != nil || !strings.Contains(out, "ok: 1 teams") {
+	if err != nil || !strings.Contains(out, "ok: 1 orgs, 1 teams") {
 		t.Fatalf("%q %v", out, err)
 	}
 	if strings.Contains(out, "secret") {
@@ -69,5 +72,37 @@ model "m" {
 	bad := writeFile(t, dir, "bad.hcl", "master_key_file = \"/m\"\npool \"p\" { capacity = 0 }\n")
 	if _, err := run(t, "check-config", "-c", bad); err == nil || !strings.Contains(err.Error(), "bad.hcl:2:23: Invalid capacity") {
 		t.Fatalf("diagnostic: %v", err)
+	}
+}
+
+// Each error is printed exactly once (cobra's own "Error:" line used to
+// duplicate it).
+func TestErrorPrintedOnce(t *testing.T) {
+	dir := t.TempDir()
+	bad := writeFile(t, dir, "bad.hcl", "master_key_file = \"/m\"\npool \"p\" { capacity = 0 }\n")
+	for _, args := range [][]string{
+		{"check-config", "-c", bad},
+		{"check-config", "-c", filepath.Join(dir, "missing.hcl")},
+		{"no-such-command"},
+	} {
+		cmd := RootCmd()
+		var stdout, stderr bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs(args)
+		if code := execute(cmd); code != 1 {
+			t.Fatalf("%v: exit %d", args, code)
+		}
+		lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+		first := lines[0]
+		if strings.Count(stderr.String(), first) != 1 || strings.Contains(stderr.String(), "Error:") {
+			t.Fatalf("%v: error printed more than once:\n%s", args, stderr.String())
+		}
+	}
+	cmd := RootCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"version"})
+	if code := execute(cmd); code != 0 {
+		t.Fatalf("version exit %d", code)
 	}
 }

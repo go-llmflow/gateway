@@ -83,8 +83,11 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 		o(s)
 	}
 	shares := map[string]float64{}
-	for _, t := range cfg.Teams {
-		shares[t.Name] = t.Share
+	// Shares, reservations and borrowing are per organisation: the
+	// institutions own the GPUs. The teams of an organisation draw on its
+	// reservation together.
+	for _, o := range cfg.Orgs {
+		shares[o.Name] = o.Share
 	}
 	for _, p := range cfg.Pools {
 		s.pools[p.Name] = fairshare.NewPool(p.Name, p.Capacity, shares, cfg.FairShare.HalfLife, s.now)
@@ -147,9 +150,17 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 // Start ensures configured teams exist, loads budgets and starts the
 // health, budget and accounting loops.
 func (s *Server) Start(ctx context.Context) error {
-	for _, t := range s.cfg.Teams {
-		if err := s.st.CreateTeam(ctx, t.Name); err != nil && !errors.Is(err, store.ErrExists) {
-			return fmt.Errorf("gateway: ensure team %s: %w", t.Name, err)
+	for _, o := range s.cfg.Orgs {
+		if err := s.st.CreateOrg(ctx, o.Name); err != nil && !errors.Is(err, store.ErrExists) {
+			return fmt.Errorf("gateway: ensure org %s: %w", o.Name, err)
+		}
+		for _, t := range o.Teams {
+			switch err := s.st.CreateTeam(ctx, t, o.Name); {
+			case errors.Is(err, store.ErrConflict):
+				return fmt.Errorf("gateway: team %s is configured under org %s but belongs to another org in the store", t, o.Name)
+			case err != nil && !errors.Is(err, store.ErrExists):
+				return fmt.Errorf("gateway: ensure team %s: %w", t, err)
+			}
 		}
 	}
 	if err := s.budget.refresh(ctx); err != nil {
@@ -258,10 +269,10 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 		get        func(fairshare.TeamStat) float64
 	}
 	gauges := []gauge{
-		{"llmflow_inflight", "Requests in flight (sent to vLLM, not finished), by pool and team.", func(t fairshare.TeamStat) float64 { return float64(t.InFlight) }},
-		{"llmflow_inflight_borrowing", "Requests in flight above the team's reservation.", func(t fairshare.TeamStat) float64 { return float64(t.Borrowing) }},
+		{"llmflow_inflight", "Requests in flight (sent to vLLM, not finished), by pool and organisation.", func(t fairshare.TeamStat) float64 { return float64(t.InFlight) }},
+		{"llmflow_inflight_borrowing", "Requests in flight above the organisation's reservation.", func(t fairshare.TeamStat) float64 { return float64(t.Borrowing) }},
 		{"llmflow_inflight_tokens", "Estimated tokens (prompt bytes/4 + max tokens) of requests in flight.", func(t fairshare.TeamStat) float64 { return float64(t.InFlightTokens) }},
-		{"llmflow_borrowed_fraction", "Fraction of the team's in-flight requests that are borrowing.", func(t fairshare.TeamStat) float64 {
+		{"llmflow_borrowed_fraction", "Fraction of the organisation's in-flight requests that are borrowing.", func(t fairshare.TeamStat) float64 {
 			if t.InFlight == 0 {
 				return 0
 			}
@@ -269,7 +280,7 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 		}},
 		{"llmflow_reserved", "Within-share slots: share x C apportioned to integers by largest remainder.", func(t fairshare.TeamStat) float64 { return float64(t.Reserved) }},
 		{"llmflow_fairshare_usage", "Decayed usage (cost units) used for the fair-share ranking.", func(t fairshare.TeamStat) float64 { return t.Usage }},
-		{"llmflow_fairshare_level", "Level fairshare LF = S/U (+Inf when the team has no usage).", func(t fairshare.TeamStat) float64 { return t.LevelFairshare }},
+		{"llmflow_fairshare_level", "Level fairshare LF = S/U (+Inf when the organisation has no usage).", func(t fairshare.TeamStat) float64 { return t.LevelFairshare }},
 	}
 	snaps := map[string][]fairshare.TeamStat{}
 	for _, p := range s.porder {
@@ -279,7 +290,7 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 		writeHeader(w, g.name, g.help, "gauge")
 		for _, p := range s.porder {
 			for _, t := range snaps[p] {
-				writeSample(w, g.name, []string{"pool", "team"}, []string{p, t.Team}, g.get(t))
+				writeSample(w, g.name, []string{"pool", "org"}, []string{p, t.Team}, g.get(t))
 			}
 		}
 	}

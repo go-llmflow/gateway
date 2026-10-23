@@ -12,8 +12,8 @@ import (
 const valid = `
 master_key_file = "/etc/llmflow/master.key"
 
-team "etabA" { share = 0.8125 }
-team "etabB" { share = 0.1875 }
+org "etabA" { share = 0.8125 }
+org "etabB" { share = 0.1875 }
 
 pool "b300" { capacity = 256 }
 
@@ -63,8 +63,8 @@ func TestParseValid(t *testing.T) {
 	if c.ModelGroups[1].Class != Batch {
 		t.Fatalf("class: %v", c.ModelGroups[1].Class)
 	}
-	if c.TeamShare("etabA") != 0.8125 || c.TeamShare("nobody") != 0 {
-		t.Fatal("TeamShare")
+	if c.OrgShare("etabA") != 0.8125 || c.OrgShare("nobody") != 0 {
+		t.Fatal("OrgShare")
 	}
 	if kf := c.KeyFiles(); len(kf) != 2 {
 		t.Fatalf("key files %v", kf)
@@ -119,15 +119,19 @@ health {
 func TestParseRejectsWithPosition(t *testing.T) {
 	cases := []struct{ name, src, want string }{
 		{"unknown attribute", strings.Replace(valid, `master_key_file`, "temas = 1\nmaster_key_file", 1), `test.hcl:2:1: Unsupported argument`},
-		{"shares > 1", strings.Replace(valid, "0.1875", "0.5", 1), `test.hcl:5:24: Shares exceed the pool`},
+		{"shares > 1", strings.Replace(valid, "0.1875", "0.5", 1), `test.hcl:5:23: Shares exceed the pool`},
 		{"bad scheme", strings.Replace(valid, "http://10.0.0.3:8000", "file:///etc/passwd", 1), `test.hcl:29:16: Invalid base_url`},
 		{"userinfo", strings.Replace(valid, "http://10.0.0.3:8000", "http://u:p@10.0.0.3:8000", 1), "Invalid base_url"},
 		{"query", strings.Replace(valid, "http://10.0.0.3:8000", "http://10.0.0.3:8000?x=1", 1), "Invalid base_url"},
 		{"undeclared pool", strings.Replace(valid, `pool           = "b300"`, `pool           = "nope"`, 1), `test.hcl:26:20: Unknown pool`},
 		{"bad class", strings.Replace(valid, `"batch"`, `"urgent"`, 1), "Invalid class"},
 		{"no master", strings.Replace(valid, `master_key_file = "/etc/llmflow/master.key"`, "", 1), "Missing required argument"},
-		{"bad team name", strings.Replace(valid, `"etabB"`, `"etab B"`, 1), `test.hcl:5:6: Invalid team name`},
-		{"duplicate team", valid + `team "etabA" { share = 0 }`, "Duplicate team"},
+		{"bad org name", strings.Replace(valid, `"etabB"`, `"etab B"`, 1), `test.hcl:5:5: Invalid organisation name`},
+		{"duplicate org", valid + `org "etabA" { share = 0 }`, "Duplicate organisation"},
+		{"bad team name", valid + "org \"c\" {\n  share = 0\n  team \"a/b\" {}\n}\n", "Invalid team name"},
+		{"duplicate team", valid + "org \"c\" {\n  share = 0\n  team \"t\" {}\n}\norg \"d\" {\n  share = 0\n  team \"t\" {}\n}\n", "Duplicate team"},
+		{"team without org", valid + `team "t" {}`, "Unsupported block type"},
+		{"org without share", valid + `org "c" {}`, "Missing required argument"},
 		{"pg without dsn", valid + `store { kind = "postgres" }`, "Missing DSN file"},
 		{"bad store kind", valid + `store { kind = "redis" }`, "Invalid store kind"},
 		{"zero capacity", strings.Replace(valid, "capacity = 256", "capacity = 0", 1), `test.hcl:7:26: Invalid capacity`},
@@ -244,7 +248,7 @@ func TestExampleConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.ModelGroups) != 2 || c.Pools[0].Capacity != 256 || c.TeamShare("etabB") != 0.1875 {
+	if len(c.ModelGroups) != 2 || c.Pools[0].Capacity != 256 || c.OrgShare("etabB") != 0.1875 || len(c.Orgs[0].Teams) != 2 {
 		t.Fatalf("%+v", c)
 	}
 }
@@ -287,11 +291,18 @@ func FuzzParse(f *testing.F) {
 			return
 		}
 		sum := 0.0
-		for _, tm := range c.Teams {
-			if !ValidName(tm.Name) || tm.Share < 0 || tm.Share > 1 {
-				t.Fatalf("bad team %+v", tm)
+		teams := map[string]bool{}
+		for _, o := range c.Orgs {
+			if !ValidName(o.Name) || o.Share < 0 || o.Share > 1 {
+				t.Fatalf("bad org %+v", o)
 			}
-			sum += tm.Share
+			sum += o.Share
+			for _, tm := range o.Teams {
+				if !ValidName(tm) || teams[tm] {
+					t.Fatalf("bad or duplicate team %q", tm)
+				}
+				teams[tm] = true
+			}
 		}
 		if sum > 1+1e-9 {
 			t.Fatalf("shares sum %v", sum)
