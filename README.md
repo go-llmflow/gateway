@@ -251,18 +251,20 @@ accounting and metrics all on the path), and reports latency percentiles:
 go test -run '^$' -bench Overhead -cpu 1 -benchtime 20000x ./gateway
 ```
 
-Provisional run (2026-10-23, Apple M4 Max, `-cpu 1`, 3 × 20 000 interleaved
-pairs; the machine's 1-minute load was 15–16, above the threshold of 8 we use
-for trustworthy ratios, so a clean re-run is pending):
+v0.1.0, 2026-10-23, Apple M4 Max, `-cpu 1`, 5 runs × 20 000 interleaved
+pairs, 1-minute load 7.8–8.1 (ranges are min–max over the runs):
 
 | | p50 | p99 |
 |---|---|---|
-| direct to the fake upstream | 36.5–37.0 µs | 98.6–108.5 µs |
-| through the gateway | 90.6–92.1 µs | 224.6–243.1 µs |
-| **added by the gateway** | **54.1–55.1 µs** | **126.0–135.5 µs** |
+| direct to the fake upstream | 37.1–37.8 µs | 102.2–105.8 µs |
+| through the gateway | 92.0–93.1 µs | 233.5–239.9 µs |
+| **added by the gateway** | **54.9–55.3 µs** | **131.2–134.2 µs** |
 
-LiteLLM's own overhead header read 3.2–4.9 ms on the same kind of upstream:
-about 60× more than the gateway's added p50.
+An earlier run at load 15–16 gave the same added latency (54.1–55.1 µs p50).
+LiteLLM's own overhead header read 3.2–4.9 ms on the same kind of upstream,
+about 60–90 times the gateway's added p50. The two numbers are not measured
+the same way (LiteLLM's is self-reported per request, ours is the end-to-end
+difference against a direct call), but both exclude the upstream's own time.
 
 ## Security
 
