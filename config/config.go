@@ -74,6 +74,25 @@ type Config struct {
 	// KeyRotation, when set, enables scheduled key rotation, delivering
 	// new secrets to OpenBao/Vault under VaultPrefix/<team>/.
 	KeyRotation *KeyRotation
+	// SCIM, when set, serves SCIM 2.0 provisioning at /scim/v2.
+	SCIM *SCIM
+}
+
+// SCIM configures provisioning by an identity provider: its users become
+// gateway users, and the members of the mapped groups get a role on a team.
+type SCIM struct {
+	// TokenFile is a secret reference to the bearer token the identity
+	// provider presents (at least 32 bytes).
+	TokenFile string
+	// BaseURL is https://<this gateway>/scim/v2 as the provider sees it.
+	BaseURL string
+	// Groups maps a group's displayName (without case) to a team role.
+	Groups []SCIMGroup
+}
+
+// SCIMGroup gives the members of a provisioned group Role on Team.
+type SCIMGroup struct {
+	Name, Team, Role string
 }
 
 // KeyRotation configures scheduled key rotation.
@@ -372,6 +391,23 @@ func ValidName(s string) bool {
 	for _, r := range s {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '.', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ValidUserName reports whether s is an acceptable user name: a team name's
+// characters plus "@" and "+", so that an e-mail address or a userPrincipalName
+// can be one, at most 128 bytes.
+func ValidUserName(s string) bool {
+	if len(s) == 0 || len(s) > 128 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '.', r == '-', r == '@', r == '+':
 		default:
 			return false
 		}

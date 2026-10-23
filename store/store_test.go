@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -212,6 +213,54 @@ func contract(t *testing.T, s Store) {
 	}
 	must(s.SetKeyRotation(ctx, id2, Rotation{}))
 	h2 = h5 // later checks use the current secret
+
+	// SCIM documents.
+	ua := SCIMDoc{Kind: "User", ID: "u1", Name: "Alice@Example.org", Data: []byte(`{"userName":"Alice@Example.org"}`), Version: "v1"}
+	must(s.SCIMCreate(ctx, ua))
+	if err := s.SCIMCreate(ctx, SCIMDoc{Kind: "User", ID: "u2", Name: "alice@example.ORG", Data: []byte(`{}`), Version: "v1"}); !errors.Is(err, ErrExists) {
+		t.Fatalf("userName taken without case: %v", err)
+	}
+	if err := s.SCIMCreate(ctx, ua); !errors.Is(err, ErrExists) {
+		t.Fatalf("id taken: %v", err)
+	}
+	must(s.SCIMCreate(ctx, SCIMDoc{Kind: "User", ID: "u2", Name: "bob", Data: []byte(`{"userName":"bob"}`), Version: "v1"}))
+	for _, gid := range []string{"g1", "g2"} { // group names need not be unique
+		must(s.SCIMCreate(ctx, SCIMDoc{Kind: "Group", ID: gid, Name: "Lab", Data: []byte(`{"displayName":"Lab"}`), Version: "v1"}))
+	}
+	d, err := s.SCIMGet(ctx, "User", "u1")
+	must(err)
+	var data map[string]any
+	if json.Unmarshal(d.Data, &data) != nil || data["userName"] != "Alice@Example.org" || d.Name != ua.Name || d.Version != "v1" {
+		t.Fatalf("scim doc %+v", d)
+	}
+	if _, err := s.SCIMGet(ctx, "Group", "u1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("kind is part of the key: %v", err)
+	}
+	ua.Data, ua.Version = []byte(`{"userName":"alice2"}`), "v2"
+	ua.Name = "alice2"
+	if err := s.SCIMReplace(ctx, ua, "stale"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale replace: %v", err)
+	}
+	must(s.SCIMReplace(ctx, ua, "v1"))
+	ub := SCIMDoc{Kind: "User", ID: "u2", Name: "ALICE2", Data: []byte(`{}`), Version: "v2"}
+	if err := s.SCIMReplace(ctx, ub, "v1"); !errors.Is(err, ErrExists) {
+		t.Fatalf("rename onto a taken userName: %v", err)
+	}
+	if err := s.SCIMReplace(ctx, SCIMDoc{Kind: "User", ID: "nope", Name: "x", Data: []byte(`{}`), Version: "v"}, "v"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("replace unknown: %v", err)
+	}
+	ds, err := s.SCIMList(ctx, "Group", "LAB")
+	must(err)
+	if len(ds) != 2 {
+		t.Fatalf("groups by name: %+v", ds)
+	}
+	if ds, _ = s.SCIMList(ctx, "User", ""); len(ds) != 2 {
+		t.Fatalf("all users: %+v", ds)
+	}
+	must(s.SCIMDelete(ctx, "User", "u2"))
+	if err := s.SCIMDelete(ctx, "User", "u2"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete twice: %v", err)
+	}
 
 	teamB := BudgetKey{Kind: ScopeTeam, Name: "etabB"}
 	must(s.SetBudget(ctx, Budget{BudgetKey: teamB, Period: Month, MaxCost: 100}))
@@ -451,7 +500,7 @@ func TestPostgresContract(t *testing.T) {
 func dropAll(t *testing.T, p *Postgres) {
 	t.Helper()
 	if _, err := p.pool.Exec(context.Background(),
-		`DROP TABLE IF EXISTS llmflow_allowlists, llmflow_budgets_v2, llmflow_team_models, llmflow_bindings, llmflow_user_tokens, llmflow_users,
+		`DROP TABLE IF EXISTS llmflow_scim, llmflow_allowlists,llmflow_budgets_v2, llmflow_team_models, llmflow_bindings, llmflow_user_tokens, llmflow_users,
 		 llmflow_usage, llmflow_budgets, llmflow_keys, llmflow_projects, llmflow_teams, llmflow_orgs`); err != nil {
 		t.Fatal(err)
 	}

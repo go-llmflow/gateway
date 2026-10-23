@@ -63,6 +63,7 @@ jobs:
           - { target: FuzzClientAddr, pkg: ./gateway }
           - { target: FuzzJWTBearer, pkg: ./gateway }
           - { target: FuzzSSOCallback, pkg: ./gateway }
+          - { target: FuzzSCIM, pkg: ./gateway }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

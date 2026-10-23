@@ -21,6 +21,7 @@ type Memory struct {
 	u          memUsers
 	teamModels map[string][]string
 	allow      map[AllowKey][]string
+	scimDocs   memSCIM
 	MaxRecords int
 	// Fail, when set, is returned by every call (fault injection). Set it
 	// with SetFail.

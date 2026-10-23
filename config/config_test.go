@@ -209,6 +209,11 @@ func TestParseRejectsWithPosition(t *testing.T) {
 		{"sso unknown role", valid + ssoBlock("https://idp.example", "https://gw.example/admin/callback", "role {\n    value = \"g\"\n    role = \"root\"\n  }"), "Invalid role"},
 		{"sso no openid", valid + strings.Replace(ssoBlock("https://idp.example", "https://gw.example/admin/callback", ""), "sso {", "sso {\n  scopes = [\"profile\"]", 1), "Invalid scopes"},
 		{"sso long session", valid + strings.Replace(ssoBlock("https://idp.example", "https://gw.example/admin/callback", ""), "sso {", "sso {\n  session_ttl = \"720h\"", 1), "Session too long"},
+		{"scim base url", valid + "scim {\n  token_file = \"/t\"\n  base_url = \"https://gw.example/elsewhere\"\n}\n", "Invalid base_url"},
+		{"scim cleartext", valid + "scim {\n  token_file = \"/t\"\n  base_url = \"http://gw.example/scim/v2\"\n}\n", "Invalid base_url"},
+		{"scim role", valid + "scim {\n  token_file = \"/t\"\n  base_url = \"https://gw.example/scim/v2\"\n  group \"g\" {\n    team = \"etabA\"\n    role = \"org_admin\"\n  }\n}\n", "Invalid role"},
+		{"scim team", valid + "scim {\n  token_file = \"/t\"\n  base_url = \"https://gw.example/scim/v2\"\n  group \"g\" { team = \"a b\" }\n}\n", "Invalid team"},
+		{"scim duplicate group", valid + "scim {\n  token_file = \"/t\"\n  base_url = \"https://gw.example/scim/v2\"\n  group \"G\" { team = \"etabA\" }\n  group \"g\" { team = \"etabB\" }\n}\n", "Invalid group"},
 		{"rotation without vault", valid + "key_rotation { vault_prefix = \"secret/llmflow/keys\" }\n", "Key rotation without vault block"},
 		{"rotation bad prefix", valid + "key_rotation { vault_prefix = \"secret/../x\" }\n", "Invalid vault_prefix"},
 		{"rotation interval", valid + "key_rotation {\n  vault_prefix = \"secret/k\"\n  check_interval = \"1s\"\n}\n", "Invalid check_interval"},
@@ -274,6 +279,33 @@ vault {
 	}
 	if !slices.Contains(c.SecretRefs(), "vault:secret/llmflow#sso") {
 		t.Fatal("client_secret_file is not a secret reference")
+	}
+}
+
+func TestParseSCIM(t *testing.T) {
+	c, err := parse(valid + `scim {
+  token_file = "/etc/llmflow/scim.token"
+  base_url   = "https://llm.example.org/scim/v2/"
+  group "Lab Physics" { team = "etabA" }
+  group "Lab Leads" {
+    team = "etabA"
+    role = "team_admin"
+  }
+}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := c.SCIM
+	if s == nil || s.BaseURL != "https://llm.example.org/scim/v2" || len(s.Groups) != 2 ||
+		s.Groups[0] != (SCIMGroup{Name: "Lab Physics", Team: "etabA", Role: "member"}) || s.Groups[1].Role != "team_admin" ||
+		!slices.Contains(c.SecretRefs(), "/etc/llmflow/scim.token") {
+		t.Fatalf("%+v", s)
+	}
+	for name, want := range map[string]bool{"alice@example.org": true, "a+b@x.y": true, "bob": true, "a b": false, "": false, "a/b": false} {
+		if ValidUserName(name) != want {
+			t.Errorf("ValidUserName(%q) != %v", name, want)
+		}
 	}
 }
 

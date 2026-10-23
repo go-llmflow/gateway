@@ -87,6 +87,11 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 			return s, err
 		}
 	}
+	if c.SCIM != nil {
+		if err := get("scim token_file", c.SCIM.TokenFile, &s.SCIMToken); err != nil {
+			return s, err
+		}
+	}
 	if c.Alerts.SMTP != nil {
 		if err := get("alerts smtp password_file", c.Alerts.SMTP.PasswordFile, &s.SMTPPassword); err != nil {
 			return s, err

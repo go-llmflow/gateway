@@ -41,6 +41,8 @@ type Secrets struct {
 	// SSOClientSecret is the admin login client's secret (empty: a public
 	// client).
 	SSOClientSecret string
+	// SCIMToken is the bearer token of the provisioning client.
+	SCIMToken string
 }
 
 // Server is the gateway.
@@ -76,6 +78,8 @@ type Server struct {
 	sso *ssoState
 	// secretWriter delivers secrets of scheduled key rotations.
 	secretWriter SecretWriter
+	// scimBackend is the SCIM provisioning backend (nil: no scim block).
+	scimBackend *scimBackend
 
 	cancel context.CancelFunc
 	bg     sync.WaitGroup
@@ -187,6 +191,12 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 	if s.jwtClient == nil {
 		s.jwtClient = defaultJWTClient()
 	}
+	if cfg.SCIM != nil {
+		if len(secrets.SCIMToken) < minSCIMToken {
+			return nil, fmt.Errorf("gateway: the scim token must be at least %d bytes", minSCIMToken)
+		}
+		s.scimBackend = &scimBackend{s: s}
+	}
 	return s, nil
 }
 
@@ -211,6 +221,12 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	if err := s.startSSO(ctx); err != nil {
 		return err
+	}
+	if s.scimBackend != nil {
+		// Repair what a change interrupted half-way left behind.
+		if err := s.scimBackend.reconcile(ctx); err != nil {
+			s.log.Error("scim: reconciliation at start failed", "err", err)
+		}
 	}
 	if err := s.budget.refresh(ctx); err != nil {
 		s.log.Error("initial budget refresh failed", "err", err)
@@ -255,6 +271,9 @@ func (s *Server) Handler() http.Handler {
 	// /metrics: from an allowed network, or anywhere with the metrics token.
 	mux.Handle("GET /metrics", s.withClientAddr(nil, http.HandlerFunc(s.metrics)))
 	s.adminRoutes(mux)
+	if s.scimBackend != nil {
+		mux.Handle("/scim/v2/", s.scimHandler())
+	}
 	return mux
 }
 
