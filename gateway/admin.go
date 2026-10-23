@@ -26,6 +26,9 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 			f(w, r, p)
 		})))
 	}
+	s.ssoRoutes(mux)
+	mux.Handle("GET /admin/session", s.withClientAddr(s.cfg.Routes.Admin, http.HandlerFunc(s.sessionInfo)))
+	mux.Handle("POST /admin/logout", s.withClientAddr(s.cfg.Routes.Admin, http.HandlerFunc(s.logout)))
 	h("GET /admin/whoami", s.whoami)
 	h("GET /admin/allowlists", s.listAllowlists)
 	h("PUT /admin/allowlists", s.setAllowlist)

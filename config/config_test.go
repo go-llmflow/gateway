@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -201,6 +202,13 @@ func TestParseRejectsWithPosition(t *testing.T) {
 		{"jwt bad team", valid + strings.Replace(jwtBlock("https://idp.example", "a"), `team = "etabA"`, `team = "a b"`, 1), "Invalid map"},
 		{"jwt skew", valid + strings.Replace(jwtBlock("https://idp.example", "a"), "jwt {", "jwt {\n  clock_skew = \"1h\"", 1), "Clock skew too large"},
 		{"jwt jwks cleartext", valid + strings.Replace(jwtBlock("https://idp.example", "a"), "jwt {", "jwt {\n  jwks_url = \"http://keys.example/k\"", 1), "Invalid jwks_url"},
+		{"sso cleartext issuer", valid + ssoBlock("http://idp.example", "https://gw.example/admin/callback", ""), "Invalid issuer"},
+		{"sso redirect path", valid + ssoBlock("https://idp.example", "https://gw.example/elsewhere", ""), "Invalid redirect_url"},
+		{"sso cleartext redirect", valid + ssoBlock("https://idp.example", "http://gw.example/admin/callback", ""), "Invalid redirect_url"},
+		{"sso proxy role with scope", valid + ssoBlock("https://idp.example", "https://gw.example/admin/callback", "role {\n    value = \"g\"\n    role = \"proxy_admin\"\n    team = \"t\"\n  }"), "Invalid role"},
+		{"sso unknown role", valid + ssoBlock("https://idp.example", "https://gw.example/admin/callback", "role {\n    value = \"g\"\n    role = \"root\"\n  }"), "Invalid role"},
+		{"sso no openid", valid + strings.Replace(ssoBlock("https://idp.example", "https://gw.example/admin/callback", ""), "sso {", "sso {\n  scopes = [\"profile\"]", 1), "Invalid scopes"},
+		{"sso long session", valid + strings.Replace(ssoBlock("https://idp.example", "https://gw.example/admin/callback", ""), "sso {", "sso {\n  session_ttl = \"720h\"", 1), "Session too long"},
 		{"jwt negative rpm", valid + strings.Replace(jwtBlock("https://idp.example", "a"), "jwt {", "jwt {\n  rpm = -1", 1), "Invalid limit"},
 		{"syntax", valid + "team {", "test.hcl:"},
 		{"string for number", strings.Replace(valid, "capacity = 256", `capacity = "many"`, 1), "Unsuitable value type"},
@@ -224,6 +232,46 @@ func TestParseRejectsWithPosition(t *testing.T) {
 
 func jwtBlock(issuer, aud string) string {
 	return fmt.Sprintf("jwt {\n  issuer = %q\n  audience = %q\n  map {\n    value = \"lab-a\"\n    team = \"etabA\"\n  }\n}\n", issuer, aud)
+}
+
+func ssoBlock(issuer, redirect, extra string) string {
+	return fmt.Sprintf("sso {\n  issuer = %q\n  client_id = \"llmflow-admin\"\n  redirect_url = %q\n  %s\n}\n", issuer, redirect, extra)
+}
+
+func TestParseSSO(t *testing.T) {
+	c, err := parse(valid + `sso {
+  issuer             = "https://sso.example.org"
+  client_id          = "llmflow-admin"
+  client_secret_file = "vault:secret/llmflow#sso"
+  redirect_url       = "https://llm.example.org/admin/callback"
+  role {
+    value = "llm-admins"
+    role  = "proxy_admin"
+  }
+  role {
+    claim = "entitlement"
+    value = "lab-a"
+    role  = "team_admin"
+    team  = "etabA"
+  }
+}
+vault {
+  address    = "https://bao.example:8200"
+  token_file = "/t"
+}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := c.SSO
+	if s == nil || s.SessionTTL != 8*time.Hour || len(s.Scopes) != 3 || s.Origin() != "https://llm.example.org" ||
+		s.Roles[0] != (SSORole{Claim: "groups", Value: "llm-admins", Role: "proxy_admin"}) ||
+		s.Roles[1] != (SSORole{Claim: "entitlement", Value: "lab-a", Role: "team_admin", Team: "etabA"}) {
+		t.Fatalf("%+v", s)
+	}
+	if !slices.Contains(c.SecretRefs(), "vault:secret/llmflow#sso") {
+		t.Fatal("client_secret_file is not a secret reference")
+	}
 }
 
 func TestParseJWT(t *testing.T) {
