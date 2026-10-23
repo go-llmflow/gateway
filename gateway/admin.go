@@ -33,6 +33,8 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	h("GET /admin/teams", s.listTeams)
 	h("POST /admin/teams", s.createTeam)
 	h("DELETE /admin/teams/{name}", s.disableTeam)
+	h("GET /admin/teams/{team}/models", s.getTeamModels)
+	h("PUT /admin/teams/{team}/models", s.setTeamModels)
 	h("GET /admin/teams/{team}/projects", s.listProjects)
 	h("POST /admin/teams/{team}/projects", s.createProject)
 	h("DELETE /admin/teams/{team}/projects/{name}", s.disableProject)
@@ -298,6 +300,80 @@ func (s *Server) disableProject(w http.ResponseWriter, r *http.Request, p *princ
 	}
 	s.keys.forget(func(k store.Key) bool { return k.Team == t.Name && k.Project == name })
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- team-managed models ----
+
+func (s *Server) getTeamModels(w http.ResponseWriter, r *http.Request, p *principal) {
+	t, ok := s.team(w, r, r.PathValue("team"))
+	if !ok {
+		return
+	}
+	if !p.teamView(t) {
+		forbidden(w)
+		return
+	}
+	all, err := s.st.TeamModels(r.Context())
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	listed := all[t.Name]
+	effective := []string{}
+	for _, n := range s.gorder {
+		if len(listed) == 0 || contains(listed, n) {
+			effective = append(effective, n)
+		}
+	}
+	if listed == nil {
+		listed = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"team": t.Name, "models": listed, "effective": effective})
+}
+
+func contains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+// setTeamModels lets a team admin expose a subset of the configured model
+// groups to the team; an empty list exposes all of them.
+func (s *Server) setTeamModels(w http.ResponseWriter, r *http.Request, p *principal) {
+	var in struct {
+		Models []string `json:"models"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	if len(in.Models) > len(s.groups) {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", "more models than configured")
+		return
+	}
+	for _, m := range in.Models {
+		if s.groups[m] == nil {
+			apiError(w, http.StatusBadRequest, "invalid_request_error", "unknown model "+strconv.Quote(m))
+			return
+		}
+	}
+	t, ok := s.team(w, r, r.PathValue("team"))
+	if !ok {
+		return
+	}
+	if !p.teamAdmin(t) {
+		forbidden(w)
+		return
+	}
+	if err := s.st.SetTeamModels(r.Context(), t.Name, in.Models); err != nil {
+		storeError(w, err)
+		return
+	}
+	_ = s.budget.refresh(r.Context())
+	s.log.Info("team models set", "team", t.Name, "models", len(in.Models), "by", p.name)
+	s.getTeamModels(w, r, p)
 }
 
 // ---- keys ----

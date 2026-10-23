@@ -200,6 +200,12 @@ type Store interface {
 	// Bindings lists the bindings of a user, or all with user "".
 	Bindings(ctx context.Context, user string) ([]Binding, error)
 
+	// SetTeamModels replaces the list of model groups a team may use; an
+	// empty list allows every configured model.
+	SetTeamModels(ctx context.Context, team string, models []string) error
+	// TeamModels returns every team's non-empty model list.
+	TeamModels(ctx context.Context) (map[string][]string, error)
+
 	SetBudget(ctx context.Context, b Budget) error
 	DeleteBudget(ctx context.Context, team string) error
 	Budgets(ctx context.Context) ([]Budget, error)

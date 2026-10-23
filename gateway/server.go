@@ -233,12 +233,15 @@ func bearer(r *http.Request) string {
 }
 
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authenticate(w, r); !ok {
+	key, ok := s.authenticate(w, r)
+	if !ok {
 		return
 	}
 	data := make([]map[string]any, 0, len(s.gorder))
 	for _, n := range s.gorder {
-		data = append(data, map[string]any{"id": n, "object": "model", "owned_by": "llmflow"})
+		if s.budget.modelAllowed(key.Team, n) {
+			data = append(data, map[string]any{"id": n, "object": "model", "owned_by": "llmflow"})
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})

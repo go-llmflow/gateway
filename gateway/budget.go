@@ -25,7 +25,8 @@ type budgeter struct {
 	now        func() time.Time
 	budgets    map[string]store.Budget
 	dbSpend    map[string]float64
-	local      map[string]float64 // cost added since the last refresh began
+	local      map[string]float64         // cost added since the last refresh began
+	models     map[string]map[string]bool // team → allowed model groups
 	lastOK     time.Time
 	everOK     bool
 	maxAge     time.Duration
@@ -80,10 +81,32 @@ func (b *budgeter) refresh(ctx context.Context) error {
 		budgets[bg.Team] = bg
 		spend[bg.Team] = spendAt[bg.Period.Start(now)][bg.Team]
 	}
+	tm, err := b.st.TeamModels(ctx)
+	if err != nil {
+		restore()
+		return err
+	}
+	models := make(map[string]map[string]bool, len(tm))
+	for team, ms := range tm {
+		set := make(map[string]bool, len(ms))
+		for _, m := range ms {
+			set[m] = true
+		}
+		models[team] = set
+	}
 	b.mu.Lock()
-	b.budgets, b.dbSpend, b.lastOK, b.everOK = budgets, spend, now, true
+	b.budgets, b.dbSpend, b.models, b.lastOK, b.everOK = budgets, spend, models, now, true
 	b.mu.Unlock()
 	return nil
+}
+
+// modelAllowed reports whether a team may use a model group: every model
+// when the team has no list, only the listed ones otherwise.
+func (b *budgeter) modelAllowed(team, model string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	set, ok := b.models[team]
+	return !ok || set[model]
 }
 
 func (b *budgeter) loop(ctx context.Context, every time.Duration, onErr func(error)) {
