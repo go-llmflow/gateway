@@ -206,10 +206,31 @@ chunk again if the client did not ask for it.
 
 ## Admin API
 
-All admin routes require `Authorization: Bearer <master key>`.
+Admin routes take `Authorization: Bearer <master key>` or a user's admin
+token (`llma-…`, 256 random bits, stored as SHA-256, shown once). Users hold
+roles on scopes that nest like the Slurm account tree (a role on an
+organisation covers its teams, a role on a team covers its projects and keys):
+
+| role | scope | may |
+|---|---|---|
+| `proxy_admin` | everything | everything the master key may |
+| `proxy_viewer` | everything | read every listing, report and fair-share state |
+| `org_admin` | one organisation | create and disable its teams, set their budgets, manage their projects and keys, create users, grant `org_admin` / `viewer` on the organisation and `team_admin` / `member` / `viewer` on its teams |
+| `team_admin` | one team | manage its projects and keys, grant `member` / `viewer` on the team |
+| `member` | one team | create keys (owned by the member), list and revoke their own keys |
+| `viewer` | one organisation or team | read its teams, projects, keys (no secrets), budgets and spend |
+
+Nobody can grant a role above their own scope: an `org_admin` cannot grant
+proxy roles or roles in another organisation. Listings and reports are
+filtered to what the caller may see; other writes answer 403. Failed admin
+authentications count in the per-network failure limit.
 
 | route | |
 |---|---|
+| `GET /admin/whoami` | the caller and their roles |
+| `GET` / `POST /admin/users`, `DELETE /admin/users/{name}` | list (filtered), create `{"name"}`, disable (revokes their tokens; proxy admin only) |
+| `GET` / `POST /admin/users/{name}/tokens`, `DELETE /admin/users/{name}/tokens/{id}` | a user's admin tokens (the user themselves or a proxy admin) |
+| `GET` / `PUT /admin/users/{name}/roles`, `DELETE /admin/users/{name}/roles?role=&org=&team=` | list, grant `{"role","org","team"}`, remove |
 | `GET` / `POST /admin/orgs`, `DELETE /admin/orgs/{name}` | list (with configured share), create `{"name"}` (an organisation created here has no share: it only borrows), disable (its teams, projects and keys too) |
 | `GET /admin/teams?org=`, `POST /admin/teams`, `DELETE /admin/teams/{name}` | list, create `{"name","org"}`, disable (its projects and keys too) |
 | `GET` / `POST /admin/teams/{team}/projects`, `DELETE /admin/teams/{team}/projects/{name}` | list, create `{"name"}`, disable (revokes its keys) |

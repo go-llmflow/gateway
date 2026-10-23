@@ -89,9 +89,11 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 	if err != nil {
 		return nil, fmt.Errorf("postgres: connect: %w", err)
 	}
-	if _, err := pool.Exec(ctx, schema); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("postgres: schema: %w", err)
+	for _, s := range []string{schema, usersSchema} {
+		if _, err := pool.Exec(ctx, s); err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("postgres: schema: %w", err)
+		}
 	}
 	return &Postgres{pool: pool}, nil
 }
@@ -278,11 +280,11 @@ func (p *Postgres) CreateKey(ctx context.Context, k Key) error {
 		k.CreatedAt = time.Now().UTC()
 	}
 	tag, err := p.pool.Exec(ctx, `
-		INSERT INTO llmflow_keys (id, hash, team, project, name, rpm, tpm, max_inflight, created_at)
-		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
+		INSERT INTO llmflow_keys (id, hash, team, project, name, rpm, tpm, max_inflight, created_at, owner)
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
 		WHERE EXISTS (SELECT 1 FROM llmflow_teams WHERE name = $3 AND NOT disabled)
 		  AND ($4 = '' OR EXISTS (SELECT 1 FROM llmflow_projects WHERE team = $3 AND name = $4 AND NOT disabled))`,
-		k.ID, k.Hash[:], k.Team, k.Project, k.Name, k.RPM, k.TPM, k.MaxInFlight, k.CreatedAt)
+		k.ID, k.Hash[:], k.Team, k.Project, k.Name, k.RPM, k.TPM, k.MaxInFlight, k.CreatedAt, k.Owner)
 	switch {
 	case uniqueViolation(err):
 		return ErrExists
@@ -296,13 +298,13 @@ func (p *Postgres) CreateKey(ctx context.Context, k Key) error {
 	return nil
 }
 
-const keyCols = `k.id, k.hash, coalesce(t.org, ''), k.team, k.project, k.name, k.rpm, k.tpm, k.max_inflight, k.created_at, k.revoked`
+const keyCols = `k.id, k.hash, coalesce(t.org, ''), k.team, k.project, k.owner, k.name, k.rpm, k.tpm, k.max_inflight, k.created_at, k.revoked`
 const keyFrom = ` FROM llmflow_keys k LEFT JOIN llmflow_teams t ON t.name = k.team `
 
 func scanKey(r pgx.Row) (Key, error) {
 	var k Key
 	var h []byte
-	err := r.Scan(&k.ID, &h, &k.Org, &k.Team, &k.Project, &k.Name, &k.RPM, &k.TPM, &k.MaxInFlight, &k.CreatedAt, &k.Revoked)
+	err := r.Scan(&k.ID, &h, &k.Org, &k.Team, &k.Project, &k.Owner, &k.Name, &k.RPM, &k.TPM, &k.MaxInFlight, &k.CreatedAt, &k.Revoked)
 	if err != nil {
 		return k, err
 	}

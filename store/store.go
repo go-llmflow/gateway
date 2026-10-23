@@ -55,9 +55,12 @@ type Key struct {
 	ID   string   `json:"id"`
 	Hash [32]byte `json:"-"`
 	// Org is resolved from the team when the key is read.
-	Org         string    `json:"org"`
-	Team        string    `json:"team"`
-	Project     string    `json:"project,omitempty"`
+	Org     string `json:"org"`
+	Team    string `json:"team"`
+	Project string `json:"project,omitempty"`
+	// Owner is the user who created the key as a team member; empty for
+	// team keys created by an administrator.
+	Owner       string    `json:"owner,omitempty"`
 	Name        string    `json:"name"`
 	RPM         int       `json:"rpm"`
 	TPM         int       `json:"tpm"`
@@ -177,6 +180,25 @@ type Store interface {
 	// Org filled in, or ErrNotFound. The caller must still compare hashes
 	// in constant time.
 	KeyByHash(ctx context.Context, hash [32]byte) (Key, error)
+
+	CreateUser(ctx context.Context, name string) error
+	GetUser(ctx context.Context, name string) (User, error)
+	ListUsers(ctx context.Context) ([]User, error)
+	// DisableUser disables a user and revokes their admin tokens.
+	DisableUser(ctx context.Context, name string) error
+	CreateUserToken(ctx context.Context, t UserToken) error
+	ListUserTokens(ctx context.Context, user string) ([]UserToken, error)
+	RevokeUserToken(ctx context.Context, user, id string) error
+	// UserByTokenHash returns the token with that hash and its user, or
+	// ErrNotFound. The caller compares hashes in constant time and checks
+	// Revoked and Disabled.
+	UserByTokenHash(ctx context.Context, hash [32]byte) (User, UserToken, error)
+	// Grant stores a binding; ErrNotFound when the user, org or team does
+	// not exist, ErrExists when it is already granted.
+	Grant(ctx context.Context, b Binding) error
+	Ungrant(ctx context.Context, b Binding) error
+	// Bindings lists the bindings of a user, or all with user "".
+	Bindings(ctx context.Context, user string) ([]Binding, error)
 
 	SetBudget(ctx context.Context, b Budget) error
 	DeleteBudget(ctx context.Context, team string) error
