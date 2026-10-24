@@ -453,6 +453,56 @@ func VerifyAnchored(ctx context.Context, st Store, keys []ed25519.PublicKey, anc
 	return r, nil
 }
 
+// PruneExpired applies a retention policy: it deletes the longest prefix
+// of the log that ends at a valid checkpoint no later than limit and whose
+// every entry is older than its kind's retention (a kind without one never
+// expires). It prunes nothing unless the whole log verifies first, so a
+// tampered log is never cut to hide the tampering. It returns the seq
+// pruned through and the number of entries deleted (0, 0: nothing).
+func (l *Log) PruneExpired(ctx context.Context, keys []ed25519.PublicKey, now time.Time, retention map[string]time.Duration, limit int64) (int64, int64, error) {
+	r, err := Verify(ctx, l.st, keys)
+	if err != nil {
+		return 0, 0, err
+	}
+	if !r.OK() {
+		return 0, 0, fmt.Errorf("audit: the log does not verify (%s); nothing pruned", r.Problems[0])
+	}
+	cps, err := l.st.AuditCheckpoints(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	isCP := map[int64]bool{}
+	for _, c := range cps {
+		isCP[c.Seq] = true
+	}
+	var through int64
+scan:
+	for from := int64(1); ; {
+		es, err := l.st.AuditRange(ctx, from, 1000)
+		if err != nil {
+			return 0, 0, err
+		}
+		if len(es) == 0 {
+			break
+		}
+		for _, e := range es {
+			ttl, ok := retention[e.Kind]
+			if !ok || ttl <= 0 || !e.Time.Add(ttl).Before(now) || e.Seq > limit {
+				break scan
+			}
+			if isCP[e.Seq] {
+				through = e.Seq
+			}
+		}
+		from = es[len(es)-1].Seq + 1
+	}
+	if through == 0 {
+		return 0, 0, nil
+	}
+	n, err := l.Prune(ctx, through)
+	return through, n, err
+}
+
 // Prune deletes the oldest entries through seq, which must be a checkpoint
 // covering only entries older than cutoff (for their kind): segments go
 // whole, and what remains starts from a signed checkpoint. It returns the

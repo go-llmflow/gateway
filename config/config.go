@@ -102,6 +102,11 @@ type Audit struct {
 	// AnchorMaxLag is how old the newest exported checkpoint may get
 	// before an alert (default 3 × CheckpointInterval).
 	AnchorMaxLag time.Duration
+	// Retention is how long entries of each kind are kept (absent: for
+	// ever). Pruning removes whole segments, up to a signed checkpoint,
+	// whose every entry is past its kind's retention.
+	Retention     map[string]time.Duration
+	PruneInterval time.Duration
 }
 
 // Export is a destination outside the database.

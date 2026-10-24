@@ -192,6 +192,54 @@ func TestPrune(t *testing.T) {
 	}
 }
 
+// Retention prunes whole segments up to a checkpoint, only expired ones,
+// never past the limit, and never a log that does not verify.
+func TestPruneExpired(t *testing.T) {
+	ctx := context.Background()
+	l, st, pub := newLog(t)
+	keys := []ed25519.PublicKey{pub}
+	appendN(t, l, 3)  // admin, times t+1s..t+3s
+	l.Checkpoint(ctx) // at 3
+	appendN(t, l, 3)
+	l.Checkpoint(ctx) // at 6
+	if _, err := l.Append(ctx, store.AuditEntry{Kind: "auth", Roles: "[]", Before: "null", After: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	appendN(t, l, 1)
+	l.Checkpoint(ctx) // at 8
+	base := time.Date(2026, 10, 24, 8, 0, 0, 0, time.UTC)
+	day := 24 * time.Hour
+	admin := map[string]time.Duration{"admin": day}
+
+	// Nothing has expired yet.
+	if seq, n, err := l.PruneExpired(ctx, keys, base.Add(time.Hour), admin, 1<<62); err != nil || n != 0 || seq != 0 {
+		t.Fatalf("early: %d %d %v", seq, n, err)
+	}
+	// Admin entries expired, but the auth entry (seq 7) has no retention:
+	// pruning stops at the checkpoint before it.
+	seq, n, err := l.PruneExpired(ctx, keys, base.Add(2*day), admin, 1<<62)
+	if err != nil || seq != 6 || n != 6 {
+		t.Fatalf("pruned through %d (%d entries), %v", seq, n, err)
+	}
+	if r := verify(t, st, pub); !r.OK() || r.First != 7 {
+		t.Fatalf("after prune: %+v", r)
+	}
+	// The limit (what the anchor export holds) bounds it.
+	l2, st2, pub2 := newLog(t)
+	appendN(t, l2, 2)
+	l2.Checkpoint(ctx)
+	appendN(t, l2, 2)
+	l2.Checkpoint(ctx)
+	if seq, _, _ := l2.PruneExpired(ctx, []ed25519.PublicKey{pub2}, base.Add(2*day), admin, 2); seq != 2 {
+		t.Fatalf("limit: pruned through %d", seq)
+	}
+	// A tampered log is not pruned.
+	st2.TamperAudit(3, func(e *store.AuditEntry) { e.Actor = "mallory" })
+	if _, _, err := l2.PruneExpired(ctx, []ed25519.PublicKey{pub2}, base.Add(2*day), admin, 1<<62); err == nil {
+		t.Fatal("a tampered log was pruned")
+	}
+}
+
 func TestKeys(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	for _, s := range []string{base64.StdEncoding.EncodeToString(priv.Seed()), base64.StdEncoding.EncodeToString(priv), fmt.Sprintf("%x", priv.Seed())} {

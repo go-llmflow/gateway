@@ -514,6 +514,26 @@ preceded by its length (big-endian uint64). Version 1, the JSON of the
 fields, folded invalid UTF-8 to U+FFFD so two different values could hash
 alike; rows written as version 1 still verify.
 
+**Retention.** Entries are kept for ever unless a retention is set per kind
+(`admin`, `auth` for SSO, `scim`, `system` for what the gateway does itself):
+
+```hcl
+audit {
+  signing_key_file = "vault:secret/llmflow#audit"
+  retention        = { admin = "61320h", auth = "8760h", scim = "8760h", system = "8760h" }  # at least 24h
+  prune_interval   = "24h"
+}
+```
+
+Every `prune_interval` the gateway deletes the longest prefix of the log
+that ends at a signed checkpoint and whose every entry is past its kind's
+retention — whole segments, so what remains starts from a signed checkpoint
+and still verifies. A kind without a retention stops the cut. It never
+prunes past the newest checkpoint the anchor export holds (what is deleted
+in the database is kept there, under Object Lock on S3), and never a log
+that does not verify (`audit_prune_refused` is raised instead). Each prune
+is itself an `audit.pruned` entry.
+
 *Why a chain and not a Merkle tree*: RFC 6962 §2.1 (Certificate
 Transparency, obsoleted by RFC 9162 with the same tree hashing) builds a tree
 so that a log can prove inclusion and append-only growth to a third party in
