@@ -7,6 +7,7 @@ import (
 	"net/mail"
 	"net/netip"
 	"net/url"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -61,12 +62,54 @@ type fileHCL struct {
 	SCIM                 *scimHCL    `hcl:"scim,block"`
 	Policies             []policyHCL `hcl:"policy,block"`
 	Audit                *auditHCL   `hcl:"audit,block"`
+	Exports              []exportHCL `hcl:"export,block"`
 }
 
 type auditHCL struct {
 	SigningKeyFile     *string   `hcl:"signing_key_file,optional"`
 	CheckpointInterval *string   `hcl:"checkpoint_interval,optional"`
 	IntervalRange      hcl.Range `hcl:"checkpoint_interval,attr_value_range"`
+	Anchor             *string   `hcl:"anchor,optional"`
+	AnchorRange        hcl.Range `hcl:"anchor,attr_value_range"`
+	AnchorMaxLag       *string   `hcl:"anchor_max_lag,optional"`
+	AnchorMaxLagRange  hcl.Range `hcl:"anchor_max_lag,attr_value_range"`
+}
+
+type exportHCL struct {
+	Name           string    `hcl:"name,label"`
+	NameRange      hcl.Range `hcl:"name,label_range"`
+	Kind           string    `hcl:"kind"`
+	KindRange      hcl.Range `hcl:"kind,attr_value_range"`
+	Endpoint       *string   `hcl:"endpoint,optional"`
+	EndpointRange  hcl.Range `hcl:"endpoint,attr_value_range"`
+	Region         *string   `hcl:"region,optional"`
+	Bucket         *string   `hcl:"bucket,optional"`
+	PathStyle      *bool     `hcl:"path_style,optional"`
+	AccessKeyFile  *string   `hcl:"access_key_file,optional"`
+	SecretKeyFile  *string   `hcl:"secret_key_file,optional"`
+	Prefix         *string   `hcl:"prefix,optional"`
+	PrefixRange    hcl.Range `hcl:"prefix,attr_value_range"`
+	LockMode       *string   `hcl:"lock_mode,optional"`
+	LockModeRange  hcl.Range `hcl:"lock_mode,attr_value_range"`
+	Retention      *string   `hcl:"retention,optional"`
+	RetentionRange hcl.Range `hcl:"retention,attr_value_range"`
+	Directory      *string   `hcl:"directory,optional"`
+	QueueSize      *int      `hcl:"queue_size,optional"`
+	DefRange       hcl.Range `hcl:",def_range"`
+}
+
+// ValidObjectKey reports whether s may start or name an object: printable
+// ASCII without "..", backslashes or a leading "/".
+func ValidObjectKey(s string) bool {
+	if len(s) > 512 || strings.HasPrefix(s, "/") || strings.Contains(s, "..") || strings.Contains(s, "//") {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x21 || r > 0x7e || r == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 type policyHCL struct {
@@ -835,6 +878,65 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			v.errf(a.IntervalRange, "Invalid checkpoint_interval", "checkpoint_interval %v: between 1s and 24h", c.Audit.CheckpointInterval)
 		}
 	}
+	exports := map[string]bool{}
+	for _, x := range raw.Exports {
+		e := Export{Name: x.Name, Kind: x.Kind, Endpoint: strOr(x.Endpoint, ""), Region: strOr(x.Region, "us-east-1"),
+			Bucket: strOr(x.Bucket, ""), AccessKeyFile: strOr(x.AccessKeyFile, ""), SecretKeyFile: strOr(x.SecretKeyFile, ""),
+			Prefix: strOr(x.Prefix, ""), LockMode: strOr(x.LockMode, "COMPLIANCE"), Directory: strOr(x.Directory, ""),
+			Retention: v.dur(x.Retention, x.RetentionRange, "retention", 0)}
+		if x.PathStyle != nil {
+			e.PathStyle = *x.PathStyle
+		}
+		e.QueueSize = 1024
+		if x.QueueSize != nil {
+			e.QueueSize = *x.QueueSize
+		}
+		if !ValidName(x.Name) || exports[x.Name] {
+			v.errf(x.NameRange, "Invalid export name", "export %q: want [A-Za-z0-9_.-]{1,64}, declared once", x.Name)
+		}
+		exports[x.Name] = true
+		if !ValidObjectKey(e.Prefix) {
+			v.errf(x.PrefixRange, "Invalid prefix", "export %q: prefix %q: printable ASCII, no \"..\", \"//\", backslash or leading \"/\"", x.Name, e.Prefix)
+		}
+		if e.QueueSize < 1 || e.QueueSize > 1<<20 {
+			v.errf(x.DefRange, "Invalid queue_size", "export %q: queue_size between 1 and 1048576", x.Name)
+		}
+		if e.Retention < 0 || e.Retention > 100*365*24*time.Hour {
+			v.errf(x.RetentionRange, "Invalid retention", "export %q: retention between 0 and 100 years", x.Name)
+		}
+		switch e.Kind {
+		case "s3":
+			if err := secret.ValidateAddress(e.Endpoint); err != nil {
+				v.errf(x.EndpointRange, "Invalid endpoint", "export %q: %v", x.Name, err)
+			}
+			if e.Bucket == "" || e.AccessKeyFile == "" || e.SecretKeyFile == "" {
+				v.errf(x.DefRange, "Incomplete S3 export", "export %q needs bucket, access_key_file and secret_key_file", x.Name)
+			}
+			if e.LockMode != "GOVERNANCE" && e.LockMode != "COMPLIANCE" {
+				v.errf(x.LockModeRange, "Invalid lock_mode", "export %q: GOVERNANCE or COMPLIANCE", x.Name)
+			}
+		case "file":
+			if !filepath.IsAbs(e.Directory) {
+				v.errf(x.DefRange, "Invalid directory", "export %q needs an absolute directory", x.Name)
+			}
+		case "gcs", "azure":
+			// Declared so that a configuration can name them; New refuses
+			// them with "not implemented".
+		default:
+			v.errf(x.KindRange, "Invalid export kind", "export %q: kind %q: want s3, file, gcs or azure", x.Name, e.Kind)
+		}
+		c.Exports = append(c.Exports, e)
+	}
+	if a := raw.Audit; a != nil {
+		c.Audit.Anchor = strOr(a.Anchor, "")
+		c.Audit.AnchorMaxLag = v.dur(a.AnchorMaxLag, a.AnchorMaxLagRange, "anchor_max_lag", 3*c.Audit.CheckpointInterval)
+		if c.Audit.Anchor != "" && !exports[c.Audit.Anchor] {
+			v.errf(a.AnchorRange, "Unknown export", "audit anchor %q names no export block", c.Audit.Anchor)
+		}
+		if c.Audit.Anchor != "" && c.Audit.SigningKeyFile == "" {
+			v.errf(a.AnchorRange, "Anchor without signing key", "an anchor exports signed checkpoints: set signing_key_file")
+		}
+	}
 	policyOf := map[string]string{} // team -> policy
 	names := map[string]bool{}
 	for _, p := range raw.Policies {
@@ -931,6 +1033,10 @@ func (c *Config) SecretRefs() []string {
 		add(c.SCIM.TokenFile)
 	}
 	add(c.Audit.SigningKeyFile)
+	for _, e := range c.Exports {
+		add(e.AccessKeyFile)
+		add(e.SecretKeyFile)
+	}
 	if c.Alerts.SMTP != nil {
 		add(c.Alerts.SMTP.PasswordFile)
 	}

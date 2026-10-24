@@ -65,6 +65,8 @@ jobs:
           - { target: FuzzSSOCallback, pkg: ./gateway }
           - { target: FuzzSCIM, pkg: ./gateway }
           - { target: FuzzRequiredFields, pkg: ./gateway }
+          - { target: FuzzParseCheckpoint, pkg: ./audit }
+          - { target: FuzzValidKey, pkg: ./export }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

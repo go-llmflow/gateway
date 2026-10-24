@@ -82,6 +82,10 @@ type Config struct {
 	// Policies are request policies, applied to the teams they name and to
 	// the keys created with them.
 	Policies []Policy
+	// Exports are destinations outside the database: S3-compatible
+	// storage (MinIO, Ceph RGW, AWS), a local directory; GCS and Azure are
+	// declared but not implemented.
+	Exports []Export
 }
 
 // Audit configures the audit log.
@@ -91,6 +95,35 @@ type Audit struct {
 	SigningKeyFile string
 	// CheckpointInterval is how often new entries are signed (default 5m).
 	CheckpointInterval time.Duration
+	// Anchor names the export every checkpoint, and the entries it covers,
+	// are also written to: the copy outside the database that catches
+	// truncation and rollback. Empty: no anchor.
+	Anchor string
+	// AnchorMaxLag is how old the newest exported checkpoint may get
+	// before an alert (default 3 × CheckpointInterval).
+	AnchorMaxLag time.Duration
+}
+
+// Export is a destination outside the database.
+type Export struct {
+	Name string
+	Kind string // s3, file, gcs, azure
+	// S3: endpoint (https, or http to loopback), region, bucket, path-style
+	// addressing (MinIO, Ceph RGW), credentials as secret references.
+	Endpoint, Region, Bucket string
+	PathStyle                bool
+	AccessKeyFile            string
+	SecretKeyFile            string
+	// Prefix starts every object key.
+	Prefix string
+	// LockMode (GOVERNANCE or COMPLIANCE) and Retention put objects under
+	// Object Lock when the bucket has it enabled.
+	LockMode  string
+	Retention time.Duration
+	// Directory is where a file export writes.
+	Directory string
+	// QueueSize bounds the objects waiting to be written (default 1024).
+	QueueSize int
 }
 
 // Policy is a request policy: fields an inference request must carry, and

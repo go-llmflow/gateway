@@ -20,6 +20,7 @@ import (
 	"github.com/go-authn/oidc"
 	"github.com/go-llmflow/gateway/audit"
 	"github.com/go-llmflow/gateway/config"
+	"github.com/go-llmflow/gateway/export"
 	"github.com/go-llmflow/gateway/fairshare"
 	"github.com/go-llmflow/gateway/store"
 )
@@ -48,6 +49,8 @@ type Secrets struct {
 	// AuditKey is the audit checkpoint signing key (an Ed25519 seed, base64
 	// or hex); empty: checkpoints are not signed.
 	AuditKey string
+	// ExportCredentials are the S3 keys of each export, by name.
+	ExportCredentials map[string]export.Credentials
 }
 
 // Server is the gateway.
@@ -88,6 +91,10 @@ type Server struct {
 	// auditLog records administrative actions; auditKey signs checkpoints.
 	auditLog *audit.Log
 	auditKey ed25519.PrivateKey
+	// exports are the export queues by name; anchor exports the audit
+	// checkpoints to the one audit.anchor names.
+	exports map[string]*export.Queue
+	anchor  *anchorState
 	// policies by name, and the policy of each team that has one.
 	policies   map[string]*config.Policy
 	teamPolicy map[string]string
@@ -253,6 +260,9 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.startSSO(ctx); err != nil {
 		return err
 	}
+	if err := s.openExports(ctx); err != nil {
+		return err
+	}
 	if s.scimBackend != nil {
 		// Repair what a change interrupted half-way left behind.
 		if err := s.scimBackend.reconcile(ctx); err != nil {
@@ -293,6 +303,10 @@ func (s *Server) Close(ctx context.Context) {
 	s.alertCancel()
 	s.bg.Wait()
 	s.rec.close(ctx)
+	// Last: the final checkpoint above queued its anchor.
+	for _, q := range s.exports {
+		q.Close(ctx)
+	}
 }
 
 // Handler returns the HTTP handler.
@@ -441,6 +455,7 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 		s.alerts.retried.write(w)
 	}
 	s.met.auditFailures.write(w)
+	s.writeExportMetrics(w)
 	s.met.overhead.write(w)
 	s.met.upstreamT.write(w)
 	writeHeader(w, "llmflow_accounting_dropped_total", "Usage records dropped because the queue was full.", "counter")

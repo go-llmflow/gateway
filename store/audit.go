@@ -18,6 +18,8 @@ import (
 // AuditEntry is one recorded event. Before and After are JSON, kept as the
 // exact bytes that were hashed.
 type AuditEntry struct {
+	// V is the canonical form the hash was computed with (package audit).
+	V         int
 	Seq       int64
 	Time      time.Time // microsecond precision
 	Kind      string    // admin, auth, scim, system
@@ -73,6 +75,7 @@ CREATE TABLE IF NOT EXISTS llmflow_audit_checkpoints (
 	key_id    text NOT NULL,
 	signature bytea NOT NULL
 );
+ALTER TABLE llmflow_audit ADD COLUMN IF NOT EXISTS v smallint NOT NULL DEFAULT 1;
 CREATE OR REPLACE FUNCTION llmflow_audit_no_update() RETURNS trigger AS $$
 BEGIN
 	RAISE EXCEPTION 'the audit log is append-only';
@@ -88,11 +91,13 @@ CREATE TRIGGER llmflow_audit_cp_no_update BEFORE UPDATE ON llmflow_audit_checkpo
 // auditLock is the advisory lock key serialising appends across replicas.
 const auditLock = 0x6c6c6d66_61756474 // "llmfaudt"
 
-const auditCols = `seq, ts, kind, actor, roles, action, target, before, after, status, source_ip, request_id, prev_hash, hash`
+const auditCols = `seq, ts, kind, actor, roles, action, target, before, after, status, source_ip, request_id, prev_hash, hash, v`
 
 func scanAudit(r pgx.Row) (AuditEntry, error) {
 	var e AuditEntry
-	err := r.Scan(&e.Seq, &e.Time, &e.Kind, &e.Actor, &e.Roles, &e.Action, &e.Target, &e.Before, &e.After, &e.Status, &e.SourceIP, &e.RequestID, &e.PrevHash, &e.Hash)
+	var v int16
+	err := r.Scan(&e.Seq, &e.Time, &e.Kind, &e.Actor, &e.Roles, &e.Action, &e.Target, &e.Before, &e.After, &e.Status, &e.SourceIP, &e.RequestID, &e.PrevHash, &e.Hash, &v)
+	e.V = int(v)
 	e.Time = e.Time.UTC()
 	return e, err
 }
@@ -119,8 +124,8 @@ func (p *Postgres) AuditAppend(ctx context.Context, e AuditEntry, hash AuditHash
 		e.Seq, e.PrevHash = seq+1, prev
 		e.Time = e.Time.UTC().Truncate(time.Microsecond)
 		e.Hash = hash(&e)
-		_, err = tx.Exec(ctx, `INSERT INTO llmflow_audit (`+auditCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-			e.Seq, e.Time, e.Kind, e.Actor, e.Roles, e.Action, e.Target, e.Before, e.After, e.Status, e.SourceIP, e.RequestID, e.PrevHash, e.Hash)
+		_, err = tx.Exec(ctx, `INSERT INTO llmflow_audit (`+auditCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+			e.Seq, e.Time, e.Kind, e.Actor, e.Roles, e.Action, e.Target, e.Before, e.After, e.Status, e.SourceIP, e.RequestID, e.PrevHash, e.Hash, int16(e.V))
 		return err
 	})
 	return e, err

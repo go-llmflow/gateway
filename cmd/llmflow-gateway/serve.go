@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-llmflow/gateway/config"
+	"github.com/go-llmflow/gateway/export"
 	"github.com/go-llmflow/gateway/gateway"
 	"github.com/go-llmflow/gateway/secret"
 	"github.com/go-llmflow/gateway/store"
@@ -99,6 +100,17 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 	}
 	if err := get("audit signing_key_file", c.Audit.SigningKeyFile, &s.AuditKey); err != nil {
 		return s, err
+	}
+	s.ExportCredentials = map[string]export.Credentials{}
+	for _, e := range c.Exports {
+		var cr export.Credentials
+		if err := get("export "+e.Name+" access_key_file", e.AccessKeyFile, &cr.AccessKey); err != nil {
+			return s, err
+		}
+		if err := get("export "+e.Name+" secret_key_file", e.SecretKeyFile, &cr.SecretKey); err != nil {
+			return s, err
+		}
+		s.ExportCredentials[e.Name] = cr
 	}
 	s.UpstreamKeys = map[string]string{}
 	for _, f := range c.KeyFiles() {

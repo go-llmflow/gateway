@@ -454,15 +454,65 @@ an interval (and at shutdown):
 audit {
   signing_key_file    = "vault:secret/llmflow#audit"   # an Ed25519 seed; llmflow-gateway audit keygen -o FILE
   checkpoint_interval = "5m"
+  anchor              = "archive"                      # an export block: where checkpoints also go
+  anchor_max_lag      = "15m"                          # default 3 × checkpoint_interval
+}
+
+export "archive" {
+  kind            = "s3"                               # s3, file; gcs and azure answer "not implemented"
+  endpoint        = "https://minio.example.org:9000"   # https (http only to loopback)
+  bucket          = "llmflow-audit"                    # create it with Object Lock enabled
+  path_style      = true                               # MinIO, Ceph RGW
+  access_key_file = "vault:secret/llmflow#s3_access"
+  secret_key_file = "vault:secret/llmflow#s3_secret"
+  prefix          = "gateway-1/"
+  lock_mode       = "COMPLIANCE"                       # or GOVERNANCE
+  retention       = "8760h"
+  queue_size      = 1024
 }
 ```
 
-`llmflow-gateway audit verify -c CONFIG --public-key KEY` recomputes the chain
-and checks every checkpoint; give the public key from somewhere the gateway's
-operator cannot change (`audit pubkey` prints it). It reports the entries
-after the newest checkpoint, the one window a chain cannot protect: entries
-removed there leave nothing behind (export to write-once storage closes it).
-Failed appends are logged and counted (`llmflow_audit_failures_total`).
+**Anchors.** Every checkpoint, and the entries it covers (gzipped JSON
+lines that recompute to the same hashes), is also written to the anchor
+export: `audit/checkpoints/<seq>.json` and `audit/entries/<from>-<to>.jsonl.gz`.
+On S3 the objects go under Object Lock retention when the bucket has Object
+Lock enabled (`GET /?object-lock` is read at start; MinIO and Ceph RGW require
+it to be enabled when the bucket is created, with versioning); a `file`
+export refuses to overwrite a file but does not stop its owner. At start the
+gateway catches up with the checkpoints the export lacks. The age of the
+newest exported checkpoint is `llmflow_audit_anchor_age_seconds`; a
+checkpoint still unexported after `anchor_max_lag` raises one alert
+(`audit_anchor_lag`, to the log and the alert channels). Export writes are
+queued (bounded) and retried; an object dropped for want of room or given up
+after its retries is counted (`llmflow_export_dropped_total`,
+`llmflow_export_failed_total`) and alerted (`export_dropped`,
+`export_failed`), never silent.
+
+**Verifying.** `llmflow-gateway audit verify -c CONFIG --public-key KEY
+--anchor export` recomputes the chain, checks every checkpoint, and checks the
+database against the newest checkpoint in the export (`--anchor file:PATH`
+takes one you kept yourself): the anchored entry must still be there with the
+anchored hash, and the database's checkpoints must be at least as new. Give
+the public key from somewhere the gateway's operator cannot change (`audit
+pubkey` prints it).
+
+**What this protects against — honestly.** Entries and checkpoints live in
+the same database. Without an anchor, the log is tamper-evident only against
+edits in the middle: someone with write access to the database can delete
+the tail together with the checkpoints that cover it, restore an older
+consistent backup, or delete everything, and `audit verify` without
+`--anchor` says OK (it prints a warning). With an anchor kept outside, those
+three fail verification, and so does a log rewritten and re-signed with a
+stolen key **up to the anchor**. What happened after the newest exported
+checkpoint (at most `checkpoint_interval` plus the export lag) can still be
+removed without trace, and whoever holds the signing key can sign new history
+after the anchor. Failed appends are logged and counted
+(`llmflow_audit_failures_total`).
+
+The canonical form hashed is version 2: every field's raw bytes, each
+preceded by its length (big-endian uint64). Version 1, the JSON of the
+fields, folded invalid UTF-8 to U+FFFD so two different values could hash
+alike; rows written as version 1 still verify.
 
 *Why a chain and not a Merkle tree*: RFC 6962 §2.1 (Certificate
 Transparency, obsoleted by RFC 9162 with the same tree hashing) builds a tree
@@ -717,10 +767,12 @@ Open defects (v0.2.0):
     already verified stays cached until its `exp` or `key_cache_ttl`.
 13. **SCIM does not expand nested groups**, and a provisioned role on a team
     that does not exist is logged, not created.
-14. **The audit log cannot show entries removed after its newest checkpoint**
-    (a hash chain's inherent window, bounded by `checkpoint_interval`), and
-    an attacker who holds the signing key can rewrite it whole: keep the key
-    in OpenBao/Vault and verify with a public key kept elsewhere.
+14. **The audit log's guarantees end at its newest anchor**: without an
+    anchor export, truncation, rollback and deletion of the database go
+    undetected; with one, what happened after the newest exported checkpoint
+    can still be removed, and a stolen signing key can sign new history after
+    it. Keep the key in OpenBao/Vault, verify with a public key kept
+    elsewhere, and keep an anchor on write-once storage.
 
 ## References
 
@@ -746,6 +798,10 @@ Opened while building v0.1.0–v0.4.0, and cited where used above:
 - [RFC 6962](https://www.rfc-editor.org/rfc/rfc6962) §2.1 (Merkle hash trees,
   domain separation) and §3.5 (signed tree heads);
   [RFC 9162](https://www.rfc-editor.org/rfc/rfc9162), which obsoletes it.
+- Amazon S3 API Reference: PutObject (Object Lock headers, `Content-MD5`),
+  GetObjectLockConfiguration, ListObjectsV2; MinIO object locking and
+  immutability; Ceph RGW bucket operations (`?object-lock`). Implemented in
+  [go-volumes/s3](https://github.com/go-volumes/s3) v0.2.0, which this uses.
 - OWASP CSRF prevention cheat sheet (synchronizer token, Fetch Metadata).
 - LiteLLM: [Enterprise features](https://docs.litellm.ai/docs/enterprise),
   [Dynamic TPM/RPM Allocation](https://docs.litellm.ai/docs/proxy/dynamic_rate_limit),

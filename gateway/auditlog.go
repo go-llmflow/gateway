@@ -220,16 +220,21 @@ func (s *Server) checkpointLoop(ctx context.Context) {
 			// One last checkpoint on the way out, so a clean shutdown leaves
 			// nothing unsigned.
 			cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if _, err := s.auditLog.Checkpoint(cctx); err != nil {
+			if seq, err := s.auditLog.Checkpoint(cctx); err != nil {
 				s.log.Error("audit: final checkpoint failed", "err", err)
+			} else if seq > 0 {
+				s.anchorUpTo(cctx)
 			}
 			cancel()
 			return
 		case <-t.C:
-			if _, err := s.auditLog.Checkpoint(ctx); err != nil {
+			if seq, err := s.auditLog.Checkpoint(ctx); err != nil {
 				s.met.auditFailures.add(1, "checkpoint")
 				s.log.Error("audit: checkpoint failed", "err", err)
+			} else if seq > 0 {
+				s.anchorUpTo(ctx)
 			}
+			s.checkAnchorLag(ctx)
 		}
 	}
 }
