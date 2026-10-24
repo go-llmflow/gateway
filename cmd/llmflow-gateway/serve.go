@@ -97,6 +97,9 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 			return s, err
 		}
 	}
+	if err := get("audit signing_key_file", c.Audit.SigningKeyFile, &s.AuditKey); err != nil {
+		return s, err
+	}
 	s.UpstreamKeys = map[string]string{}
 	for _, f := range c.KeyFiles() {
 		var k string

@@ -166,8 +166,11 @@ type metrics struct {
 	retries    *counterVec // group
 	estimated  *counterVec // team, model
 	softAlerts *counterVec // kind
-	overhead   *histogram
-	upstreamT  *histogram
+	// auditFailures counts audit entries or checkpoints that could not be
+	// written.
+	auditFailures *counterVec // kind
+	overhead      *histogram
+	upstreamT     *histogram
 }
 
 func newMetrics() *metrics {
@@ -178,6 +181,8 @@ func newMetrics() *metrics {
 		denied:     newCounterVec("llmflow_denied_total", "Requests refused before reaching vLLM, by reason.", "team", "reason"),
 		retries:    newCounterVec("llmflow_upstream_retries_total", "Retries to another upstream before the first byte.", "group"),
 		softAlerts: newCounterVec("llmflow_soft_budget_alerts_total", "Soft-budget limits reached (one per budget and period).", "kind"),
+		auditFailures: newCounterVec("llmflow_audit_failures_total",
+			"Audit entries (by kind) or checkpoints that could not be written.", "kind"),
 		estimated: newCounterVec("llmflow_usage_estimated_total",
 			"Requests charged with estimated tokens because vLLM's usage never reached the gateway (client gone first).", "team", "model"),
 		overhead: newHistogram("llmflow_overhead_seconds", "Time spent in the gateway itself (request handling before the upstream call plus response handling after it).",

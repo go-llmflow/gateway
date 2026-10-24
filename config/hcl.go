@@ -59,6 +59,13 @@ type fileHCL struct {
 	SSO                  *ssoHCL    `hcl:"sso,block"`
 	KeyRotation          *rotHCL    `hcl:"key_rotation,block"`
 	SCIM                 *scimHCL   `hcl:"scim,block"`
+	Audit                *auditHCL  `hcl:"audit,block"`
+}
+
+type auditHCL struct {
+	SigningKeyFile     *string   `hcl:"signing_key_file,optional"`
+	CheckpointInterval *string   `hcl:"checkpoint_interval,optional"`
+	IntervalRange      hcl.Range `hcl:"checkpoint_interval,attr_value_range"`
 }
 
 type scimHCL struct {
@@ -806,6 +813,14 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		}
 		c.KeyRotation = ck
 	}
+	c.Audit.CheckpointInterval = 5 * time.Minute
+	if a := raw.Audit; a != nil {
+		c.Audit.SigningKeyFile = strOr(a.SigningKeyFile, "")
+		c.Audit.CheckpointInterval = v.dur(a.CheckpointInterval, a.IntervalRange, "checkpoint_interval", 5*time.Minute)
+		if c.Audit.CheckpointInterval < time.Second || c.Audit.CheckpointInterval > 24*time.Hour {
+			v.errf(a.IntervalRange, "Invalid checkpoint_interval", "checkpoint_interval %v: between 1s and 24h", c.Audit.CheckpointInterval)
+		}
+	}
 	if sc := raw.SCIM; sc != nil {
 		cs := &SCIM{TokenFile: sc.TokenFile, BaseURL: strings.TrimRight(sc.BaseURL, "/")}
 		if u, err := url.Parse(cs.BaseURL); err != nil || !validIssuer(cs.BaseURL) || u.Path != "/scim/v2" {
@@ -860,6 +875,7 @@ func (c *Config) SecretRefs() []string {
 	if c.SCIM != nil {
 		add(c.SCIM.TokenFile)
 	}
+	add(c.Audit.SigningKeyFile)
 	if c.Alerts.SMTP != nil {
 		add(c.Alerts.SMTP.PasswordFile)
 	}

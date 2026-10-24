@@ -260,7 +260,7 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusServiceUnavailable, "service_unavailable", "too many sessions")
 		return
 	}
-	s.log.Info("sso: login", "user", user)
+	s.audit("sso.login", "by", user, "user", user)
 	setCookie(w, loginCookie, "", -1)
 	setCookie(w, sessionCookie, value, int(s.cfg.SSO.SessionTTL/time.Second))
 	w.Header().Set("Cache-Control", "no-store")
@@ -389,6 +389,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	s.sso.mu.Lock()
 	delete(s.sso.sessions, p.session)
 	s.sso.mu.Unlock()
+	s.audit("sso.logout", "by", p.name, "user", p.name)
 	setCookie(w, sessionCookie, "", -1)
 	writeJSON(w, http.StatusOK, map[string]any{"end_session_url": s.sso.client.EndSessionURL("")})
 }
