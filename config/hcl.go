@@ -158,7 +158,7 @@ type scimHCL struct {
 }
 
 type scimGroupHCL struct {
-	Name     string    `hcl:"name,label"`
+	Name      string    `hcl:"name,label"`
 	Team      string    `hcl:"team"`
 	TeamRange hcl.Range `hcl:"team,attr_value_range"`
 	Role      *string   `hcl:"role,optional"`
@@ -188,9 +188,9 @@ type ssoHCL struct {
 }
 
 type ssoRoleHCL struct {
-	Claim    *string   `hcl:"claim,optional"`
-	Value    string    `hcl:"value"`
-	Role     string    `hcl:"role"`
+	Claim     *string   `hcl:"claim,optional"`
+	Value     string    `hcl:"value"`
+	Role      string    `hcl:"role"`
 	Org       *string   `hcl:"org,optional"`
 	OrgRange  hcl.Range `hcl:"org,attr_value_range"`
 	Team      *string   `hcl:"team,optional"`
