@@ -3,13 +3,18 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/smtp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-llmflow/gateway/config"
@@ -27,6 +32,14 @@ type alerter struct {
 	client       *http.Client
 	sendMail     func(addr string, a smtp.Auth, from string, to []string, msg []byte) error
 	log          func(msg string, args ...any)
+	// Each channel is tried up to attempts times, waiting backoff(i)
+	// before attempt i+1; sleep waits (tests replace it).
+	attempts int
+	backoff  func(i int) time.Duration
+	sleep    func(ctx context.Context, d time.Duration) error
+	// failed and retried count, by channel, the alerts given up on and the
+	// retries made.
+	failed, retried *counterVec
 }
 
 func newAlerter(cfg config.Alerts, webhookToken, smtpPassword string, log func(string, ...any)) *alerter {
@@ -38,7 +51,69 @@ func newAlerter(cfg config.Alerts, webhookToken, smtpPassword string, log func(s
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 		sendMail: smtp.SendMail,
+		attempts: 6,
+		backoff:  exponentialBackoff(2*time.Second, 2*time.Minute),
+		sleep:    sleepCtx,
+		failed:   newCounterVec("llmflow_alert_failures_total", "Soft-budget alerts given up on after every retry, by channel.", "channel"),
+		retried:  newCounterVec("llmflow_alert_retries_total", "Soft-budget alert retries, by channel.", "channel"),
 	}
+}
+
+// exponentialBackoff doubles from base up to limit, with up to 25% jitter
+// so that several gateways do not retry in step.
+func exponentialBackoff(base, limit time.Duration) func(int) time.Duration {
+	return func(i int) time.Duration {
+		d := base << min(i, 20)
+		if d > limit || d <= 0 {
+			d = limit
+		}
+		return d + time.Duration(rand.Int64N(int64(d)/4+1))
+	}
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// permanent marks an error that a retry cannot fix (a 4xx answer other
+// than 408 and 429).
+type permanent struct{ error }
+
+// retry runs try until it succeeds, fails permanently, attempts run out or
+// ctx ends. It reports the last error.
+func (a *alerter) retry(ctx context.Context, channel string, try func() error) error {
+	var err error
+	for i := 0; i < a.attempts; i++ {
+		if i > 0 {
+			a.retried.add(1, channel)
+			if serr := a.sleep(ctx, a.backoff(i-1)); serr != nil {
+				break
+			}
+		}
+		if err = try(); err == nil {
+			return nil
+		}
+		var p permanent
+		if errors.As(err, &p) {
+			break
+		}
+	}
+	a.failed.add(1, channel)
+	return err
+}
+
+// idempotencyKey names one alert (budget and period) for a receiver that
+// de-duplicates: every retry of the webhook carries the same one.
+func idempotencyKey(p alertPayload) string {
+	sum := sha256.Sum256([]byte(p.Budget.String() + "|" + p.PeriodStart.UTC().Format(time.RFC3339)))
+	return hex.EncodeToString(sum[:16])
 }
 
 // alertPayload is the webhook body.
@@ -55,16 +130,28 @@ type alertPayload struct {
 func (a *alerter) send(ctx context.Context, al softAlert) {
 	p := alertPayload{Type: "soft_budget", Budget: al.b.BudgetKey, Period: al.b.Period, PeriodStart: al.start,
 		SoftLimit: al.b.SoftLimit, MaxCost: al.b.MaxCost, Spent: al.spent}
+	// The channels are retried independently: a mail that went out is not
+	// sent again because the webhook is down.
+	var wg sync.WaitGroup
 	if a.cfg.WebhookURL != "" {
-		if err := a.webhook(ctx, p); err != nil {
-			a.log("soft-budget webhook failed", "budget", al.b.BudgetKey.String(), "err", err)
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := a.retry(ctx, "webhook", func() error { return a.webhook(ctx, p) }); err != nil {
+				a.log("soft-budget webhook failed, given up", "budget", al.b.BudgetKey.String(), "err", err)
+			}
+		}()
 	}
 	if a.cfg.SMTP != nil {
-		if err := a.mail(p); err != nil {
-			a.log("soft-budget mail failed", "budget", al.b.BudgetKey.String(), "err", err)
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := a.retry(ctx, "smtp", func() error { return a.mail(p) }); err != nil {
+				a.log("soft-budget mail failed, given up", "budget", al.b.BudgetKey.String(), "err", err)
+			}
+		}()
 	}
+	wg.Wait()
 }
 
 func (a *alerter) webhook(ctx context.Context, p alertPayload) error {
@@ -77,6 +164,7 @@ func (a *alerter) webhook(ctx context.Context, p alertPayload) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", idempotencyKey(p))
 	if a.webhookToken != "" {
 		req.Header.Set("Authorization", "Bearer "+a.webhookToken)
 	}
@@ -87,7 +175,11 @@ func (a *alerter) webhook(ctx context.Context, p alertPayload) error {
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("webhook answered %d", resp.StatusCode)
+		err := fmt.Errorf("webhook answered %d", resp.StatusCode)
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusRequestTimeout && resp.StatusCode != http.StatusTooManyRequests {
+			return permanent{err}
+		}
+		return err
 	}
 	return nil
 }

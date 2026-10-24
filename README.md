@@ -701,8 +701,14 @@ Open defects (v0.2.0):
 9. **Admin principals are read from the store on every admin request** (no
    cache): fine for admin traffic, but the admin API fails with the store.
    Role changes therefore apply at once.
-10. **Soft-budget alerts are sent once and not retried**: a webhook or SMTP
-    failure is logged, and the period is already marked as alerted.
+10. **Soft-budget alert retries live in memory**: each channel (webhook,
+    SMTP) is retried on its own, up to 6 attempts with exponential backoff
+    (2 s doubling, 2 min cap, 25 % jitter), a 4xx other than 408/429 is not
+    retried, every webhook attempt carries the same `Idempotency-Key`
+    (budget and period) so a receiver can de-duplicate, and give-ups and
+    retries are counted (`llmflow_alert_failures_total`,
+    `llmflow_alert_retries_total`). A gateway stopped mid-retry does not
+    resume: the period is already marked as alerted.
 
 11. **SSO sessions live in one replica's memory**: behind several replicas,
     use sticky sessions.

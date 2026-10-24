@@ -29,9 +29,8 @@ func (s *Server) onSoftLimit(alerts []softAlert) {
 			s.bg.Add(1)
 			go func() {
 				defer s.bg.Done()
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				s.alerts.send(ctx, al)
+				// Retries run until they succeed or give up; Close stops them.
+				s.alerts.send(s.alertCtx, al)
 			}()
 		}
 	}
