@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -157,10 +158,11 @@ type scimHCL struct {
 }
 
 type scimGroupHCL struct {
-	Name     string    `hcl:"name,label"`
-	Team     string    `hcl:"team"`
-	Role     *string   `hcl:"role,optional"`
-	DefRange hcl.Range `hcl:",def_range"`
+	Name      string    `hcl:"name,label"`
+	Team      string    `hcl:"team"`
+	TeamRange hcl.Range `hcl:"team,attr_value_range"`
+	Role      *string   `hcl:"role,optional"`
+	DefRange  hcl.Range `hcl:",def_range"`
 }
 
 type rotHCL struct {
@@ -186,12 +188,14 @@ type ssoHCL struct {
 }
 
 type ssoRoleHCL struct {
-	Claim    *string   `hcl:"claim,optional"`
-	Value    string    `hcl:"value"`
-	Role     string    `hcl:"role"`
-	Org      *string   `hcl:"org,optional"`
-	Team     *string   `hcl:"team,optional"`
-	DefRange hcl.Range `hcl:",def_range"`
+	Claim     *string   `hcl:"claim,optional"`
+	Value     string    `hcl:"value"`
+	Role      string    `hcl:"role"`
+	Org       *string   `hcl:"org,optional"`
+	OrgRange  hcl.Range `hcl:"org,attr_value_range"`
+	Team      *string   `hcl:"team,optional"`
+	TeamRange hcl.Range `hcl:"team,attr_value_range"`
+	DefRange  hcl.Range `hcl:",def_range"`
 }
 
 // validRoleScope mirrors the store's binding rules: proxy roles have no
@@ -487,6 +491,15 @@ func (v *validator) dur(p *string, r hcl.Range, name string, def time.Duration) 
 		return def
 	}
 	return d
+}
+
+// known reports a reference to an organisation or team that no org block
+// declares. A misspelt name must not silently disable what it configures
+// (a request log, a policy, a role), so every reference is checked.
+func (v *validator) known(declared map[string]bool, name string, r hcl.Range, kind, where string) {
+	if !declared[name] {
+		v.errf(r, "Unknown "+kind, "%s names %s %q, which no org block declares", where, kind, name)
+	}
 }
 
 func strOr(p *string, def string) string {
@@ -844,6 +857,8 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			cm := JWTMap{Claim: strOr(m.Claim, "groups"), Value: m.Value, Team: m.Team, Project: strOr(m.Project, "")}
 			if !ValidName(m.Team) || cm.Project != "" && !ValidName(cm.Project) || m.Value == "" {
 				v.errf(m.DefRange, "Invalid map", "map needs a value and a valid team (and project) name")
+			} else {
+				v.known(teams, m.Team, m.TeamRange, "team", "jwt map "+strconv.Quote(m.Value))
 			}
 			cj.Maps = append(cj.Maps, cm)
 		}
@@ -875,6 +890,14 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			cr := SSORole{Claim: strOr(r.Claim, "groups"), Value: r.Value, Role: r.Role, Org: strOr(r.Org, ""), Team: strOr(r.Team, "")}
 			if r.Value == "" || !validRoleScope(cr.Role, cr.Org, cr.Team) {
 				v.errf(r.DefRange, "Invalid role", "role %q needs a value and its scope (proxy roles: none; org_admin: org; team_admin, member: team; viewer: org or team)", r.Role)
+			} else {
+				where := "sso role " + strconv.Quote(r.Value)
+				if cr.Org != "" {
+					v.known(orgs, cr.Org, r.OrgRange, "organisation", where)
+				}
+				if cr.Team != "" {
+					v.known(teams, cr.Team, r.TeamRange, "team", where)
+				}
 			}
 			cs.Roles = append(cs.Roles, cr)
 		}
@@ -984,6 +1007,9 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 				v.errf(l.TeamsRange, "Invalid team", "logging %q: team %q", l.Name, t)
 			} else if other, ok := loggedBy[t]; ok {
 				v.errf(l.TeamsRange, "Team in two logging blocks", "team %q is in logging %q and %q", t, other, l.Name)
+			} else {
+				// A misspelt team would silently have no log.
+				v.known(teams, t, l.TeamsRange, "team", "logging "+strconv.Quote(l.Name))
 			}
 			loggedBy[t] = l.Name
 		}
@@ -1045,6 +1071,8 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 				v.errf(p.TeamsRange, "Invalid team", "policy %q: team %q", p.Name, t)
 			} else if other, ok := policyOf[t]; ok {
 				v.errf(p.TeamsRange, "Team in two policies", "team %q is in policies %q and %q", t, other, p.Name)
+			} else {
+				v.known(teams, t, p.TeamsRange, "team", "policy "+strconv.Quote(p.Name))
 			}
 			policyOf[t] = p.Name
 		}
@@ -1077,6 +1105,8 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 				v.errf(g.DefRange, "Invalid group", "group %q: empty or declared twice (names compare without case)", g.Name)
 			case !ValidName(g.Team):
 				v.errf(g.DefRange, "Invalid team", "group %q: team %q", g.Name, g.Team)
+			case !teams[g.Team]:
+				v.known(teams, g.Team, g.TeamRange, "team", "scim group "+strconv.Quote(g.Name))
 			case cg.Role != "member" && cg.Role != "team_admin" && cg.Role != "viewer":
 				v.errf(g.DefRange, "Invalid role", "group %q: role %q: want member, team_admin or viewer", g.Name, cg.Role)
 			}

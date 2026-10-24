@@ -44,6 +44,16 @@ model "llama-batch" {
   }
 }
 cache_salt_key_file = "/etc/llmflow/cache-salt.key"
+` + labs
+
+// labs declares the teams the other blocks of the tests name; it comes
+// last so that the positions the tests expect in valid do not move.
+const labs = `
+org "labs" {
+  share = 0
+  team "etabA" {}
+  team "etabB" {}
+}
 `
 
 func parse(src string) (*Config, error) { return Parse([]byte(src), "test.hcl") }
@@ -153,7 +163,7 @@ health {
 func TestParseRejectsWithPosition(t *testing.T) {
 	cases := []struct{ name, src, want string }{
 		{"unknown attribute", strings.Replace(valid, `master_key_file`, "temas = 1\nmaster_key_file", 1), `test.hcl:2:1: Unsupported argument`},
-		{"shares > 1", strings.Replace(valid, "0.1875", "0.5", 1), `test.hcl:5:23: Shares exceed the pool`},
+		{"shares > 1", strings.Replace(strings.TrimSuffix(valid, labs), "0.1875", "0.5", 1), `test.hcl:5:23: Shares exceed the pool`},
 		{"bad scheme", strings.Replace(valid, "http://10.0.0.3:8000", "file:///etc/passwd", 1), `test.hcl:29:16: Invalid base_url`},
 		{"userinfo", strings.Replace(valid, "http://10.0.0.3:8000", "http://u:p@10.0.0.3:8000", 1), "Invalid base_url"},
 		{"query", strings.Replace(valid, "http://10.0.0.3:8000", "http://10.0.0.3:8000?x=1", 1), "Invalid base_url"},
@@ -608,6 +618,51 @@ logging "a" {
 		if _, err := parse(valid + loggingExport + block); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// TestUnknownNamesRejected: every block that names an organisation or a
+// team refuses a name no org block declares, with the diagnostic on the
+// line that holds the typo. A misspelt team would otherwise silently have
+// no request log, no policy, no role.
+func TestUnknownNamesRejected(t *testing.T) {
+	scim := "scim {\n  token_file = \"/t\"\n  base_url = \"https://gw.example/scim/v2\"\n  group \"G\" { team = \"etbaA\" }\n}\n"
+	cases := []struct{ name, block, want string }{
+		{"logging", "logging \"l\" {\n  teams = [\"etabA\", \"etbaB\"]\n  destination = \"logs\"\n}\n", `Unknown team: logging "l" names team "etbaB"`},
+		{"policy", "policy \"p\" {\n  teams = [\"etbaA\"]\n  require = [\"user\"]\n}\n", `Unknown team: policy "p" names team "etbaA"`},
+		{"jwt map", strings.Replace(jwtBlock("https://idp.example", "a"), `team = "etabA"`, `team = "etbaA"`, 1), `Unknown team: jwt map "lab-a" names team "etbaA"`},
+		{"sso team role", ssoBlock("https://sso.example.org", "https://llm.example.org/admin/callback",
+			"role {\n    value = \"lab-a\"\n    role = \"member\"\n    team = \"etbaA\"\n  }"), `Unknown team: sso role "lab-a" names team "etbaA"`},
+		{"sso org role", ssoBlock("https://sso.example.org", "https://llm.example.org/admin/callback",
+			"role {\n    value = \"dir\"\n    role = \"org_admin\"\n    org = \"etbaA\"\n  }"), `Unknown organisation: sso role "dir" names organisation "etbaA"`},
+		{"scim group", scim, `Unknown team: scim group "G" names team "etbaA"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := valid + loggingExport + tc.block
+			_, err := parse(src)
+			if err == nil {
+				t.Fatal("accepted")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not contain %q", err, tc.want)
+			}
+			// test.hcl:LINE:COL: the line must be the one with the typo.
+			var line, col int
+			if _, serr := fmt.Sscanf(err.Error(), "test.hcl:%d:%d:", &line, &col); serr != nil {
+				t.Fatalf("no position in %q", err)
+			}
+			lines := strings.Split(src, "\n")
+			if line < 1 || line > len(lines) || !strings.Contains(lines[line-1], "etba") {
+				t.Fatalf("diagnostic at line %d, which does not hold the typo", line)
+			}
+		})
+	}
+	// The same blocks with declared names are accepted (the control).
+	ok := valid + loggingExport + "logging \"l\" {\n  teams = [\"etabA\"]\n  destination = \"logs\"\n}\n" +
+		ssoBlock("https://sso.example.org", "https://llm.example.org/admin/callback", "role {\n    value = \"dir\"\n    role = \"org_admin\"\n    org = \"etabA\"\n  }")
+	if _, err := parse(ok); err != nil {
+		t.Fatal(err)
 	}
 }
 

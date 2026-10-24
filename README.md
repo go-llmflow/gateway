@@ -241,6 +241,16 @@ HCL design decisions:
 - **Durations are strings** in Go syntax (`"30s"`, `"168h"`), positive.
 - **Absent and zero differ**: `retries = 0` disables retries; leaving it out
   takes the default (2).
+- **Every name must be declared** (since v0.5.1): an organisation or team
+  named in a `logging`, `policy`, `jwt` map, `sso` role or `scim` group block
+  must be declared by an `org` block, or `check-config` and `serve` refuse the
+  file with a diagnostic at the misspelt name. A typo would otherwise switch
+  a request log, a policy or a role off without a word. A team created only
+  through the admin API must be declared in an `org` block before the
+  configuration names it (declaring it is harmless: `serve` ensures it
+  exists). Projects are created through the admin API, not declared, so a
+  `project` in a `jwt` map is checked for its syntax only. Model names are
+  only declared in the configuration, never referenced by another block.
 - The parser is fuzzed (`FuzzParse`, corpus in `config/testdata/fuzz`): the
   configuration is treated as untrusted input.
 
