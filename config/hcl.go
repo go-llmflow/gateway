@@ -24,45 +24,62 @@ import (
 // diagnostic points at it.
 
 type fileHCL struct {
-	Listen               *string     `hcl:"listen,optional"`
-	ListenRange          hcl.Range   `hcl:"listen,attr_value_range"`
-	MasterKeyFile        string      `hcl:"master_key_file"`
-	MasterKeyFileRange   hcl.Range   `hcl:"master_key_file,attr_value_range"`
-	MetricsTokenFile     *string     `hcl:"metrics_token_file,optional"`
-	Retries              *int        `hcl:"retries,optional"`
-	RetriesRange         hcl.Range   `hcl:"retries,attr_value_range"`
-	BudgetRefresh        *string     `hcl:"budget_refresh,optional"`
-	BudgetRefreshRange   hcl.Range   `hcl:"budget_refresh,attr_value_range"`
-	KeyCacheTTL          *string     `hcl:"key_cache_ttl,optional"`
-	KeyCacheTTLRange     hcl.Range   `hcl:"key_cache_ttl,attr_value_range"`
-	ShutdownGrace        *string     `hcl:"shutdown_grace,optional"`
-	ShutdownGraceRange   hcl.Range   `hcl:"shutdown_grace,attr_value_range"`
-	ExposeOverheadHeader *bool       `hcl:"expose_overhead_header,optional"`
-	CacheIsolation       *string     `hcl:"cache_isolation,optional"`
-	CacheIsolationRange  hcl.Range   `hcl:"cache_isolation,attr_value_range"`
-	CacheSaltKeyFile     *string     `hcl:"cache_salt_key_file,optional"`
-	AuthFailures         *int        `hcl:"auth_failures_per_minute,optional"`
-	AuthFailuresRange    hcl.Range   `hcl:"auth_failures_per_minute,attr_value_range"`
-	Store                *storeHCL   `hcl:"store,block"`
-	Limits               *limitsHCL  `hcl:"limits,block"`
-	FairShare            *fairHCL    `hcl:"fairshare,block"`
-	Health               *healthHCL  `hcl:"health,block"`
-	Orgs                 []orgHCL    `hcl:"org,block"`
-	Tags                 *tagsHCL    `hcl:"tags,block"`
-	Alerts               *alertsHCL  `hcl:"alerts,block"`
-	Pools                []poolHCL   `hcl:"pool,block"`
-	Models               []modelHCL  `hcl:"model,block"`
-	Vault                *vaultHCL   `hcl:"vault,block"`
-	TrustedProxies       []string    `hcl:"trusted_proxies,optional"`
-	TrustedProxiesRange  hcl.Range   `hcl:"trusted_proxies,attr_value_range"`
-	Routes               *routesHCL  `hcl:"routes,block"`
-	JWT                  *jwtHCL     `hcl:"jwt,block"`
-	SSO                  *ssoHCL     `hcl:"sso,block"`
-	KeyRotation          *rotHCL     `hcl:"key_rotation,block"`
-	SCIM                 *scimHCL    `hcl:"scim,block"`
-	Policies             []policyHCL `hcl:"policy,block"`
-	Audit                *auditHCL   `hcl:"audit,block"`
-	Exports              []exportHCL `hcl:"export,block"`
+	Listen               *string      `hcl:"listen,optional"`
+	ListenRange          hcl.Range    `hcl:"listen,attr_value_range"`
+	MasterKeyFile        string       `hcl:"master_key_file"`
+	MasterKeyFileRange   hcl.Range    `hcl:"master_key_file,attr_value_range"`
+	MetricsTokenFile     *string      `hcl:"metrics_token_file,optional"`
+	Retries              *int         `hcl:"retries,optional"`
+	RetriesRange         hcl.Range    `hcl:"retries,attr_value_range"`
+	BudgetRefresh        *string      `hcl:"budget_refresh,optional"`
+	BudgetRefreshRange   hcl.Range    `hcl:"budget_refresh,attr_value_range"`
+	KeyCacheTTL          *string      `hcl:"key_cache_ttl,optional"`
+	KeyCacheTTLRange     hcl.Range    `hcl:"key_cache_ttl,attr_value_range"`
+	ShutdownGrace        *string      `hcl:"shutdown_grace,optional"`
+	ShutdownGraceRange   hcl.Range    `hcl:"shutdown_grace,attr_value_range"`
+	ExposeOverheadHeader *bool        `hcl:"expose_overhead_header,optional"`
+	CacheIsolation       *string      `hcl:"cache_isolation,optional"`
+	CacheIsolationRange  hcl.Range    `hcl:"cache_isolation,attr_value_range"`
+	CacheSaltKeyFile     *string      `hcl:"cache_salt_key_file,optional"`
+	AuthFailures         *int         `hcl:"auth_failures_per_minute,optional"`
+	AuthFailuresRange    hcl.Range    `hcl:"auth_failures_per_minute,attr_value_range"`
+	Store                *storeHCL    `hcl:"store,block"`
+	Limits               *limitsHCL   `hcl:"limits,block"`
+	FairShare            *fairHCL     `hcl:"fairshare,block"`
+	Health               *healthHCL   `hcl:"health,block"`
+	Orgs                 []orgHCL     `hcl:"org,block"`
+	Tags                 *tagsHCL     `hcl:"tags,block"`
+	Alerts               *alertsHCL   `hcl:"alerts,block"`
+	Pools                []poolHCL    `hcl:"pool,block"`
+	Models               []modelHCL   `hcl:"model,block"`
+	Vault                *vaultHCL    `hcl:"vault,block"`
+	TrustedProxies       []string     `hcl:"trusted_proxies,optional"`
+	TrustedProxiesRange  hcl.Range    `hcl:"trusted_proxies,attr_value_range"`
+	Routes               *routesHCL   `hcl:"routes,block"`
+	JWT                  *jwtHCL      `hcl:"jwt,block"`
+	SSO                  *ssoHCL      `hcl:"sso,block"`
+	KeyRotation          *rotHCL      `hcl:"key_rotation,block"`
+	SCIM                 *scimHCL     `hcl:"scim,block"`
+	Policies             []policyHCL  `hcl:"policy,block"`
+	Audit                *auditHCL    `hcl:"audit,block"`
+	Exports              []exportHCL  `hcl:"export,block"`
+	Logging              []loggingHCL `hcl:"logging,block"`
+}
+
+type loggingHCL struct {
+	Name             string    `hcl:"name,label"`
+	NameRange        hcl.Range `hcl:"name,label_range"`
+	Teams            []string  `hcl:"teams"`
+	TeamsRange       hcl.Range `hcl:"teams,attr_value_range"`
+	Destination      string    `hcl:"destination"`
+	DestinationRange hcl.Range `hcl:"destination,attr_value_range"`
+	Content          *bool     `hcl:"content,optional"`
+	MaxContentBytes  *int      `hcl:"max_content_bytes,optional"`
+	BatchRecords     *int      `hcl:"batch_records,optional"`
+	BatchInterval    *string   `hcl:"batch_interval,optional"`
+	BatchRange       hcl.Range `hcl:"batch_interval,attr_value_range"`
+	Lock             *bool     `hcl:"lock,optional"`
+	DefRange         hcl.Range `hcl:",def_range"`
 }
 
 type auditHCL struct {
@@ -933,6 +950,48 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			v.errf(x.KindRange, "Invalid export kind", "export %q: kind %q: want s3, file, gcs or azure", x.Name, e.Kind)
 		}
 		c.Exports = append(c.Exports, e)
+	}
+	loggedBy := map[string]string{}
+	lnames := map[string]bool{}
+	for _, l := range raw.Logging {
+		cl := Logging{Name: l.Name, Teams: l.Teams, Destination: l.Destination, MaxContentBytes: 1 << 20, BatchRecords: 500,
+			BatchInterval: v.dur(l.BatchInterval, l.BatchRange, "batch_interval", time.Minute)}
+		if l.Content != nil {
+			cl.Content = *l.Content
+		}
+		if l.Lock != nil {
+			cl.Lock = *l.Lock
+		}
+		if l.MaxContentBytes != nil {
+			cl.MaxContentBytes = *l.MaxContentBytes
+		}
+		if l.BatchRecords != nil {
+			cl.BatchRecords = *l.BatchRecords
+		}
+		// The name is a path segment of the objects' keys.
+		if !ValidName(l.Name) || l.Name == "." || l.Name == ".." || lnames[l.Name] {
+			v.errf(l.NameRange, "Invalid logging name", "logging %q: want [A-Za-z0-9_.-]{1,64}, declared once", l.Name)
+		}
+		lnames[l.Name] = true
+		if !exports[l.Destination] {
+			v.errf(l.DestinationRange, "Unknown export", "logging %q: destination %q names no export block", l.Name, l.Destination)
+		}
+		if len(l.Teams) == 0 {
+			v.errf(l.TeamsRange, "No team", "logging %q names no team", l.Name)
+		}
+		for _, t := range l.Teams {
+			if !ValidName(t) {
+				v.errf(l.TeamsRange, "Invalid team", "logging %q: team %q", l.Name, t)
+			} else if other, ok := loggedBy[t]; ok {
+				v.errf(l.TeamsRange, "Team in two logging blocks", "team %q is in logging %q and %q", t, other, l.Name)
+			}
+			loggedBy[t] = l.Name
+		}
+		if cl.MaxContentBytes < 1 || cl.MaxContentBytes > 16<<20 || cl.BatchRecords < 1 || cl.BatchRecords > 100000 ||
+			cl.BatchInterval < time.Second || cl.BatchInterval > 24*time.Hour {
+			v.errf(l.DefRange, "Invalid logging limits", "logging %q: max_content_bytes 1..16 MiB, batch_records 1..100000, batch_interval 1s..24h", l.Name)
+		}
+		c.Logging = append(c.Logging, cl)
 	}
 	if a := raw.Audit; a != nil {
 		c.Audit.Anchor = strOr(a.Anchor, "")

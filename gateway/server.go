@@ -95,6 +95,9 @@ type Server struct {
 	// checkpoints to the one audit.anchor names.
 	exports map[string]*export.Queue
 	anchor  *anchorState
+	// requestLogs are the per-team request logs, by team; a team absent
+	// has none.
+	requestLogs map[string]*requestLogger
 	// policies by name, and the policy of each team that has one.
 	policies   map[string]*config.Policy
 	teamPolicy map[string]string
@@ -287,6 +290,10 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 		s.bg.Add(1)
 		go func() { defer s.bg.Done(); s.rotationLoop(bctx) }()
+	}
+	for _, l := range s.uniqueRequestLogs() {
+		s.bg.Add(1)
+		go func() { defer s.bg.Done(); l.loop(bctx) }()
 	}
 	if s.auditKey != nil {
 		s.bg.Add(1)

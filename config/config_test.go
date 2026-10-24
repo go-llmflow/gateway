@@ -528,8 +528,92 @@ func TestParsePolicies(t *testing.T) {
 	}
 }
 
+const loggingExport = `
+export "logs" {
+  kind      = "file"
+  directory = "/var/lib/llmflow/logs"
+}
+`
+
+func TestParseLogging(t *testing.T) {
+	c, err := parse(valid + loggingExport + `
+logging "meta" {
+  teams       = ["etabA"]
+  destination = "logs"
+}
+logging "full" {
+  teams             = ["etabB"]
+  destination       = "logs"
+  content           = true
+  max_content_bytes = 4096
+  batch_records     = 10
+  batch_interval    = "30s"
+  lock              = true
+}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Logging) != 2 {
+		t.Fatalf("%+v", c.Logging)
+	}
+	m, f := c.Logging[0], c.Logging[1]
+	// Content is off unless a block says otherwise.
+	if m.Content || m.Lock || m.MaxContentBytes != 1<<20 || m.BatchRecords != 500 || m.BatchInterval != time.Minute {
+		t.Errorf("defaults: %+v", m)
+	}
+	if !f.Content || !f.Lock || f.MaxContentBytes != 4096 || f.BatchRecords != 10 || f.BatchInterval != 30*time.Second {
+		t.Errorf("full: %+v", f)
+	}
+	for name, block := range map[string]string{
+		"unknown export": `logging "a" {
+  teams = ["etabA"]
+  destination = "nope"
+}`,
+		"no team": `logging "a" {
+  teams = []
+  destination = "logs"
+}`,
+		"team twice": `logging "a" {
+  teams = ["etabA"]
+  destination = "logs"
+}
+logging "b" {
+  teams = ["etabA"]
+  destination = "logs"
+}`,
+		"name twice": `logging "a" {
+  teams = ["etabA"]
+  destination = "logs"
+}
+logging "a" {
+  teams = ["etabB"]
+  destination = "logs"
+}`,
+		"dot-dot name": `logging ".." {
+  teams = ["etabA"]
+  destination = "logs"
+}`,
+		"content too large": `logging "a" {
+  teams = ["etabA"]
+  destination = "logs"
+  max_content_bytes = 16777217
+}`,
+		"batch too short": `logging "a" {
+  teams = ["etabA"]
+  destination = "logs"
+  batch_interval = "10ms"
+}`,
+	} {
+		if _, err := parse(valid + loggingExport + block); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
 func FuzzParse(f *testing.F) {
 	f.Add([]byte(valid))
+	f.Add([]byte(valid + loggingExport + "logging \"a\" {\n  teams = [\"etabA\"]\n  destination = \"logs\"\n  content = true\n}\n"))
 	f.Add([]byte(valid + `store { kind = "postgres" dsn_file = "/d" }`))
 	f.Add([]byte("master_key_file = \"$${x}\"\nmodel \"m\" {\n upstream \"u\" {\n  base_url = \"http://h\"\n  key_file = <<EOT\n/k\nEOT\n }\n}\npool \"m\" { capacity = 1 }\n"))
 	f.Add([]byte(valid + policyBlocks))

@@ -86,6 +86,29 @@ type Config struct {
 	// storage (MinIO, Ceph RGW, AWS), a local directory; GCS and Azure are
 	// declared but not implemented.
 	Exports []Export
+	// Logging sends per-request logs of the teams it names to an export.
+	// Teams in no logging block have none: spend metadata only, in the
+	// store.
+	Logging []Logging
+}
+
+// Logging is a per-team request log.
+type Logging struct {
+	Name        string
+	Teams       []string
+	Destination string // an export
+	// Content adds the prompt and the completion (each cut at
+	// MaxContentBytes). False: metadata only.
+	Content         bool
+	MaxContentBytes int
+	// Records are written in batches of BatchRecords, or every
+	// BatchInterval, whichever comes first.
+	BatchRecords  int
+	BatchInterval time.Duration
+	// Lock puts the objects under the export's Object Lock retention.
+	// Off by default: a content log under COMPLIANCE cannot be erased, not
+	// even on a lawful request.
+	Lock bool
 }
 
 // Audit configures the audit log.

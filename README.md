@@ -275,6 +275,38 @@ naming everything missing — `policy attributed requires: user, a request tag`
 and their evaluation are fuzzed (`FuzzRequiredFields`, and `FuzzParse` checks
 that parsed policies are usable).
 
+### Per-team request logs
+
+By default **no request log is written for anyone**: the spend metadata goes
+to the accounting store, the prompts and completions are forwarded and
+forgotten, and the gateway's own log never holds them. A `logging` block
+sends the requests of the teams it names to an export (see the `export` block
+under [Audit log](#audit-log)):
+
+```hcl
+logging "research" {
+  teams             = ["etabA", "etabB"]   # a team is in at most one block
+  destination       = "archive"            # an export block
+  content           = false                # default: metadata only
+  max_content_bytes = 1048576              # per body, when content = true (at most 16 MiB)
+  batch_records     = 500                  # an object every 500 records…
+  batch_interval    = "1m"                 # …or every minute, and at shutdown
+  lock              = false                # true: Object Lock retention on the objects
+}
+```
+
+Each request is one JSON line: the spend record (time, org, team, project,
+key id, model, pool, upstream, prompt / completion / cached tokens, cost,
+latency, status, priority, borrowing, stream, estimated, tags) and its
+`request_id`. Only a block with `content = true` adds a `content` object:
+the request the client sent (as JSON, or as a string when cut), the answer
+(the raw SSE for a stream), each cut at `max_content_bytes` with
+`request_truncated` / `response_truncated` set. Lines are batched into gzipped
+objects `requests/<block>/YYYY/MM/DD/<unix-nanos>-<n>.jsonl.gz` (UTC), also cut
+at 8 MiB compressed. They go through the export's bounded queue: a batch
+dropped or given up is counted and alerted like any export write
+(`export_dropped`, `export_failed`).
+
 ## Budgets
 
 A budget caps the GPU-hours of one scope per `day`, `week` or `month` (UTC
