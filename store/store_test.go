@@ -217,6 +217,14 @@ func contract(t *testing.T, s Store) {
 	must(s.SetKeyRotation(ctx, id2, Rotation{}))
 	h2 = h5 // later checks use the current secret
 
+	// A key's request policy is kept.
+	_, pid2, ph2 := GenerateKey()
+	must(s.CreateKey(ctx, Key{ID: pid2, Hash: ph2, Team: "etabA", Policy: "strict"}))
+	if k, err := s.GetKey(ctx, pid2); err != nil || k.Policy != "strict" {
+		t.Fatalf("key policy: %+v %v", k, err)
+	}
+	must(s.RevokeKey(ctx, pid2))
+
 	// SCIM documents.
 	ua := SCIMDoc{Kind: "User", ID: "u1", Name: "Alice@Example.org", Data: []byte(`{"userName":"Alice@Example.org"}`), Version: "v1"}
 	must(s.SCIMCreate(ctx, ua))

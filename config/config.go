@@ -79,6 +79,9 @@ type Config struct {
 	// Audit configures the audit log's signed checkpoints. The log itself
 	// is always kept.
 	Audit Audit
+	// Policies are request policies, applied to the teams they name and to
+	// the keys created with them.
+	Policies []Policy
 }
 
 // Audit configures the audit log.
@@ -88,6 +91,47 @@ type Audit struct {
 	SigningKeyFile string
 	// CheckpointInterval is how often new entries are signed (default 5m).
 	CheckpointInterval time.Duration
+}
+
+// Policy is a request policy: fields an inference request must carry, and
+// size limits that replace the global ones.
+type Policy struct {
+	Name  string
+	Teams []string
+	// Require lists body fields that must be present and not empty: a
+	// top-level name ("user") or a dotted path into objects
+	// ("metadata.project").
+	Require []string
+	// RequireTags demands at least one request tag (from the key or the
+	// tags header).
+	RequireTags bool
+	// MaxBodyBytes and MaxResponseBytes replace limits.max_body_bytes and
+	// limits.max_response_bytes when set (0: the global value).
+	MaxBodyBytes     int64
+	MaxResponseBytes int64
+}
+
+// maxPolicyBytes bounds a policy's size limits.
+const maxPolicyBytes = 1 << 30
+
+// ValidFieldPath reports whether s is a dotted path of 1 to 8 names of
+// [A-Za-z0-9_-].
+func ValidFieldPath(s string) bool {
+	parts := strings.Split(s, ".")
+	if len(parts) > 8 || len(s) > 256 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" {
+			return false
+		}
+		for _, r := range p {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // SCIM configures provisioning by an identity provider: its users become

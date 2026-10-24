@@ -75,6 +75,8 @@ type Key struct {
 	RotatedAt   time.Time `json:"rotated_at,omitzero"`
 	// Rotation is the key's rotation schedule, if any.
 	Rotation Rotation `json:"rotation,omitzero"`
+	// Policy names the request policy of the key (empty: its team's).
+	Policy string `json:"policy,omitempty"`
 }
 
 // Matches reports whether h is the key's secret, or its previous secret

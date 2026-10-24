@@ -427,8 +427,13 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request, p *principal)
 		TPM         int      `json:"tpm"`
 		MaxInFlight int      `json:"max_inflight"`
 		Tags        []string `json:"tags"`
+		Policy      string   `json:"policy"`
 	}
 	if !readJSON(w, r, &in) {
+		return
+	}
+	if in.Policy != "" && s.policies[in.Policy] == nil {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", "no policy named "+strconv.Quote(in.Policy)+" in the configuration")
 		return
 	}
 	if in.RPM < 0 || in.TPM < 0 || in.MaxInFlight < 0 || len(in.Name) > 128 {
@@ -454,13 +459,19 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request, p *principal)
 	case p.teamAdmin(t):
 	case p.teamMember(t):
 		owner = p.name // a member's key is theirs
+		if in.Policy != "" {
+			// A member's key follows the team's policy: choosing another
+			// one could loosen what the team requires.
+			forbidden(w)
+			return
+		}
 	default:
 		forbidden(w)
 		return
 	}
 	secret, id, hash := store.GenerateKey()
 	k := store.Key{ID: id, Hash: hash, Team: in.Team, Project: in.Project, Owner: owner, Name: in.Name,
-		RPM: in.RPM, TPM: in.TPM, MaxInFlight: in.MaxInFlight, Tags: in.Tags}
+		RPM: in.RPM, TPM: in.TPM, MaxInFlight: in.MaxInFlight, Tags: in.Tags, Policy: in.Policy}
 	if err := s.st.CreateKey(r.Context(), k); err != nil {
 		storeError(w, err)
 		return
