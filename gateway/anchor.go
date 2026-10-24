@@ -252,6 +252,13 @@ func (s *Server) openExports(ctx context.Context) error {
 		}
 		s.exports[name] = q
 	}
+	s.requestLogs = map[string]*requestLogger{}
+	for _, lc := range s.cfg.Logging {
+		l := newRequestLogger(lc, s.exports[lc.Destination], s.now)
+		for _, t := range lc.Teams {
+			s.requestLogs[t] = l
+		}
+	}
 	if a := s.cfg.Audit.Anchor; a != "" {
 		return s.startAnchor(ctx, s.exports[a])
 	}

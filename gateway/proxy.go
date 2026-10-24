@@ -125,6 +125,8 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			usage         openai.Usage
 			estimated     bool
 			upstreamLabel string
+			respBody      []byte // kept only for a content log
+			respCut       bool
 		)
 		defer func() {
 			if !haveUsage && worked {
@@ -163,14 +165,17 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			if u != nil {
 				upstreamLabel = redactURL(u.base)
 			}
-			s.rec.record(store.Record{
+			rec := store.Record{
 				Time: end.UTC(), Org: key.Org, Team: key.Team, Project: key.Project, KeyID: key.ID, Model: g.cfg.Name, Pool: g.cfg.Pool,
 				Upstream: upstreamLabel, PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
 				CachedTokens: usage.Cached(), Cost: cost, LatencyMS: float64(end.Sub(t0).Microseconds()) / 1000,
 				Status: status, Priority: grant.Priority, Borrowing: grant.Borrowing, Stream: req.Stream,
 				Estimated: estimated, Tags: tags,
-			})
+			}
+			s.rec.record(rec)
+			s.logRequest(rec, rid, body, respBody, respCut)
 		}()
+		maxContent, keepContent := s.logsContent(key.Team)
 
 		ctx, cancel := context.WithTimeout(r.Context(), s.cfg.Limits.MaxRequestDuration)
 		defer cancel()
@@ -215,8 +220,17 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			// When the client leaves, CopySSE stops at the first failed
 			// write and the request context cancels the upstream call:
 			// vLLM is not kept generating for nobody.
-			st, err = openai.CopySSE(w, func() { _ = rc.Flush() }, resp.Body, !req.ClientWantsUsage)
+			var dst io.Writer = w
+			var cw *captureWriter
+			if keepContent {
+				cw = &captureWriter{ResponseWriter: w, max: maxContent}
+				dst = cw
+			}
+			st, err = openai.CopySSE(dst, func() { _ = rc.Flush() }, resp.Body, !req.ClientWantsUsage)
 			tUpEnd = time.Now()
+			if cw != nil {
+				respBody, respCut = cw.buf.Bytes(), cw.truncated
+			}
 			usage, haveUsage = st.Usage, st.HaveUsage
 			if err != nil {
 				s.log.Info("stream ended early", "request_id", rid, "err", err)
@@ -241,6 +255,9 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 		}
 		if resp.StatusCode < 300 {
 			usage, haveUsage = openai.ParseUsage(data)
+		}
+		if keepContent {
+			respBody = data
 		}
 		h.Set("Content-Length", strconv.Itoa(len(data)))
 		w.WriteHeader(resp.StatusCode)
