@@ -6,6 +6,7 @@ package gateway
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/go-authn/oidc"
+	"github.com/go-llmflow/gateway/audit"
 	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/fairshare"
 	"github.com/go-llmflow/gateway/store"
@@ -43,6 +45,9 @@ type Secrets struct {
 	SSOClientSecret string
 	// SCIMToken is the bearer token of the provisioning client.
 	SCIMToken string
+	// AuditKey is the audit checkpoint signing key (an Ed25519 seed, base64
+	// or hex); empty: checkpoints are not signed.
+	AuditKey string
 }
 
 // Server is the gateway.
@@ -80,6 +85,9 @@ type Server struct {
 	secretWriter SecretWriter
 	// scimBackend is the SCIM provisioning backend (nil: no scim block).
 	scimBackend *scimBackend
+	// auditLog records administrative actions; auditKey signs checkpoints.
+	auditLog *audit.Log
+	auditKey ed25519.PrivateKey
 
 	cancel context.CancelFunc
 	bg     sync.WaitGroup
@@ -197,6 +205,14 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 		}
 		s.scimBackend = &scimBackend{s: s}
 	}
+	if secrets.AuditKey != "" {
+		k, err := audit.ParsePrivateKey(secrets.AuditKey)
+		if err != nil {
+			return nil, fmt.Errorf("gateway: audit signing_key_file: %w", err)
+		}
+		s.auditKey = k
+	}
+	s.auditLog = audit.New(st, s.auditKey, s.now)
 	return s, nil
 }
 
@@ -246,6 +262,10 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 		s.bg.Add(1)
 		go func() { defer s.bg.Done(); s.rotationLoop(bctx) }()
+	}
+	if s.auditKey != nil {
+		s.bg.Add(1)
+		go func() { defer s.bg.Done(); s.checkpointLoop(bctx) }()
 	}
 	return nil
 }
@@ -400,6 +420,7 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 	s.met.retries.write(w)
 	s.met.estimated.write(w)
 	s.met.softAlerts.write(w)
+	s.met.auditFailures.write(w)
 	s.met.overhead.write(w)
 	s.met.upstreamT.write(w)
 	writeHeader(w, "llmflow_accounting_dropped_total", "Usage records dropped because the queue was full.", "counter")

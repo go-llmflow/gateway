@@ -76,6 +76,18 @@ type Config struct {
 	KeyRotation *KeyRotation
 	// SCIM, when set, serves SCIM 2.0 provisioning at /scim/v2.
 	SCIM *SCIM
+	// Audit configures the audit log's signed checkpoints. The log itself
+	// is always kept.
+	Audit Audit
+}
+
+// Audit configures the audit log.
+type Audit struct {
+	// SigningKeyFile is a secret reference to an Ed25519 seed (base64 or
+	// hex) that signs checkpoints; empty: the chain is kept unsigned.
+	SigningKeyFile string
+	// CheckpointInterval is how often new entries are signed (default 5m).
+	CheckpointInterval time.Duration
 }
 
 // SCIM configures provisioning by an identity provider: its users become

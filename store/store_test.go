@@ -2,10 +2,13 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -402,7 +405,67 @@ func TestMemoryContract(t *testing.T) {
 	m := NewMemory()
 	contract(t, m)
 	contractUsers(t, m)
+	contractAudit(t, m)
 	m.Close()
+}
+
+// contractAudit: appends are numbered and chained without gaps, even from
+// concurrent writers (two replicas), checkpoints are unique per seq, prune
+// removes a prefix, and a log emptied by a prune continues from its newest
+// checkpoint.
+func contractAudit(t *testing.T, s Store) {
+	ctx := context.Background()
+	hasher := func(e *AuditEntry) []byte {
+		h := sha256.Sum256(append(append([]byte{}, e.PrevHash...), []byte(fmt.Sprint(e.Seq, e.Action))...))
+		return h[:]
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := s.AuditAppend(ctx, AuditEntry{Time: time.Now(), Kind: "admin", Actor: "a", Roles: "[]", Action: fmt.Sprint("act", i),
+				Before: "null", After: "{}", Status: 200}, hasher); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	es, err := s.AuditRange(ctx, 1, 100)
+	if err != nil || len(es) != 20 {
+		t.Fatalf("audit entries: %d %v", len(es), err)
+	}
+	prev := make([]byte, 32)
+	for i, e := range es {
+		if e.Seq != int64(i+1) || string(e.PrevHash) != string(prev) || string(e.Hash) != string(hasher(&e)) || e.Time.Location() != time.UTC {
+			t.Fatalf("entry %d: %+v", i, e)
+		}
+		prev = e.Hash
+	}
+	if es, _ := s.AuditRange(ctx, 5, 3); len(es) != 3 || es[0].Seq != 5 {
+		t.Fatalf("range: %+v", es)
+	}
+	cp := AuditCheckpoint{Seq: 10, Hash: es[0].Hash, Time: time.Now(), KeyID: "k", Signature: []byte("sig")}
+	if err := s.AuditAddCheckpoint(ctx, cp); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AuditAddCheckpoint(ctx, cp); !errors.Is(err, ErrExists) {
+		t.Fatalf("duplicate checkpoint: %v", err)
+	}
+	cp.Seq, cp.Hash = 20, prev
+	if err := s.AuditAddCheckpoint(ctx, cp); err != nil {
+		t.Fatal(err)
+	}
+	if cps, err := s.AuditCheckpoints(ctx); err != nil || len(cps) != 2 || cps[0].Seq != 10 || string(cps[1].Signature) != "sig" {
+		t.Fatalf("checkpoints: %+v %v", cps, err)
+	}
+	if n, err := s.AuditPrune(ctx, 20); err != nil || n != 20 {
+		t.Fatalf("prune: %d %v", n, err)
+	}
+	e, err := s.AuditAppend(ctx, AuditEntry{Time: time.Now(), Kind: "admin", Roles: "[]", Before: "null", After: "{}"}, hasher)
+	if err != nil || e.Seq != 21 || string(e.PrevHash) != string(prev) {
+		t.Fatalf("append after an emptying prune: %+v %v", e, err)
+	}
 }
 
 func TestMemoryFaults(t *testing.T) {
@@ -490,6 +553,12 @@ func TestPostgresContract(t *testing.T) {
 	contract(t, p)
 	contractUsers(t, p)
 	contractModels(t, p)
+	contractAudit(t, p)
+	// The table refuses an UPDATE: rewriting history needs more than SQL
+	// access to the gateway's own role.
+	if _, err := p.pool.Exec(ctx, `UPDATE llmflow_audit SET actor = 'mallory'`); err == nil || !strings.Contains(err.Error(), "append-only") {
+		t.Fatalf("audit UPDATE: %v", err)
+	}
 	contractAllowlists(t, p)
 
 	if _, err := OpenPostgres(ctx, "postgres://u:hunter2@[::1"); err == nil || strings.Contains(err.Error(), "hunter2") {
@@ -500,7 +569,7 @@ func TestPostgresContract(t *testing.T) {
 func dropAll(t *testing.T, p *Postgres) {
 	t.Helper()
 	if _, err := p.pool.Exec(context.Background(),
-		`DROP TABLE IF EXISTS llmflow_scim, llmflow_allowlists,llmflow_budgets_v2, llmflow_team_models, llmflow_bindings, llmflow_user_tokens, llmflow_users,
+		`DROP TABLE IF EXISTS llmflow_audit, llmflow_audit_checkpoints, llmflow_scim,llmflow_allowlists,llmflow_budgets_v2, llmflow_team_models, llmflow_bindings, llmflow_user_tokens, llmflow_users,
 		 llmflow_usage, llmflow_budgets, llmflow_keys, llmflow_projects, llmflow_teams, llmflow_orgs`); err != nil {
 		t.Fatal(err)
 	}

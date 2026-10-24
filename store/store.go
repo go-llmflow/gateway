@@ -193,6 +193,16 @@ type Store interface {
 	SCIMDelete(ctx context.Context, kind, id string) error
 	SCIMList(ctx context.Context, kind, name string) ([]SCIMDoc, error)
 
+	// The audit log (see AuditEntry). AuditAppend assigns Seq and PrevHash
+	// under a lock held across replicas, calls hash, and stores the entry.
+	// AuditPrune deletes the entries through seq (the caller checks that a
+	// checkpoint anchors what remains).
+	AuditAppend(ctx context.Context, e AuditEntry, hash AuditHasher) (AuditEntry, error)
+	AuditRange(ctx context.Context, from int64, limit int) ([]AuditEntry, error)
+	AuditAddCheckpoint(ctx context.Context, c AuditCheckpoint) error
+	AuditCheckpoints(ctx context.Context) ([]AuditCheckpoint, error)
+	AuditPrune(ctx context.Context, through int64) (int64, error)
+
 	// SetKeyRotation sets a key's rotation schedule (every 0: none).
 	SetKeyRotation(ctx context.Context, id string, r Rotation) error
 	// DueKeys lists the keys, not revoked, whose scheduled rotation is due

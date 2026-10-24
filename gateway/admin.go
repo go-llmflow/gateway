@@ -18,6 +18,8 @@ type adminHandler func(w http.ResponseWriter, r *http.Request, p *principal)
 
 func (s *Server) adminRoutes(mux *http.ServeMux) {
 	h := func(pattern string, f adminHandler) {
+		_, path, _ := strings.Cut(pattern, " ")
+		f = s.audited(path, f)
 		mux.Handle(pattern, s.withClientAddr(s.cfg.Routes.Admin, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p, ok := s.adminPrincipal(w, r)
 			if !ok {
@@ -538,12 +540,6 @@ func (s *Server) rotateKey(w http.ResponseWriter, r *http.Request, p *principal)
 		out["previous_expires_at"] = now.Add(grace).UTC()
 	}
 	writeJSON(w, http.StatusOK, out)
-}
-
-// audit logs an administrative event. (A tamper-evident audit log is M3;
-// until then the event goes to the server log with audit=true.)
-func (s *Server) audit(event string, args ...any) {
-	s.log.Info("audit: "+event, append([]any{"audit", true, "event", event}, args...)...)
 }
 
 // ---- users, tokens, roles ----

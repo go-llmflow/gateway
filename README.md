@@ -405,6 +405,48 @@ scim {
   per-network limit; `/scim/v2` obeys the `routes.admin` networks. With SSO,
   the provisioned roles apply to the person's session at once.
 
+### Audit log
+
+Every state-changing admin request is recorded, accepted or refused: the
+actor and their roles, the action (`PUT /admin/budgets`), the target (path and
+query), the state **before** and **after** (the key, team, budgets, roles…
+the route acts on, read from the store) with the request body, the status, the
+client address and a request id (the client's `X-Request-Id` when it is a
+plain token, else a generated one, echoed in the response). Events the gateway
+raises itself go to the same log: SSO logins and logouts, key rotations
+(manual and scheduled), SCIM reconciliation. Key secrets and tokens never
+appear: responses are not recorded. Reads are not audited.
+
+The log is append-only in PostgreSQL (a trigger refuses `UPDATE`) and
+**hash-chained**: entry *n* stores `SHA-256(0x00 ‖ hash(n−1) ‖ entry)`, so
+altering, inserting, reordering or deleting an entry breaks every hash after
+it. Appends take a transaction-scoped advisory lock, so several replicas
+write one chain. With a signing key, **checkpoints** sign the newest hash at
+an interval (and at shutdown):
+
+```hcl
+audit {
+  signing_key_file    = "vault:secret/llmflow#audit"   # an Ed25519 seed; llmflow-gateway audit keygen -o FILE
+  checkpoint_interval = "5m"
+}
+```
+
+`llmflow-gateway audit verify -c CONFIG --public-key KEY` recomputes the chain
+and checks every checkpoint; give the public key from somewhere the gateway's
+operator cannot change (`audit pubkey` prints it). It reports the entries
+after the newest checkpoint, the one window a chain cannot protect: entries
+removed there leave nothing behind (export to write-once storage closes it).
+Failed appends are logged and counted (`llmflow_audit_failures_total`).
+
+*Why a chain and not a Merkle tree*: RFC 6962 §2.1 (Certificate
+Transparency, obsoleted by RFC 9162 with the same tree hashing) builds a tree
+so that a log can prove inclusion and append-only growth to a third party in
+O(log n). The verifier here reads the whole log, for which a chain gives the
+same guarantee with one hash per entry, and it prunes by cutting at a
+checkpoint. The tree's domain separation is kept: the `0x00` prefix for
+entries, and checkpoints sign a self-describing message
+(`llmflow-audit-checkpoint/v1`).
+
 | route | |
 |---|---|
 | `GET /admin/whoami` | the caller and their roles |
@@ -643,8 +685,10 @@ Open defects (v0.2.0):
     already verified stays cached until its `exp` or `key_cache_ttl`.
 13. **SCIM does not expand nested groups**, and a provisioned role on a team
     that does not exist is logged, not created.
-14. **The audit events are log lines** (`audit=true`); the tamper-evident audit
-    log is the next milestone.
+14. **The audit log cannot show entries removed after its newest checkpoint**
+    (a hash chain's inherent window, bounded by `checkpoint_interval`), and
+    an attacker who holds the signing key can rewrite it whole: keep the key
+    in OpenBao/Vault and verify with a public key kept elsewhere.
 
 ## References
 
@@ -667,6 +711,9 @@ Opened while building v0.1.0–v0.4.0, and cited where used above:
 - [RFC 7643](https://www.rfc-editor.org/rfc/rfc7643) and
   [RFC 7644](https://www.rfc-editor.org/rfc/rfc7644) (SCIM), through
   [go-authn/scim](https://github.com/go-authn/scim).
+- [RFC 6962](https://www.rfc-editor.org/rfc/rfc6962) §2.1 (Merkle hash trees,
+  domain separation) and §3.5 (signed tree heads);
+  [RFC 9162](https://www.rfc-editor.org/rfc/rfc9162), which obsoletes it.
 - OWASP CSRF prevention cheat sheet (synchronizer token, Fetch Metadata).
 - LiteLLM: [Enterprise features](https://docs.litellm.ai/docs/enterprise),
   [Dynamic TPM/RPM Allocation](https://docs.litellm.ai/docs/proxy/dynamic_rate_limit),
