@@ -26,6 +26,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -64,14 +65,46 @@ type canonical struct {
 	RequestID string `json:"request_id"`
 }
 
-// Hash is an entry's hash: SHA-256(0x00 || PrevHash || canonical JSON).
+// CurrentVersion is the canonical form new entries are hashed with.
+const CurrentVersion = 2
+
+// Hash is an entry's hash: SHA-256(0x00 || PrevHash || canonical form).
+//
+// Version 1 (the first entries ever written) is the JSON of canonical.
+// ⛔ encoding/json replaces invalid UTF-8 with U+FFFD, so two fields that
+// differ only in invalid bytes hashed alike (review of #29). Version 2
+// hashes the raw bytes of every field, each preceded by its length as a
+// big-endian uint64, so no two different entries share an encoding.
+// Version 1 is still verified for the rows that have it.
 func Hash(e *store.AuditEntry) []byte {
-	b, _ := json.Marshal(canonical{1, e.Seq, e.Time.UnixMicro(), e.Kind, e.Actor, e.Roles, e.Action, e.Target,
-		e.Before, e.After, e.Status, e.SourceIP, e.RequestID})
 	h := sha256.New()
 	h.Write([]byte{0x00})
 	h.Write(e.PrevHash)
-	h.Write(b)
+	if e.V <= 1 {
+		b, _ := json.Marshal(canonical{1, e.Seq, e.Time.UnixMicro(), e.Kind, e.Actor, e.Roles, e.Action, e.Target,
+			e.Before, e.After, e.Status, e.SourceIP, e.RequestID})
+		h.Write(b)
+		return h.Sum(nil)
+	}
+	var n [8]byte
+	field := func(b []byte) {
+		binary.BigEndian.PutUint64(n[:], uint64(len(b)))
+		h.Write(n[:])
+		h.Write(b)
+	}
+	num := func(v int64) {
+		binary.BigEndian.PutUint64(n[:], uint64(v))
+		field(n[:])
+	}
+	field([]byte("llmflow-audit-entry/v2"))
+	num(e.Seq)
+	num(e.Time.UnixMicro())
+	for _, s := range []string{e.Kind, e.Actor, e.Roles, e.Action, e.Target, e.Before, e.After} {
+		field([]byte(s))
+	}
+	num(int64(e.Status))
+	field([]byte(e.SourceIP))
+	field([]byte(e.RequestID))
 	return h.Sum(nil)
 }
 
@@ -151,6 +184,7 @@ func (l *Log) Append(ctx context.Context, e store.AuditEntry) (store.AuditEntry,
 	if e.Time.IsZero() {
 		e.Time = l.now()
 	}
+	e.V = CurrentVersion
 	return l.st.AuditAppend(ctx, e, Hash)
 }
 
@@ -305,6 +339,116 @@ func Verify(ctx context.Context, st Store, keys []ed25519.PublicKey) (Report, er
 	}
 	if r.Entries > 0 {
 		r.Unsigned = int(r.Last - max(lastCP, r.First-1))
+	}
+	return r, nil
+}
+
+// checkpointJSON is a checkpoint as it is exported: the anchor held outside
+// the database.
+type checkpointJSON struct {
+	Format    string    `json:"format"`
+	Seq       int64     `json:"seq"`
+	Hash      string    `json:"hash"`
+	Time      time.Time `json:"time"`
+	KeyID     string    `json:"key_id"`
+	Signature string    `json:"signature"`
+}
+
+const checkpointFormat = "llmflow-audit-checkpoint/v1"
+
+// MarshalCheckpoint is the exported form of a checkpoint.
+func MarshalCheckpoint(c store.AuditCheckpoint) []byte {
+	b, _ := json.MarshalIndent(checkpointJSON{checkpointFormat, c.Seq, hex.EncodeToString(c.Hash), c.Time.UTC(), c.KeyID,
+		base64.StdEncoding.EncodeToString(c.Signature)}, "", "  ")
+	return append(b, '\n')
+}
+
+// ParseCheckpoint reads an exported checkpoint. It checks the form only;
+// VerifyAnchored checks the signature.
+func ParseCheckpoint(b []byte) (store.AuditCheckpoint, error) {
+	var c store.AuditCheckpoint
+	if len(b) > 64<<10 {
+		return c, errors.New("audit: a checkpoint larger than 64 KiB")
+	}
+	var j checkpointJSON
+	if err := json.Unmarshal(b, &j); err != nil {
+		return c, fmt.Errorf("audit: the checkpoint is not JSON: %w", err)
+	}
+	if j.Format != checkpointFormat {
+		return c, fmt.Errorf("audit: a checkpoint of format %q", j.Format)
+	}
+	h, err := hex.DecodeString(j.Hash)
+	if err != nil || len(h) != sha256.Size {
+		return c, errors.New("audit: the checkpoint hash is not 32 bytes of hex")
+	}
+	sig, err := base64.StdEncoding.DecodeString(j.Signature)
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return c, errors.New("audit: the checkpoint signature is not an Ed25519 signature")
+	}
+	if j.Seq < 1 {
+		return c, errors.New("audit: a checkpoint before the first entry")
+	}
+	return store.AuditCheckpoint{Seq: j.Seq, Hash: h, Time: j.Time.UTC(), KeyID: j.KeyID, Signature: sig}, nil
+}
+
+// VerifyAnchored is Verify plus a checkpoint held outside the database
+// (exported to write-once storage, kept by an auditor): the database must
+// still hold the anchored entry, with the anchored hash, and checkpoints at
+// least as new. That is what catches what Verify alone cannot, because
+// entries and checkpoints live in the same database: the tail deleted with
+// the checkpoints covering it, an older snapshot restored, or everything
+// deleted.
+func VerifyAnchored(ctx context.Context, st Store, keys []ed25519.PublicKey, anchor store.AuditCheckpoint) (Report, error) {
+	r, err := Verify(ctx, st, keys)
+	if err != nil {
+		return r, err
+	}
+	valid := false
+	for _, k := range keys {
+		if KeyID(k) == anchor.KeyID && ed25519.Verify(k, CheckpointMessage(anchor.Seq, anchor.Hash, anchor.Time), anchor.Signature) {
+			valid = true
+		}
+	}
+	if !valid {
+		r.problem("anchor %d: its signature does not verify with the given keys", anchor.Seq)
+		return r, nil
+	}
+	cps, err := st.AuditCheckpoints(ctx)
+	if err != nil {
+		return r, err
+	}
+	// Where the log ends: its last entry, or the checkpoint a prune left.
+	end := r.Last
+	if n := len(cps); n > 0 && cps[n-1].Seq > end {
+		end = cps[n-1].Seq
+	}
+	if end < anchor.Seq {
+		r.problem("anchor %d: the log ends at %d (entries removed, or an older copy restored)", anchor.Seq, end)
+	}
+	if n := len(cps); n == 0 || cps[n-1].Seq < anchor.Seq {
+		r.problem("anchor %d: the newest checkpoint in the database is older (checkpoints removed, or an older copy restored)", anchor.Seq)
+	}
+	// The anchored hash must be the database's, as an entry or, once
+	// pruned, as the checkpoint the prune left.
+	es, err := st.AuditRange(ctx, anchor.Seq, 1)
+	if err != nil {
+		return r, err
+	}
+	switch {
+	case len(es) == 1 && es[0].Seq == anchor.Seq:
+		if !equal(es[0].Hash, anchor.Hash) {
+			r.problem("anchor %d: the entry in the database has another hash (the log was rewritten)", anchor.Seq)
+		}
+	case r.First > anchor.Seq || r.Entries == 0:
+		found := false
+		for _, c := range cps {
+			if c.Seq == anchor.Seq && equal(c.Hash, anchor.Hash) {
+				found = true
+			}
+		}
+		if !found {
+			r.problem("anchor %d: pruned, and no checkpoint in the database carries its hash", anchor.Seq)
+		}
 	}
 	return r, nil
 }

@@ -9,9 +9,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
+	"strings"
+	"time"
 
 	"github.com/go-llmflow/gateway/audit"
 	"github.com/go-llmflow/gateway/config"
+	"github.com/go-llmflow/gateway/export"
+	"github.com/go-llmflow/gateway/gateway"
+	"github.com/go-llmflow/gateway/store"
 	"github.com/spf13/cobra"
 )
 
@@ -23,10 +29,21 @@ func auditCmd() *cobra.Command {
 
 // verifyLog checks the log and writes a report; it fails when the log does
 // not verify.
-func verifyLog(ctx context.Context, st audit.Store, keys []ed25519.PublicKey, w io.Writer) error {
-	r, err := audit.Verify(ctx, st, keys)
+func verifyLog(ctx context.Context, st audit.Store, keys []ed25519.PublicKey, anchor *store.AuditCheckpoint, w io.Writer) error {
+	var r audit.Report
+	var err error
+	if anchor != nil {
+		r, err = audit.VerifyAnchored(ctx, st, keys, *anchor)
+	} else {
+		r, err = audit.Verify(ctx, st, keys)
+	}
 	if err != nil {
 		return err
+	}
+	if anchor != nil {
+		fmt.Fprintf(w, "anchored at checkpoint %d (%s)\n", anchor.Seq, anchor.Time.Format(time.RFC3339))
+	} else {
+		fmt.Fprintln(w, "WARNING: no --anchor: truncation and rollback of the database cannot be detected")
 	}
 	if r.Entries == 0 {
 		fmt.Fprintf(w, "no entries; %d checkpoints\n", r.Checkpoints)
@@ -45,7 +62,7 @@ func verifyLog(ctx context.Context, st audit.Store, keys []ed25519.PublicKey, w 
 }
 
 func auditVerifyCmd() *cobra.Command {
-	var path string
+	var path, anchorFlag string
 	var pubs []string
 	cmd := &cobra.Command{
 		Use:   "verify",
@@ -94,13 +111,59 @@ func auditVerifyCmd() *cobra.Command {
 				return err
 			}
 			defer st.Close()
-			return verifyLog(ctx, st, keys, cmd.OutOrStdout())
+			var a *store.AuditCheckpoint
+			if anchorFlag != "" {
+				cp, err := loadAnchor(ctx, c, anchorFlag)
+				if err != nil {
+					return fmt.Errorf("--anchor: %w", err)
+				}
+				a = &cp
+			}
+			return verifyLog(ctx, st, keys, a, cmd.OutOrStdout())
 		},
 	}
 	cmd.Flags().StringVarP(&path, "config", "c", "", "configuration file (HCL)")
 	cmd.Flags().StringArrayVar(&pubs, "public-key", nil, "Ed25519 public key (base64 or hex) that may sign checkpoints; repeatable")
+	cmd.Flags().StringVar(&anchorFlag, "anchor", "", "a checkpoint held outside the database: file:PATH, or export[:NAME] for the newest one in an export")
 	_ = cmd.MarkFlagRequired("config")
 	return cmd
+}
+
+// loadAnchor reads the checkpoint --anchor names.
+func loadAnchor(ctx context.Context, c *config.Config, spec string) (store.AuditCheckpoint, error) {
+	if p, ok := strings.CutPrefix(spec, "file:"); ok {
+		f, err := os.Open(p)
+		if err != nil {
+			return store.AuditCheckpoint{}, err
+		}
+		defer f.Close()
+		b, err := io.ReadAll(io.LimitReader(f, 64<<10+1))
+		if err != nil {
+			return store.AuditCheckpoint{}, err
+		}
+		return audit.ParseCheckpoint(b)
+	}
+	name, ok := strings.CutPrefix(spec, "export")
+	if !ok || name != "" && !strings.HasPrefix(name, ":") {
+		return store.AuditCheckpoint{}, fmt.Errorf("%q: want file:PATH, export or export:NAME", spec)
+	}
+	name = strings.TrimPrefix(name, ":")
+	if name == "" {
+		name = c.Audit.Anchor
+	}
+	i := slices.IndexFunc(c.Exports, func(e config.Export) bool { return e.Name == name })
+	if i < 0 {
+		return store.AuditCheckpoint{}, fmt.Errorf("no export named %q", name)
+	}
+	secrets, err := readSecrets(c)
+	if err != nil {
+		return store.AuditCheckpoint{}, err
+	}
+	sink, err := export.Open(ctx, c.Exports[i], secrets.ExportCredentials[name], nil)
+	if err != nil {
+		return store.AuditCheckpoint{}, err
+	}
+	return gateway.NewestAnchor(ctx, sink)
 }
 
 func auditKeygenCmd() *cobra.Command {

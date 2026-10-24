@@ -109,6 +109,59 @@ func (a *alerter) retry(ctx context.Context, channel string, try func() error) e
 	return err
 }
 
+// event sends an operational alert (an export dropping objects, the audit
+// anchor lagging) to the configured channels, with the same retries.
+func (a *alerter) event(ctx context.Context, typ string, fields map[string]any) {
+	payload := map[string]any{"type": typ}
+	for k, v := range fields {
+		payload[k] = v
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	if a.cfg.WebhookURL != "" {
+		err := a.retry(ctx, "webhook", func() error {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.cfg.WebhookURL, bytes.NewReader(body))
+			if err != nil {
+				return err
+			}
+			req.Header.Set("Content-Type", "application/json")
+			if a.webhookToken != "" {
+				req.Header.Set("Authorization", "Bearer "+a.webhookToken)
+			}
+			resp, err := a.client.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+			if resp.StatusCode >= 300 {
+				return fmt.Errorf("webhook answered %d", resp.StatusCode)
+			}
+			return nil
+		})
+		if err != nil {
+			a.log("alert webhook failed, given up", "type", typ, "err", err)
+		}
+	}
+	if s := a.cfg.SMTP; s != nil {
+		var b strings.Builder
+		fmt.Fprintf(&b, "From: %s\r\nTo: %s\r\nSubject: %s\r\n", headerSafe(s.From), headerSafe(strings.Join(s.To, ", ")), headerSafe("[llmflow] "+typ))
+		b.WriteString("MIME-Version: 1.0\r\nContent-Type: application/json; charset=utf-8\r\n\r\n")
+		b.Write(body)
+		b.WriteString("\r\n")
+		var auth smtp.Auth
+		if s.Username != "" {
+			host, _, _ := net.SplitHostPort(s.Server)
+			auth = smtp.PlainAuth("", s.Username, a.smtpPassword, host)
+		}
+		if err := a.retry(ctx, "smtp", func() error { return a.sendMail(s.Server, auth, s.From, s.To, []byte(b.String())) }); err != nil {
+			a.log("alert mail failed, given up", "type", typ, "err", err)
+		}
+	}
+}
+
 // idempotencyKey names one alert (budget and period) for a receiver that
 // de-duplicates: every retry of the webhook carries the same one.
 func idempotencyKey(p alertPayload) string {
