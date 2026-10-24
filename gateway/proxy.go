@@ -44,7 +44,8 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.cfg.Limits.MaxBodyBytes))
+		pol := s.policyFor(key)
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.maxBody(pol)))
 		if err != nil {
 			var mbe *http.MaxBytesError
 			if errors.As(err, &mbe) {
@@ -79,6 +80,11 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 		tags, err := s.requestTags(r, key)
 		if err != nil {
 			apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
+		if msg := policyRefusal(pol, body, tags); msg != "" {
+			s.met.denied.add(1, key.Team, "policy")
+			apiError(w, http.StatusBadRequest, "invalid_request_error", msg)
 			return
 		}
 		scope := reqScope{org: key.Org, team: key.Team, project: key.Project, key: key.ID, model: g.cfg.Name, tags: tags}
@@ -220,9 +226,10 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			}
 			return
 		}
-		data, err := io.ReadAll(io.LimitReader(resp.Body, s.cfg.Limits.MaxResponseBytes+1))
+		maxResp := s.maxResponse(pol)
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxResp+1))
 		tUpEnd = time.Now()
-		if err != nil || int64(len(data)) > s.cfg.Limits.MaxResponseBytes {
+		if err != nil || int64(len(data)) > maxResp {
 			if r.Context().Err() != nil {
 				status = 499 // client gone while vLLM was answering
 				return

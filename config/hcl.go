@@ -23,49 +23,63 @@ import (
 // diagnostic points at it.
 
 type fileHCL struct {
-	Listen               *string    `hcl:"listen,optional"`
-	ListenRange          hcl.Range  `hcl:"listen,attr_value_range"`
-	MasterKeyFile        string     `hcl:"master_key_file"`
-	MasterKeyFileRange   hcl.Range  `hcl:"master_key_file,attr_value_range"`
-	MetricsTokenFile     *string    `hcl:"metrics_token_file,optional"`
-	Retries              *int       `hcl:"retries,optional"`
-	RetriesRange         hcl.Range  `hcl:"retries,attr_value_range"`
-	BudgetRefresh        *string    `hcl:"budget_refresh,optional"`
-	BudgetRefreshRange   hcl.Range  `hcl:"budget_refresh,attr_value_range"`
-	KeyCacheTTL          *string    `hcl:"key_cache_ttl,optional"`
-	KeyCacheTTLRange     hcl.Range  `hcl:"key_cache_ttl,attr_value_range"`
-	ShutdownGrace        *string    `hcl:"shutdown_grace,optional"`
-	ShutdownGraceRange   hcl.Range  `hcl:"shutdown_grace,attr_value_range"`
-	ExposeOverheadHeader *bool      `hcl:"expose_overhead_header,optional"`
-	CacheIsolation       *string    `hcl:"cache_isolation,optional"`
-	CacheIsolationRange  hcl.Range  `hcl:"cache_isolation,attr_value_range"`
-	CacheSaltKeyFile     *string    `hcl:"cache_salt_key_file,optional"`
-	AuthFailures         *int       `hcl:"auth_failures_per_minute,optional"`
-	AuthFailuresRange    hcl.Range  `hcl:"auth_failures_per_minute,attr_value_range"`
-	Store                *storeHCL  `hcl:"store,block"`
-	Limits               *limitsHCL `hcl:"limits,block"`
-	FairShare            *fairHCL   `hcl:"fairshare,block"`
-	Health               *healthHCL `hcl:"health,block"`
-	Orgs                 []orgHCL   `hcl:"org,block"`
-	Tags                 *tagsHCL   `hcl:"tags,block"`
-	Alerts               *alertsHCL `hcl:"alerts,block"`
-	Pools                []poolHCL  `hcl:"pool,block"`
-	Models               []modelHCL `hcl:"model,block"`
-	Vault                *vaultHCL  `hcl:"vault,block"`
-	TrustedProxies       []string   `hcl:"trusted_proxies,optional"`
-	TrustedProxiesRange  hcl.Range  `hcl:"trusted_proxies,attr_value_range"`
-	Routes               *routesHCL `hcl:"routes,block"`
-	JWT                  *jwtHCL    `hcl:"jwt,block"`
-	SSO                  *ssoHCL    `hcl:"sso,block"`
-	KeyRotation          *rotHCL    `hcl:"key_rotation,block"`
-	SCIM                 *scimHCL   `hcl:"scim,block"`
-	Audit                *auditHCL  `hcl:"audit,block"`
+	Listen               *string     `hcl:"listen,optional"`
+	ListenRange          hcl.Range   `hcl:"listen,attr_value_range"`
+	MasterKeyFile        string      `hcl:"master_key_file"`
+	MasterKeyFileRange   hcl.Range   `hcl:"master_key_file,attr_value_range"`
+	MetricsTokenFile     *string     `hcl:"metrics_token_file,optional"`
+	Retries              *int        `hcl:"retries,optional"`
+	RetriesRange         hcl.Range   `hcl:"retries,attr_value_range"`
+	BudgetRefresh        *string     `hcl:"budget_refresh,optional"`
+	BudgetRefreshRange   hcl.Range   `hcl:"budget_refresh,attr_value_range"`
+	KeyCacheTTL          *string     `hcl:"key_cache_ttl,optional"`
+	KeyCacheTTLRange     hcl.Range   `hcl:"key_cache_ttl,attr_value_range"`
+	ShutdownGrace        *string     `hcl:"shutdown_grace,optional"`
+	ShutdownGraceRange   hcl.Range   `hcl:"shutdown_grace,attr_value_range"`
+	ExposeOverheadHeader *bool       `hcl:"expose_overhead_header,optional"`
+	CacheIsolation       *string     `hcl:"cache_isolation,optional"`
+	CacheIsolationRange  hcl.Range   `hcl:"cache_isolation,attr_value_range"`
+	CacheSaltKeyFile     *string     `hcl:"cache_salt_key_file,optional"`
+	AuthFailures         *int        `hcl:"auth_failures_per_minute,optional"`
+	AuthFailuresRange    hcl.Range   `hcl:"auth_failures_per_minute,attr_value_range"`
+	Store                *storeHCL   `hcl:"store,block"`
+	Limits               *limitsHCL  `hcl:"limits,block"`
+	FairShare            *fairHCL    `hcl:"fairshare,block"`
+	Health               *healthHCL  `hcl:"health,block"`
+	Orgs                 []orgHCL    `hcl:"org,block"`
+	Tags                 *tagsHCL    `hcl:"tags,block"`
+	Alerts               *alertsHCL  `hcl:"alerts,block"`
+	Pools                []poolHCL   `hcl:"pool,block"`
+	Models               []modelHCL  `hcl:"model,block"`
+	Vault                *vaultHCL   `hcl:"vault,block"`
+	TrustedProxies       []string    `hcl:"trusted_proxies,optional"`
+	TrustedProxiesRange  hcl.Range   `hcl:"trusted_proxies,attr_value_range"`
+	Routes               *routesHCL  `hcl:"routes,block"`
+	JWT                  *jwtHCL     `hcl:"jwt,block"`
+	SSO                  *ssoHCL     `hcl:"sso,block"`
+	KeyRotation          *rotHCL     `hcl:"key_rotation,block"`
+	SCIM                 *scimHCL    `hcl:"scim,block"`
+	Policies             []policyHCL `hcl:"policy,block"`
+	Audit                *auditHCL   `hcl:"audit,block"`
 }
 
 type auditHCL struct {
 	SigningKeyFile     *string   `hcl:"signing_key_file,optional"`
 	CheckpointInterval *string   `hcl:"checkpoint_interval,optional"`
 	IntervalRange      hcl.Range `hcl:"checkpoint_interval,attr_value_range"`
+}
+
+type policyHCL struct {
+	Name             string    `hcl:"name,label"`
+	NameRange        hcl.Range `hcl:"name,label_range"`
+	Teams            []string  `hcl:"teams,optional"`
+	TeamsRange       hcl.Range `hcl:"teams,attr_value_range"`
+	Require          []string  `hcl:"require,optional"`
+	RequireRange     hcl.Range `hcl:"require,attr_value_range"`
+	RequireTags      *bool     `hcl:"require_tags,optional"`
+	MaxBodyBytes     *int64    `hcl:"max_body_bytes,optional"`
+	MaxResponseBytes *int64    `hcl:"max_response_bytes,optional"`
+	DefRange         hcl.Range `hcl:",def_range"`
 }
 
 type scimHCL struct {
@@ -820,6 +834,47 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		if c.Audit.CheckpointInterval < time.Second || c.Audit.CheckpointInterval > 24*time.Hour {
 			v.errf(a.IntervalRange, "Invalid checkpoint_interval", "checkpoint_interval %v: between 1s and 24h", c.Audit.CheckpointInterval)
 		}
+	}
+	policyOf := map[string]string{} // team -> policy
+	names := map[string]bool{}
+	for _, p := range raw.Policies {
+		cp := Policy{Name: p.Name, Teams: p.Teams, Require: p.Require}
+		if p.RequireTags != nil {
+			cp.RequireTags = *p.RequireTags
+		}
+		if p.MaxBodyBytes != nil {
+			cp.MaxBodyBytes = *p.MaxBodyBytes
+		}
+		if p.MaxResponseBytes != nil {
+			cp.MaxResponseBytes = *p.MaxResponseBytes
+		}
+		if !ValidName(p.Name) || names[p.Name] {
+			v.errf(p.NameRange, "Invalid policy name", "policy %q: want [A-Za-z0-9_.-]{1,64}, declared once", p.Name)
+		}
+		names[p.Name] = true
+		for _, t := range p.Teams {
+			if !ValidName(t) {
+				v.errf(p.TeamsRange, "Invalid team", "policy %q: team %q", p.Name, t)
+			} else if other, ok := policyOf[t]; ok {
+				v.errf(p.TeamsRange, "Team in two policies", "team %q is in policies %q and %q", t, other, p.Name)
+			}
+			policyOf[t] = p.Name
+		}
+		for _, f := range p.Require {
+			if !ValidFieldPath(f) {
+				v.errf(p.RequireRange, "Invalid required field", "policy %q: %q: want a name or a dotted path of names", p.Name, f)
+			}
+		}
+		if len(p.Require) > 32 {
+			v.errf(p.RequireRange, "Too many required fields", "policy %q: at most 32", p.Name)
+		}
+		if cp.MaxBodyBytes < 0 || cp.MaxBodyBytes > maxPolicyBytes || cp.MaxResponseBytes < 0 || cp.MaxResponseBytes > maxPolicyBytes {
+			v.errf(p.DefRange, "Invalid size limit", "policy %q: sizes between 1 byte and 1 GiB", p.Name)
+		}
+		if len(cp.Require) == 0 && !cp.RequireTags && cp.MaxBodyBytes == 0 && cp.MaxResponseBytes == 0 {
+			v.errf(p.DefRange, "Empty policy", "policy %q sets nothing", p.Name)
+		}
+		c.Policies = append(c.Policies, cp)
 	}
 	if sc := raw.SCIM; sc != nil {
 		cs := &SCIM{TokenFile: sc.TokenFile, BaseURL: strings.TrimRight(sc.BaseURL, "/")}

@@ -19,6 +19,7 @@ ALTER TABLE llmflow_keys ADD COLUMN IF NOT EXISTS rotated_at timestamptz;
 ALTER TABLE llmflow_keys ADD COLUMN IF NOT EXISTS rotate_every bigint NOT NULL DEFAULT 0;
 ALTER TABLE llmflow_keys ADD COLUMN IF NOT EXISTS rotate_grace bigint NOT NULL DEFAULT 0;
 ALTER TABLE llmflow_keys ADD COLUMN IF NOT EXISTS rotate_target text NOT NULL DEFAULT '';
+ALTER TABLE llmflow_keys ADD COLUMN IF NOT EXISTS policy text NOT NULL DEFAULT '';
 `
 
 // Rotation is a scheduled rotation: every Every, the key gets a new secret,

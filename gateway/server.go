@@ -88,6 +88,9 @@ type Server struct {
 	// auditLog records administrative actions; auditKey signs checkpoints.
 	auditLog *audit.Log
 	auditKey ed25519.PrivateKey
+	// policies by name, and the policy of each team that has one.
+	policies   map[string]*config.Policy
+	teamPolicy map[string]string
 
 	cancel context.CancelFunc
 	bg     sync.WaitGroup
@@ -213,6 +216,14 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 		s.auditKey = k
 	}
 	s.auditLog = audit.New(st, s.auditKey, s.now)
+	s.policies, s.teamPolicy = map[string]*config.Policy{}, map[string]string{}
+	for i := range cfg.Policies {
+		p := &cfg.Policies[i]
+		s.policies[p.Name] = p
+		for _, t := range p.Teams {
+			s.teamPolicy[t] = p.Name
+		}
+	}
 	return s, nil
 }
 

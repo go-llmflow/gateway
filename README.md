@@ -249,6 +249,32 @@ completion × output) / 10⁶` GPU-hours, from the `usage` vLLM reports. For
 streams the gateway sets `stream_options.include_usage` and removes the usage
 chunk again if the client did not ask for it.
 
+### Request policies
+
+A policy refuses inference requests that lack given fields, and replaces the
+global size limits, for the teams it names and for keys created with it
+(`POST /admin/keys {"policy": "…"}`, by a team admin; a member's key follows
+its team). A key's own policy wins over its team's.
+
+```hcl
+policy "attributed" {
+  teams        = ["etabA"]
+  require      = ["user", "metadata.project"]   # body fields: a name or a dotted path
+  require_tags = true                            # at least one request tag
+}
+policy "long-context" {
+  max_body_bytes     = 33554432    # replaces limits.max_body_bytes (up to 1 GiB)
+  max_response_bytes = 134217728   # replaces limits.max_response_bytes (non-streamed answers)
+}
+```
+
+A field counts as present when it exists and is not `null`, an empty or
+blank string, an empty list or an empty object. A refused request gets a 400
+naming everything missing — `policy attributed requires: user, a request tag`
+— and is counted in `llmflow_denied_total{reason="policy"}`. The field paths
+and their evaluation are fuzzed (`FuzzRequiredFields`, and `FuzzParse` checks
+that parsed policies are usable).
+
 ## Budgets
 
 A budget caps the GPU-hours of one scope per `day`, `week` or `month` (UTC

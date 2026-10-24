@@ -209,6 +209,14 @@ func TestParseRejectsWithPosition(t *testing.T) {
 		{"sso unknown role", valid + ssoBlock("https://idp.example", "https://gw.example/admin/callback", "role {\n    value = \"g\"\n    role = \"root\"\n  }"), "Invalid role"},
 		{"sso no openid", valid + strings.Replace(ssoBlock("https://idp.example", "https://gw.example/admin/callback", ""), "sso {", "sso {\n  scopes = [\"profile\"]", 1), "Invalid scopes"},
 		{"sso long session", valid + strings.Replace(ssoBlock("https://idp.example", "https://gw.example/admin/callback", ""), "sso {", "sso {\n  session_ttl = \"720h\"", 1), "Session too long"},
+		{"policy name", valid + "policy \"a b\" { require = [\"user\"] }\n", "Invalid policy name"},
+		{"policy twice", valid + "policy \"p\" { require = [\"user\"] }\npolicy \"p\" { require = [\"user\"] }\n", "Invalid policy name"},
+		{"policy field", valid + "policy \"p\" { require = [\"metadata..project\"] }\n", "Invalid required field"},
+		{"policy field chars", valid + "policy \"p\" { require = [\"a b\"] }\n", "Invalid required field"},
+		{"policy team twice", valid + "policy \"p\" {\n  teams = [\"t\"]\n  require = [\"user\"]\n}\npolicy \"q\" {\n  teams = [\"t\"]\n  require_tags = true\n}\n", "Team in two policies"},
+		{"policy size", valid + "policy \"p\" { max_body_bytes = 2000000000 }\n", "Invalid size limit"},
+		{"policy negative size", valid + "policy \"p\" { max_response_bytes = -1 }\n", "Invalid size limit"},
+		{"policy empty", valid + "policy \"p\" {}\n", "Empty policy"},
 		{"scim base url", valid + "scim {\n  token_file = \"/t\"\n  base_url = \"https://gw.example/elsewhere\"\n}\n", "Invalid base_url"},
 		{"scim cleartext", valid + "scim {\n  token_file = \"/t\"\n  base_url = \"http://gw.example/scim/v2\"\n}\n", "Invalid base_url"},
 		{"scim role", valid + "scim {\n  token_file = \"/t\"\n  base_url = \"https://gw.example/scim/v2\"\n  group \"g\" {\n    team = \"etabA\"\n    role = \"org_admin\"\n  }\n}\n", "Invalid role"},
@@ -475,14 +483,67 @@ func TestValidateUpstream(t *testing.T) {
 
 // FuzzParse: the configuration is untrusted input. Parsing must not panic,
 // and whatever it accepts must satisfy the invariants the gateway relies on.
+const policyBlocks = `
+policy "attributed" {
+  teams        = ["etabA", "etabB"]
+  require      = ["user", "metadata.project"]
+  require_tags = true
+}
+policy "large" {
+  max_body_bytes     = 33554432
+  max_response_bytes = 134217728
+}
+`
+
+func TestParsePolicies(t *testing.T) {
+	c, err := parse(valid + policyBlocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Policies) != 2 {
+		t.Fatalf("%+v", c.Policies)
+	}
+	a, l := c.Policies[0], c.Policies[1]
+	if a.Name != "attributed" || len(a.Teams) != 2 || len(a.Require) != 2 || !a.RequireTags || a.MaxBodyBytes != 0 ||
+		l.MaxBodyBytes != 32<<20 || l.MaxResponseBytes != 128<<20 || l.RequireTags {
+		t.Fatalf("%+v %+v", a, l)
+	}
+	for path, want := range map[string]bool{"user": true, "metadata.project": true, "a-b_c.d": true, "": false, ".a": false, "a.": false, "a..b": false,
+		"a.b.c.d.e.f.g.h": true, "a.b.c.d.e.f.g.h.i": false, "é": false} {
+		if ValidFieldPath(path) != want {
+			t.Errorf("ValidFieldPath(%q) != %v", path, want)
+		}
+	}
+}
+
 func FuzzParse(f *testing.F) {
 	f.Add([]byte(valid))
 	f.Add([]byte(valid + `store { kind = "postgres" dsn_file = "/d" }`))
 	f.Add([]byte("master_key_file = \"$${x}\"\nmodel \"m\" {\n upstream \"u\" {\n  base_url = \"http://h\"\n  key_file = <<EOT\n/k\nEOT\n }\n}\npool \"m\" { capacity = 1 }\n"))
+	f.Add([]byte(valid + policyBlocks))
 	f.Fuzz(func(t *testing.T, src []byte) {
 		c, err := Parse(src, "fuzz.hcl")
 		if err != nil {
 			return
+		}
+		// Policies that parse are usable: valid names and paths, bounded
+		// sizes, a team in one policy at most.
+		inPolicy := map[string]bool{}
+		for _, p := range c.Policies {
+			if !ValidName(p.Name) || p.MaxBodyBytes < 0 || p.MaxBodyBytes > maxPolicyBytes || p.MaxResponseBytes < 0 || p.MaxResponseBytes > maxPolicyBytes {
+				t.Fatalf("bad policy %+v", p)
+			}
+			for _, r := range p.Require {
+				if !ValidFieldPath(r) {
+					t.Fatalf("bad required field %q", r)
+				}
+			}
+			for _, tm := range p.Teams {
+				if inPolicy[tm] {
+					t.Fatalf("team %q in two policies", tm)
+				}
+				inPolicy[tm] = true
+			}
 		}
 		sum := 0.0
 		teams := map[string]bool{}
