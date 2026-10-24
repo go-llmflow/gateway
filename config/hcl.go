@@ -66,14 +66,21 @@ type fileHCL struct {
 }
 
 type auditHCL struct {
-	SigningKeyFile     *string   `hcl:"signing_key_file,optional"`
-	CheckpointInterval *string   `hcl:"checkpoint_interval,optional"`
-	IntervalRange      hcl.Range `hcl:"checkpoint_interval,attr_value_range"`
-	Anchor             *string   `hcl:"anchor,optional"`
-	AnchorRange        hcl.Range `hcl:"anchor,attr_value_range"`
-	AnchorMaxLag       *string   `hcl:"anchor_max_lag,optional"`
-	AnchorMaxLagRange  hcl.Range `hcl:"anchor_max_lag,attr_value_range"`
+	SigningKeyFile     *string           `hcl:"signing_key_file,optional"`
+	CheckpointInterval *string           `hcl:"checkpoint_interval,optional"`
+	IntervalRange      hcl.Range         `hcl:"checkpoint_interval,attr_value_range"`
+	Anchor             *string           `hcl:"anchor,optional"`
+	AnchorRange        hcl.Range         `hcl:"anchor,attr_value_range"`
+	AnchorMaxLag       *string           `hcl:"anchor_max_lag,optional"`
+	AnchorMaxLagRange  hcl.Range         `hcl:"anchor_max_lag,attr_value_range"`
+	Retention          map[string]string `hcl:"retention,optional"`
+	RetentionRange     hcl.Range         `hcl:"retention,attr_value_range"`
+	PruneInterval      *string           `hcl:"prune_interval,optional"`
+	PruneIntervalRange hcl.Range         `hcl:"prune_interval,attr_value_range"`
 }
+
+// AuditKinds are the kinds of audit entries (retention is set per kind).
+var AuditKinds = []string{"admin", "auth", "scim", "system"}
 
 type exportHCL struct {
 	Name           string    `hcl:"name,label"`
@@ -935,6 +942,26 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		}
 		if c.Audit.Anchor != "" && c.Audit.SigningKeyFile == "" {
 			v.errf(a.AnchorRange, "Anchor without signing key", "an anchor exports signed checkpoints: set signing_key_file")
+		}
+		c.Audit.PruneInterval = v.dur(a.PruneInterval, a.PruneIntervalRange, "prune_interval", 24*time.Hour)
+		if c.Audit.PruneInterval < time.Minute {
+			v.errf(a.PruneIntervalRange, "Invalid prune_interval", "prune_interval %v: at least 1m", c.Audit.PruneInterval)
+		}
+		if len(a.Retention) > 0 {
+			c.Audit.Retention = map[string]time.Duration{}
+			for kind, s := range a.Retention {
+				d, err := time.ParseDuration(s)
+				switch {
+				case !slices.Contains(AuditKinds, kind):
+					v.errf(a.RetentionRange, "Invalid retention", "retention of kind %q: the kinds are %s", kind, strings.Join(AuditKinds, ", "))
+				case err != nil || d < 24*time.Hour:
+					v.errf(a.RetentionRange, "Invalid retention", "retention of %s %q: a duration of at least 24h", kind, s)
+				}
+				c.Audit.Retention[kind] = d
+			}
+			if c.Audit.SigningKeyFile == "" {
+				v.errf(a.RetentionRange, "Retention without signing key", "pruning cuts at signed checkpoints: set signing_key_file")
+			}
 		}
 	}
 	policyOf := map[string]string{} // team -> policy

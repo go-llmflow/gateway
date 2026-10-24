@@ -3,10 +3,12 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"regexp"
 	"slices"
@@ -208,6 +210,42 @@ func (s *Server) audit(event string, args ...any) {
 	}
 	s.appendAudit(context.Background(), store.AuditEntry{Kind: kind, Actor: actor, Roles: "[]", Action: event, Target: tgt,
 		Before: "null", After: string(after), Status: 0})
+}
+
+// pruneLoop applies audit.retention every prune_interval: whole segments up
+// to a signed checkpoint, never past what the anchor export holds (so what
+// is deleted here is still kept there), never a log that does not verify.
+func (s *Server) pruneLoop(ctx context.Context) {
+	t := time.NewTicker(s.cfg.Audit.PruneInterval)
+	defer t.Stop()
+	for {
+		s.pruneOnce(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+func (s *Server) pruneOnce(ctx context.Context) {
+	limit := int64(math.MaxInt64)
+	if s.cfg.Audit.Anchor != "" {
+		if s.anchor == nil {
+			return
+		}
+		limit = s.anchor.seq.Load()
+	}
+	pub := s.auditKey.Public().(ed25519.PublicKey)
+	through, n, err := s.auditLog.PruneExpired(ctx, []ed25519.PublicKey{pub}, s.now(), s.cfg.Audit.Retention, limit)
+	if err != nil {
+		s.met.auditFailures.add(1, "prune")
+		s.raise(ctx, "audit_prune_refused", map[string]any{"error": err.Error()})
+		return
+	}
+	if n > 0 {
+		s.audit("audit.pruned", "through", through, "entries", n)
+	}
 }
 
 // checkpointLoop signs new entries every checkpoint_interval.

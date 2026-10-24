@@ -291,6 +291,10 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.auditKey != nil {
 		s.bg.Add(1)
 		go func() { defer s.bg.Done(); s.checkpointLoop(bctx) }()
+		if len(s.cfg.Audit.Retention) > 0 {
+			s.bg.Add(1)
+			go func() { defer s.bg.Done(); s.pruneLoop(bctx) }()
+		}
 	}
 	return nil
 }
