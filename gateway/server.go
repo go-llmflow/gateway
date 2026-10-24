@@ -94,6 +94,9 @@ type Server struct {
 
 	cancel context.CancelFunc
 	bg     sync.WaitGroup
+	// alertCtx bounds soft-budget alert retries; Close cancels it.
+	alertCtx    context.Context
+	alertCancel context.CancelFunc
 }
 
 // Option tunes a Server (tests).
@@ -188,6 +191,7 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 	for _, t := range cfg.Tags.Allowed {
 		s.allowedTags[t] = true
 	}
+	s.alertCtx, s.alertCancel = context.WithCancel(context.Background())
 	if cfg.Alerts.WebhookURL != "" || cfg.Alerts.SMTP != nil {
 		s.alerts = newAlerter(cfg.Alerts, secrets.WebhookToken, secrets.SMTPPassword, func(msg string, args ...any) { s.log.Error(msg, args...) })
 	}
@@ -286,6 +290,7 @@ func (s *Server) Close(ctx context.Context) {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	s.alertCancel()
 	s.bg.Wait()
 	s.rec.close(ctx)
 }
@@ -431,6 +436,10 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 	s.met.retries.write(w)
 	s.met.estimated.write(w)
 	s.met.softAlerts.write(w)
+	if s.alerts != nil {
+		s.alerts.failed.write(w)
+		s.alerts.retried.write(w)
+	}
 	s.met.auditFailures.write(w)
 	s.met.overhead.write(w)
 	s.met.upstreamT.write(w)
