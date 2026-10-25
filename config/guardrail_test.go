@@ -95,6 +95,28 @@ func TestParseAudioLimits(t *testing.T) {
 	}
 }
 
+func TestParseFallbacks(t *testing.T) {
+	ok := strings.Replace(valid, "class          = \"batch\"", "class          = \"batch\"\n  fallbacks      = [\"llama\"]", 1)
+	c, err := parse(ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fb := c.ModelGroups[1].Fallbacks; len(fb) != 1 || fb[0] != "llama" {
+		t.Fatalf("%v", fb)
+	}
+	for name, repl := range map[string]string{
+		"unknown":  `fallbacks      = ["lama"]`,
+		"itself":   `fallbacks      = ["llama-batch"]`,
+		"repeated": `fallbacks      = ["llama", "llama"]`,
+		"guard":    `fallbacks      = ["lg"]`,
+	} {
+		src := strings.Replace(valid, "class          = \"batch\"", "class          = \"batch\"\n  "+repl, 1) + guardModel
+		if _, err := parse(src); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
 func TestParseGuardrailsRejects(t *testing.T) {
 	cases := map[string]string{
 		"type":            `guardrail "a" { type = "magic" }`,

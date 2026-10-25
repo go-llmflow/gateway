@@ -18,6 +18,27 @@ import (
 	"github.com/go-llmflow/gateway/store"
 )
 
+// nextFallback returns the next fallback of primary the key may use and
+// afford (its team allowed the model, no budget of the model exceeded), or
+// nil; idx walks primary's list.
+func (s *Server) nextFallback(primary *group, idx *int, key store.Key, scope reqScope) *group {
+	for *idx < len(primary.cfg.Fallbacks) {
+		name := primary.cfg.Fallbacks[*idx]
+		*idx++
+		g := s.groups[name]
+		if g == nil || g.cfg.Class == config.Guard || !s.budget.modelAllowed(key.Team, name) {
+			continue
+		}
+		sc := scope
+		sc.model = name
+		if s.budget.check(sc) != nil {
+			continue
+		}
+		return g
+	}
+	return nil
+}
+
 // guardRID returns the request id: the one the guardrails already used
 // (their guard-model calls and audit entries carry it), or a new one.
 func guardRID(rq *guardReq) string {
@@ -256,16 +277,59 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), s.cfg.Limits.MaxRequestDuration)
 		defer cancel()
 		var resp *http.Response
-		if audio != nil {
-			form, ctype, ferr := buildAudioForm(out, audio)
-			if ferr != nil {
+		sendOnce := func() error {
+			if audio != nil {
+				form, ctype, ferr := buildAudioForm(out, audio)
+				if ferr != nil {
+					return ferr
+				}
+				resp, u, tUp, err = s.sendTyped(ctx, g, path, form, ctype, r.Header.Get("Accept"), grant.Priority, rid)
+			} else {
+				resp, u, tUp, err = s.send(ctx, g, path, out, r.Header.Get("Accept"), grant.Priority, rid)
+			}
+			return nil
+		}
+		// Fallbacks: when no upstream of the group took the request (all
+		// down or cooling down) or vLLM answered 429/503 (saturated), and
+		// nothing has reached the client, the request moves to the next
+		// fallback group its team may use and afford. It leaves the first
+		// pool and acquires in the target pool, so it gets its org's
+		// priority THERE; it is charged, accounted and recorded under the
+		// model that served it (g, grant and scope are what the deferred
+		// accounting reads).
+		primary, fallbackIdx := g, 0
+		for {
+			if ferr := sendOnce(); ferr != nil {
 				status = http.StatusBadRequest
 				apiError(w, status, "invalid_request_error", ferr.Error())
 				return
 			}
-			resp, u, tUp, err = s.sendTyped(ctx, g, path, form, ctype, r.Header.Get("Accept"), grant.Priority, rid)
-		} else {
-			resp, u, tUp, err = s.send(ctx, g, path, out, r.Header.Get("Accept"), grant.Priority, rid)
+			saturated := err == nil && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable)
+			if err == nil && !saturated || r.Context().Err() != nil {
+				break
+			}
+			next := s.nextFallback(primary, &fallbackIdx, key, scope)
+			if next == nil {
+				break
+			}
+			if resp != nil {
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+				resp.Body.Close()
+				u.inflight.Add(-1)
+				resp, u = nil, nil
+			}
+			s.met.fallbacks.add(1, g.cfg.Name, next.cfg.Name)
+			grant.Release(0)
+			g = next
+			scope.model = g.cfg.Name
+			grant = g.pool.Acquire(key.Org, g.class, promptEst+req.MaxTokens)
+			target := g.cfg.UpstreamModel
+			if out, _, err = openai.RewriteFor(ep, body, func(string) (string, error) { return target, nil }, s.isolation(key)); err != nil {
+				status = http.StatusBadRequest
+				apiError(w, status, "invalid_request_error", err.Error())
+				return
+			}
+			w.Header().Set("X-Llmflow-Model", g.cfg.Name)
 		}
 		pre = tUp.Sub(t0)
 		if err != nil {

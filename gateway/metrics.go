@@ -164,6 +164,7 @@ type metrics struct {
 	gpuHours   *counterVec // team, pool
 	denied     *counterVec // team, reason
 	retries    *counterVec // group
+	fallbacks  *counterVec // from, to
 	estimated  *counterVec // team, model
 	softAlerts *counterVec // kind
 	// auditFailures counts audit entries or checkpoints that could not be
@@ -181,11 +182,13 @@ type metrics struct {
 
 func newMetrics() *metrics {
 	return &metrics{
-		requests:   newCounterVec("llmflow_requests_total", "Requests handled, by team, model and HTTP status.", "team", "model", "code"),
-		tokens:     newCounterVec("llmflow_tokens_total", "Tokens reported by vLLM usage, by kind (prompt, completion, cached).", "team", "model", "kind"),
-		gpuHours:   newCounterVec("llmflow_gpu_hours_total", "Internal cost charged, in GPU-hours.", "team", "pool"),
-		denied:     newCounterVec("llmflow_denied_total", "Requests refused before reaching vLLM, by reason.", "team", "reason"),
-		retries:    newCounterVec("llmflow_upstream_retries_total", "Retries to another upstream before the first byte.", "group"),
+		requests: newCounterVec("llmflow_requests_total", "Requests handled, by team, model and HTTP status.", "team", "model", "code"),
+		tokens:   newCounterVec("llmflow_tokens_total", "Tokens reported by vLLM usage, by kind (prompt, completion, cached).", "team", "model", "kind"),
+		gpuHours: newCounterVec("llmflow_gpu_hours_total", "Internal cost charged, in GPU-hours.", "team", "pool"),
+		denied:   newCounterVec("llmflow_denied_total", "Requests refused before reaching vLLM, by reason.", "team", "reason"),
+		retries:  newCounterVec("llmflow_upstream_retries_total", "Retries to another upstream before the first byte.", "group"),
+		fallbacks: newCounterVec("llmflow_fallbacks_total",
+			"Requests moved to a fallback model group before the first byte, by group left and group used.", "from", "to"),
 		softAlerts: newCounterVec("llmflow_soft_budget_alerts_total", "Soft-budget limits reached (one per budget and period).", "kind"),
 		auditFailures: newCounterVec("llmflow_audit_failures_total",
 			"Audit entries (by kind) or checkpoints that could not be written.", "kind"),
