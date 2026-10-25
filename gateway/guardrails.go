@@ -264,7 +264,10 @@ func (rq *guardReq) maskWith(stage string, blocked *error) func(string) string {
 	if len(finders) == 0 {
 		return func(s string) string { return s }
 	}
-	return func(text string) string {
+	// Deep: the finders read the decoded text of every JSON layer (tool
+	// arguments are JSON in a string; any of it may be \u-escaped), since
+	// the model reads what vLLM decodes. Masks land on the decoded form.
+	deep := guard.Deep(func(_, text string) string {
 		spans := guard.Combine(text, finders)
 		for _, sp := range spans {
 			rq.note(stage, sp.Guard, sp.Category, sp.Action)
@@ -273,7 +276,8 @@ func (rq *guardReq) maskWith(stage string, blocked *error) func(string) string {
 			}
 		}
 		return guard.Apply(text, spans, guard.Placeholder)
-	}
+	})
+	return func(text string) string { return deep("", text) }
 }
 
 // pre runs the pre-call guards on a request body and returns it masked.
@@ -466,8 +470,22 @@ func (s *Server) streamGuardFor(ep openai.Endpoint, ctx context.Context, rq *gua
 		return nil
 	}
 	if ep == openai.Messages {
-		return &guard.AnthropicStreamFilter{Dst: dst, NewHoldback: f.NewHoldback, Spans: f.Spans,
+		af := &guard.AnthropicStreamFilter{Dst: dst, NewHoldback: f.NewHoldback, Spans: f.Spans,
 			CheckEvery: f.CheckEvery, Check: f.Check, BlockEvent: f.BlockEvent}
+		if f.NewHoldback != nil {
+			// Tool inputs are masked whole, through every JSON layer.
+			var blocked error
+			mask := rq.maskWith("post", &blocked)
+			af.MaskJSON = func(input string) (string, error) {
+				blocked = nil
+				out := mask(input)
+				if blocked != nil {
+					return "", blocked
+				}
+				return out, nil
+			}
+		}
+		return af
 	}
 	return f
 }
