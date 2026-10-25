@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/go-llmflow/gateway/config"
-	"github.com/go-llmflow/gateway/guard"
 	"github.com/go-llmflow/gateway/openai"
 	"github.com/go-llmflow/gateway/store"
 )
@@ -138,7 +137,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		if len(guards) > 0 {
 			rq = &guardReq{s: s, key: key, scope: scope, rid: requestID(), guards: guards}
 			defer rq.finish()
-			if (ep == openai.Responses || ep == openai.Messages) && req.Stream && rq.hasStage("post") {
+			if ep == openai.Responses && req.Stream && rq.hasStage("post") {
 				s.limiter.release(key.ID, 0)
 				apiError(w, http.StatusBadRequest, "invalid_request_error", errStreamGuarded.Error())
 				return
@@ -285,9 +284,9 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			}
 			// Post-call guardrails sit between vLLM and the client (and the
 			// content log, which keeps what the client got).
-			var sf *guard.StreamFilter
+			var sf streamGuard
 			if rq != nil && resp.StatusCode < 300 {
-				if sf = s.streamFilter(r.Context(), rq, dst); sf != nil {
+				if sf = s.streamGuardFor(ep, r.Context(), rq, dst); sf != nil {
 					dst = sf
 				}
 			}

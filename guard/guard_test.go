@@ -149,6 +149,47 @@ func TestMapResponseResponses(t *testing.T) {
 	}
 }
 
+func TestMapRequestMessages(t *testing.T) {
+	body := `{"model":"m","max_tokens":10,"system":[{"type":"text","text":"sys"}],"messages":[` +
+		`{"role":"user","content":"plain"},` +
+		`{"role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"sig"},{"type":"tool_use","id":"t1","name":"run","input":{"cmd":"ls","args":["a",{"deep":"b"}],"n":3}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"out"}]},{"type":"image","source":{"data":"zz"}}]}]}`
+	out, msgs, err := MapRequest([]byte(body), upper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"SYS"`, `"PLAIN"`, `"HMM"`, `"signature":"sig"`, `"cmd":"LS"`, `"A"`, `"deep":"B"`, `"n":3`, `"OUT"`, `"data":"zz"`} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("%s missing from %s", want, out)
+		}
+	}
+	if len(msgs) != 7 { // sys, plain, hmm, ls, a, b, out
+		t.Fatalf("%d texts: %v", len(msgs), msgs)
+	}
+	if _, _, err := MapRequest([]byte(`{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"text","data":"x"}}]}]}`), upper); err == nil {
+		t.Fatal("a document block was not refused")
+	}
+	deep := strings.Repeat(`{"a":`, maxJSONDepth+2) + `"x"` + strings.Repeat("}", maxJSONDepth+2)
+	if _, _, err := MapRequest([]byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","input":`+deep+`}]}]}`), upper); err == nil {
+		t.Fatal("a too deep tool input was not refused")
+	}
+}
+
+func TestMapResponseMessages(t *testing.T) {
+	body := `{"id":"msg_1","type":"message","role":"assistant","model":"m","stop_reason":"end_turn","stop_sequence":null,` +
+		`"content":[{"type":"thinking","thinking":"secret thoughts"},{"type":"text","text":"hello","citations":[{"cited_text":"x"}]},` +
+		`{"type":"tool_use","id":"t","name":"f","input":{"q":"find"}}],"usage":{"input_tokens":3,"output_tokens":2}}`
+	out, texts, err := MapResponse([]byte(body), true, strings.ToUpper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if strings.Contains(s, "thoughts") || strings.Contains(s, "cited_text") || !strings.Contains(s, `"HELLO"`) || !strings.Contains(s, `"q":"FIND"`) ||
+		!strings.Contains(s, `"stop_reason":"end_turn"`) || !strings.Contains(s, `"input_tokens":3`) || len(texts) != 2 {
+		t.Fatalf("%s %q", s, texts)
+	}
+}
+
 func TestCombine(t *testing.T) {
 	a := func(string) []Span { return []Span{{Start: 0, End: 5, Category: "a", Action: "log"}} }
 	b := func(string) []Span {
@@ -483,7 +524,9 @@ func secretIn(v any, key string) string {
 	switch x := v.(type) {
 	case string:
 		switch key {
-		case "id", "object", "model", "system_fingerprint", "service_tier", "finish_reason", "role":
+		case "id", "object", "model", "system_fingerprint", "service_tier", "finish_reason", "role",
+			"status", "type", "call_id", "name", "stop_reason":
+			// The identifiers wellTyped confines to a short name.
 			return ""
 		}
 		if secretRE.MatchString(x) {
@@ -629,6 +672,7 @@ func FuzzMapRequest(f *testing.F) {
 	f.Add([]byte(`{"messages":[{"role":"user","content":"SECRET12345"}]}`))
 	f.Add([]byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"SECRET55555"}]}],"prompt":["x"]}`))
 	f.Add([]byte(`{"input":["SECRET1111",[1,2]]}`))
+	f.Add([]byte(`{"system":[{"type":"text","text":"SECRET4444"}],"messages":[{"role":"assistant","content":[{"type":"tool_use","input":{"k":"SECRET12345"}}]},{"role":"user","content":[{"type":"tool_result","content":"SECRET98765"}]}]}`))
 	f.Add([]byte(`{"instructions":"SECRET0000","input":[{"role":"user","content":[{"type":"input_text","text":"SECRET12345"}]},{"type":"function_call_output","output":"SECRET9999"}]}`))
 	f.Fuzz(func(t *testing.T, in []byte) {
 		mask := func(_, s string) string { return Apply(s, secretFinder(s), Placeholder) }
@@ -659,6 +703,7 @@ func FuzzMapResponse(f *testing.F) {
 	f.Add([]byte(`{"choices":[{"message":{"content":"SECRET12345","reasoning_content":"SECRET1111"}}]}`))
 	f.Add([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"SECRET12345"}]},{"type":"reasoning","summary":[{"text":"SECRET1234"}]}],"instructions":"SECRET0000"}`))
 	f.Add([]byte(`{"output":[{"type":"function_call","arguments":"SECRET5555"}],"error":{"message":"SECRET7777"}}`))
+	f.Add([]byte(`{"type":"message","content":[{"type":"text","text":"SECRET12345"},{"type":"tool_use","input":{"a":["SECRET99999"]}},{"type":"thinking","thinking":"SECRET1111"}],"stop_sequence":"SECRET2222"}`))
 	f.Fuzz(func(t *testing.T, in []byte) {
 		out, _, err := MapResponse(in, true, func(s string) string { return Apply(s, secretFinder(s), Placeholder) })
 		if err != nil {

@@ -73,6 +73,8 @@ jobs:
           - { target: FuzzParseGuardAnswers, pkg: ./guard }
           - { target: FuzzMapResponse, pkg: ./guard }
           - { target: FuzzRewriteResponses, pkg: ./openai }
+          - { target: FuzzMessagesStream, pkg: ./openai }
+          - { target: FuzzAnthropicStreamFilter, pkg: ./guard }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

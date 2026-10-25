@@ -430,8 +430,29 @@ func (s *Server) streamFilter(ctx context.Context, rq *guardReq, dst io.Writer) 
 		case errors.As(err, &gf):
 			msg, typ = gf.Error(), "service_unavailable"
 		}
-		ev, _ := json.Marshal(map[string]any{"error": map[string]any{"message": msg, "type": typ}})
+		ev, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]any{"message": msg, "type": typ}})
 		return ev
+	}
+	return f
+}
+
+// streamGuard is a stream filter: the OpenAI chunk one or the Anthropic
+// event one.
+type streamGuard interface {
+	io.Writer
+	Close() error
+}
+
+// streamGuardFor returns the post-call stream filter of an endpoint, or
+// nil when the request has no post-call guardrail.
+func (s *Server) streamGuardFor(ep openai.Endpoint, ctx context.Context, rq *guardReq, dst io.Writer) streamGuard {
+	f := s.streamFilter(ctx, rq, dst)
+	if f == nil {
+		return nil
+	}
+	if ep == openai.Messages {
+		return &guard.AnthropicStreamFilter{Dst: dst, NewHoldback: f.NewHoldback, Spans: f.Spans,
+			CheckEvery: f.CheckEvery, Check: f.Check, BlockEvent: f.BlockEvent}
 	}
 	return f
 }
