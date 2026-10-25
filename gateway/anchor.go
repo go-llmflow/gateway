@@ -72,6 +72,11 @@ type entryJSON struct {
 	Hash      string `json:"hash"`
 }
 
+func toEntryJSON(e store.AuditEntry) entryJSON {
+	return entryJSON{e.V, e.Seq, e.Time.UnixMicro(), e.Kind, e.Actor, e.Roles, e.Action, e.Target,
+		e.Before, e.After, e.Status, e.SourceIP, e.RequestID, hex.EncodeToString(e.PrevHash), hex.EncodeToString(e.Hash)}
+}
+
 // startAnchor opens the anchor export's queue and catches up with the
 // checkpoints the database has and the export does not.
 func (s *Server) startAnchor(ctx context.Context, q *export.Queue) error {
@@ -153,8 +158,7 @@ func (s *Server) anchorUpTo(ctx context.Context) {
 				if e.Seq > cp.Seq {
 					break
 				}
-				_ = enc.Encode(entryJSON{e.V, e.Seq, e.Time.UnixMicro(), e.Kind, e.Actor, e.Roles, e.Action, e.Target,
-					e.Before, e.After, e.Status, e.SourceIP, e.RequestID, hex.EncodeToString(e.PrevHash), hex.EncodeToString(e.Hash)})
+				_ = enc.Encode(toEntryJSON(e))
 			}
 			next = es[len(es)-1].Seq + 1
 		}

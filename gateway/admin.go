@@ -17,9 +17,12 @@ import (
 type adminHandler func(w http.ResponseWriter, r *http.Request, p *principal)
 
 func (s *Server) adminRoutes(mux *http.ServeMux) {
+	s.adminFuncs = map[string]adminHandler{}
 	h := func(pattern string, f adminHandler) {
 		_, path, _ := strings.Cut(pattern, " ")
 		f = s.audited(path, f)
+		// The admin UI calls the same handlers, audited the same way.
+		s.adminFuncs[pattern] = f
 		mux.Handle(pattern, s.withClientAddr(s.cfg.Routes.Admin, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p, ok := s.adminPrincipal(w, r)
 			if !ok {
@@ -66,6 +69,9 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	h("GET /admin/spend", s.spendReport)
 	h("GET /admin/usage.csv", s.usageCSV)
 	h("GET /admin/fairshare", s.fairshareState)
+	h("GET /admin/audit", s.listAudit)
+	h("POST /admin/audit/verify", s.verifyAudit)
+	s.uiRoutes(mux)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -118,6 +118,9 @@ type Server struct {
 	// trace is the OpenTelemetry tracer (a noop one without a tracing
 	// block).
 	trace *tracing
+	// adminFuncs are the admin API handlers by route pattern, audited, for
+	// the admin UI.
+	adminFuncs map[string]adminHandler
 
 	cancel context.CancelFunc
 	bg     sync.WaitGroup

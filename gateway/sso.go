@@ -56,6 +56,9 @@ type pendingLogin struct {
 	browser [32]byte // SHA-256 of the login cookie
 	expires time.Time
 	net     netip.Prefix
+	// ui: after the login, go to the admin UI (?next=ui). A fixed
+	// destination, never a URL from the request: no open redirect.
+	ui bool
 }
 
 type ssoState struct {
@@ -150,7 +153,8 @@ func (s *Server) ssoLogin(w http.ResponseWriter, r *http.Request) {
 	// flood from one place cannot lock everybody else out of logging in.
 	full := len(st.logins) >= maxLogins || st.perNet[cn] >= maxLoginsPerNet
 	if !full {
-		st.logins[f.State] = pendingLogin{flow: f, browser: sha256.Sum256([]byte(browser)), expires: now.Add(loginTTL), net: cn}
+		st.logins[f.State] = pendingLogin{flow: f, browser: sha256.Sum256([]byte(browser)), expires: now.Add(loginTTL), net: cn,
+			ui: r.URL.Query().Get("next") == "ui"}
 		st.perNet[cn]++
 	}
 	st.mu.Unlock()
@@ -264,6 +268,10 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request) {
 	setCookie(w, loginCookie, "", -1)
 	setCookie(w, sessionCookie, value, int(s.cfg.SSO.SessionTTL/time.Second))
 	w.Header().Set("Cache-Control", "no-store")
+	if pl.ui {
+		http.Redirect(w, r, "/ui/", http.StatusSeeOther)
+		return
+	}
 	http.Redirect(w, r, "/admin/session", http.StatusSeeOther)
 }
 
