@@ -672,6 +672,7 @@ func FuzzMapRequest(f *testing.F) {
 	f.Add([]byte(`{"messages":[{"role":"user","content":"SECRET12345"}]}`))
 	f.Add([]byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"SECRET55555"}]}],"prompt":["x"]}`))
 	f.Add([]byte(`{"input":["SECRET1111",[1,2]]}`))
+	f.Add([]byte(`{"query":"SECRET12345","documents":["SECRET99999",{"content":[]}]}`))
 	f.Add([]byte(`{"system":[{"type":"text","text":"SECRET4444"}],"messages":[{"role":"assistant","content":[{"type":"tool_use","input":{"k":"SECRET12345"}}]},{"role":"user","content":[{"type":"tool_result","content":"SECRET98765"}]}]}`))
 	f.Add([]byte(`{"instructions":"SECRET0000","input":[{"role":"user","content":[{"type":"input_text","text":"SECRET12345"}]},{"type":"function_call_output","output":"SECRET9999"}]}`))
 	f.Fuzz(func(t *testing.T, in []byte) {
@@ -703,6 +704,7 @@ func FuzzMapResponse(f *testing.F) {
 	f.Add([]byte(`{"choices":[{"message":{"content":"SECRET12345","reasoning_content":"SECRET1111"}}]}`))
 	f.Add([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"SECRET12345"}]},{"type":"reasoning","summary":[{"text":"SECRET1234"}]}],"instructions":"SECRET0000"}`))
 	f.Add([]byte(`{"output":[{"type":"function_call","arguments":"SECRET5555"}],"error":{"message":"SECRET7777"}}`))
+	f.Add([]byte(`{"id":"r","results":[{"index":0,"relevance_score":0.5,"document":{"text":"SECRET12345","extra":"SECRET0000"},"x":"SECRET1111"}]}`))
 	f.Add([]byte(`{"type":"message","content":[{"type":"text","text":"SECRET12345"},{"type":"tool_use","input":{"a":["SECRET99999"]}},{"type":"thinking","thinking":"SECRET1111"}],"stop_sequence":"SECRET2222"}`))
 	f.Fuzz(func(t *testing.T, in []byte) {
 		out, _, err := MapResponse(in, true, func(s string) string { return Apply(s, secretFinder(s), Placeholder) })

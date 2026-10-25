@@ -364,6 +364,13 @@ func (s *Server) Handler() http.Handler {
 	// generation path, so it would escape rate limits for nothing a client
 	// needs from a local model.
 	mux.Handle("POST /v1/messages", inf(s.proxyFor(openai.Messages, "/v1/messages")))
+	// vLLM's rerank (score models), Jina/Cohere v1 and Cohere v2 shapes.
+	mux.Handle("POST /v1/rerank", inf(s.proxyFor(openai.Rerank, "/v1/rerank")))
+	mux.Handle("POST /v2/rerank", inf(s.proxyFor(openai.Rerank, "/v2/rerank")))
+	// Tokenization: authenticated and rate limited like everything else,
+	// not charged, not guarded.
+	mux.Handle("POST /tokenize", inf(s.proxyFor(openai.Tokenize, "/tokenize")))
+	mux.Handle("POST /detokenize", inf(s.proxyFor(openai.Detokenize, "/detokenize")))
 	mux.Handle("GET /v1/models", inf(s.models))
 	mux.Handle("GET /healthz", s.withClientAddr(s.cfg.Routes.Healthz, http.HandlerFunc(s.healthz)))
 	// /metrics: from an allowed network, or anywhere with the metrics token.

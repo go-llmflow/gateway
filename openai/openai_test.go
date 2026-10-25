@@ -28,7 +28,7 @@ func decode(t testing.TB, b []byte) map[string]any {
 func TestRewriteStripsClientPriority(t *testing.T) {
 	in := `{"model":"llama","priority":-100,"extra_body":{"priority":0},"request_id":"x",` +
 		`"kv_transfer_params":{"remote_host":"10.0.0.9"},"ec_transfer_params":{},"vllm_xargs":{"a":1},"cache_salt":"guess",` +
-		`"priority":-5,"messages":[{"role":"user","content":"hi"}],"max_tokens":64}`
+		`"priority":-5,"chat_template":"{{ x }}","messages":[{"role":"user","content":"hi"}],"max_tokens":64}`
 	out, req, err := Rewrite([]byte(in), resolveAll, Isolation{})
 	if err != nil {
 		t.Fatal(err)

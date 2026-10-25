@@ -37,6 +37,10 @@ var StrippedFields = []string{
 	// caller join another tenant's cache (vLLM security guide: prefix-cache
 	// reuse is a timing side channel, CVE-2025-46570).
 	"cache_salt",
+	// A client-supplied Jinja chat template (vLLM's chat and tokenize
+	// requests accept one; vLLM refuses it unless the server trusts request
+	// templates). Defence in depth: it never reaches vLLM.
+	"chat_template",
 }
 
 // Isolation is the per-tenant cache scoping the gateway applies (vLLM

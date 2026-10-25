@@ -105,6 +105,24 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 		f.serveMessages(w, body, reply)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	switch r.URL.Path {
+	case "/v1/rerank", "/v2/rerank":
+		docs, _ := body["documents"].([]any)
+		var results []string
+		for i, d := range docs {
+			s, _ := json.Marshal(d)
+			results = append(results, fmt.Sprintf(`{"index":%d,"relevance_score":%g,"document":{"text":%s,"extra":"x"}}`, i, 1/float64(i+1), s))
+		}
+		fmt.Fprintf(w, `{"id":"rerank-1","model":"meta/llama","usage":{"prompt_tokens":30,"total_tokens":30},"results":[%s]}`, strings.Join(results, ","))
+		return
+	case "/tokenize":
+		fmt.Fprint(w, `{"count":3,"max_model_len":4096,"tokens":[1,2,3]}`)
+		return
+	case "/detokenize":
+		fmt.Fprint(w, `{"prompt":"abc"}`)
+		return
+	}
 	if stream, _ := body["stream"].(bool); stream {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")

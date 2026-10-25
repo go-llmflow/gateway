@@ -691,7 +691,8 @@ entries, and checkpoints sign a self-describing message
 | `GET /admin/fairshare` | reservations, in-flight, borrowing, usage, LF and rank per pool and organisation |
 
 Client routes: `POST /v1/chat/completions`, `/v1/completions`,
-`/v1/embeddings`, `/v1/responses`, `/v1/messages`, `GET /v1/models`. `GET /healthz` returns 503 when the budget
+`/v1/embeddings`, `/v1/responses`, `/v1/messages`, `/v1/rerank`, `/v2/rerank`,
+`/tokenize`, `/detokenize`, `GET /v1/models`. `GET /healthz` returns 503 when the budget
 state is stale and fail-closed is on.
 
 ### Responses API
@@ -723,6 +724,21 @@ Clients send the whole conversation in `input`, as they do with chat completions
 Input items of any other type are refused, since the guardrails cannot read them. In the answer, output message text and function-call arguments are masked. Reasoning items, annotations, log probabilities and every unknown field are removed.
 
 A streamed Responses request under post-call guardrails is refused (400, ask with `"stream": false`).
+
+### Rerank and tokenization
+
+Four more routes are proxied to vLLM's own endpoints.
+
+`POST /v1/rerank` and `POST /v2/rerank` cover score models (Jina/Cohere v1 and Cohere v2 shapes).
+- They go through the full pipeline, with the tenant's `cache_salt`.
+- They are charged on the usage's `prompt_tokens`, or `total_tokens` when that is absent.
+- Guardrails mask the `query`, the `documents` (strings) and the documents echoed in `results`. Document objects the guardrails cannot read are refused.
+
+`POST /tokenize` and `POST /detokenize` are authenticated, allow-listed and rate limited like every route.
+- They are **not charged**: no model runs, only vLLM's tokenizer.
+- They are **not guarded**: masking the text would make the token count wrong, and only token ids come back.
+
+A client `chat_template` is stripped from every request. vLLM already refuses one unless the server trusts request templates; the gateway removes it first.
 
 ### Anthropic Messages API
 
