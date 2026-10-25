@@ -47,8 +47,17 @@ func (g *group) cost(u openai.Usage) float64 {
 		float64(u.CompletionTokens)*c.OutputPerMTok) / 1e6
 }
 
-// proxy handles one OpenAI endpoint.
-func (s *Server) proxy(path string) http.HandlerFunc {
+// proxy handles one OpenAI-compatible endpoint of the chat family.
+func (s *Server) proxy(path string) http.HandlerFunc { return s.proxyFor(openai.Chat, path) }
+
+// errStreamGuarded refuses a stream whose events the post-call guardrails
+// cannot rewrite yet.
+var errStreamGuarded = errors.New("this endpoint cannot be streamed under post-call guardrails yet: send it with \"stream\": false")
+
+// proxyFor handles one endpoint: the pipeline (auth, policy, budget, rate
+// limit, guardrails, fair share, accounting) is shared; the body rewrite
+// and the usage extraction are the endpoint's.
+func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		t0 := time.Now()
 		key, ok := s.authenticate(w, r)
@@ -77,7 +86,7 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			}
 			return g.cfg.UpstreamModel, nil
 		}
-		out, req, err := openai.Rewrite(body, resolve, s.isolation(key))
+		out, req, err := openai.RewriteFor(ep, body, resolve, s.isolation(key))
 		switch {
 		case errors.Is(err, errUnknownModel):
 			apiError(w, http.StatusNotFound, "model_not_found", "the model does not exist")
@@ -129,6 +138,11 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 		if len(guards) > 0 {
 			rq = &guardReq{s: s, key: key, scope: scope, rid: requestID(), guards: guards}
 			defer rq.finish()
+			if ep == openai.Responses && req.Stream && rq.hasStage("post") {
+				s.limiter.release(key.ID, 0)
+				apiError(w, http.StatusBadRequest, "invalid_request_error", errStreamGuarded.Error())
+				return
+			}
 			masked, gerr := s.pre(r.Context(), rq, body)
 			if gerr != nil {
 				s.limiter.release(key.ID, 0)
@@ -139,7 +153,7 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			if !bytes.Equal(masked, body) {
 				// vLLM gets the masked prompt; so does the request log.
 				body = masked
-				if out, req, err = openai.Rewrite(body, resolve, s.isolation(key)); err != nil {
+				if out, req, err = openai.RewriteFor(ep, body, resolve, s.isolation(key)); err != nil {
 					s.limiter.release(key.ID, 0)
 					apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 					return
@@ -277,7 +291,7 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 					dst = sf
 				}
 			}
-			st, err = openai.CopySSE(dst, func() { _ = rc.Flush() }, resp.Body, !req.ClientWantsUsage)
+			st, err = openai.CopySSEFor(ep, dst, func() { _ = rc.Flush() }, resp.Body, !req.ClientWantsUsage)
 			if sf != nil && err == nil {
 				err = sf.Close()
 				_ = rc.Flush()
@@ -309,7 +323,7 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			return
 		}
 		if resp.StatusCode < 300 {
-			usage, haveUsage = openai.ParseUsage(data)
+			usage, haveUsage = openai.ParseUsageFor(ep, data)
 			if rq != nil && rq.hasStage("post") {
 				// The work is done and charged whatever the guards say.
 				guarded, gerr := s.post(r.Context(), rq, data)

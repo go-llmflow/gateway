@@ -22,6 +22,7 @@ import (
 	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/export"
 	"github.com/go-llmflow/gateway/fairshare"
+	"github.com/go-llmflow/gateway/openai"
 	"github.com/go-llmflow/gateway/store"
 )
 
@@ -355,6 +356,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/chat/completions", inf(s.proxy("/v1/chat/completions")))
 	mux.Handle("POST /v1/completions", inf(s.proxy("/v1/completions")))
 	mux.Handle("POST /v1/embeddings", inf(s.proxy("/v1/embeddings")))
+	// Stateless: GET /v1/responses/{id} and cancel are not proxied (stored
+	// responses would be shared by every tenant; see openai.ErrStateful).
+	mux.Handle("POST /v1/responses", inf(s.proxyFor(openai.Responses, "/v1/responses")))
 	mux.Handle("GET /v1/models", inf(s.models))
 	mux.Handle("GET /healthz", s.withClientAddr(s.cfg.Routes.Healthz, http.HandlerFunc(s.healthz)))
 	// /metrics: from an allowed network, or anywhere with the metrics token.

@@ -70,9 +70,31 @@ func MapRequest(body []byte, f func(role, text string) string) ([]byte, []Messag
 			top["messages"] = b
 		}
 	}
+	if raw, ok := top["instructions"]; ok && !isNull(raw) {
+		// The Responses API's system prompt.
+		nv, out, ch, err := mapContent(raw, "system", f)
+		if err != nil {
+			return nil, nil, err
+		}
+		msgs = append(msgs, out...)
+		if ch {
+			top["instructions"], changed = nv, true
+		}
+	}
 	for _, key := range []string{"prompt", "input"} {
 		raw, ok := top[key]
 		if !ok || isNull(raw) {
+			continue
+		}
+		if key == "input" && isItemList(raw) {
+			nv, out, ch, err := mapItems(raw, f)
+			if err != nil {
+				return nil, nil, err
+			}
+			msgs = append(msgs, out...)
+			if ch {
+				top[key], changed = nv, true
+			}
 			continue
 		}
 		nv, out, ch, err := mapStrings(raw, key, f)
@@ -115,7 +137,24 @@ func mapContent(raw json.RawMessage, role string, f func(string, string) string)
 	for _, p := range parts {
 		var typ, text string
 		_ = json.Unmarshal(p["type"], &typ)
-		if typ != "text" {
+		switch typ {
+		case "text", "input_text", "output_text":
+		case "refusal":
+			// A refusal is text too (Responses output, chat parts).
+			if _, ok := p["refusal"]; ok {
+				var r string
+				if err := json.Unmarshal(p["refusal"], &r); err != nil {
+					return nil, nil, false, errors.New("guard: a refusal part has no refusal string")
+				}
+				nr := f(role, r)
+				out = append(out, Message{role, nr})
+				if nr != r {
+					b, _ := json.Marshal(nr)
+					p["refusal"], changed = b, true
+				}
+			}
+			continue
+		default:
 			continue
 		}
 		if err := json.Unmarshal(p["text"], &text); err != nil {
@@ -136,6 +175,79 @@ func mapContent(raw json.RawMessage, role string, f func(string, string) string)
 	}
 	b, err := json.Marshal(parts)
 	return b, out, true, err
+}
+
+// isItemList reports whether raw is a list whose first element is an
+// object: Responses API input items rather than embeddings strings.
+func isItemList(raw json.RawMessage) bool {
+	var list []json.RawMessage
+	if err := json.Unmarshal(raw, &list); err != nil || len(list) == 0 {
+		return false
+	}
+	b := bytes.TrimSpace(list[0])
+	return len(b) > 0 && b[0] == '{'
+}
+
+// mapItems handles Responses API input (or output) items: messages (with
+// string or part content), function calls (arguments) and their outputs.
+// An item of another type is refused: its text, if any, would go through
+// uninspected.
+func mapItems(raw json.RawMessage, f func(string, string) string) (json.RawMessage, []Message, bool, error) {
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, nil, false, errors.New("guard: input is not a list of items")
+	}
+	var out []Message
+	changed := false
+	for _, it := range items {
+		if it == nil {
+			return nil, nil, false, errors.New("guard: an input item is not an object")
+		}
+		var typ, role string
+		_ = json.Unmarshal(it["type"], &typ)
+		_ = json.Unmarshal(it["role"], &role)
+		field := ""
+		switch {
+		case typ == "message" || typ == "" && role != "":
+			field = "content"
+			if role == "" {
+				role = "user"
+			}
+		case typ == "function_call":
+			field, role = "arguments", "tool_call"
+		case typ == "function_call_output":
+			field, role = "output", "tool"
+		default:
+			return nil, nil, false, errors.New("guard: input items of type " + strconvQuote(typ) + " cannot be inspected")
+		}
+		raw, ok := it[field]
+		if !ok || isNull(raw) {
+			continue
+		}
+		nv, msgs, ch, err := mapContent(raw, role, f)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		out = append(out, msgs...)
+		if ch {
+			it[field], changed = nv, true
+		}
+	}
+	if !changed {
+		return raw, out, false, nil
+	}
+	b, err := json.Marshal(items)
+	return b, out, true, err
+}
+
+// strconvQuote quotes a short item type for an error message (the type is
+// a name, not content; it is cut to stay one).
+func strconvQuote(s string) string {
+	if len(s) > 32 {
+		s = s[:32]
+	}
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 // mapToolCalls handles the function arguments of an assistant's calls.
@@ -225,6 +337,11 @@ func MapResponse(body []byte, strip bool, f func(text string) string) ([]byte, [
 	if err := json.Unmarshal(body, &top); err != nil || top == nil {
 		return nil, nil, errNotObject
 	}
+	if _, ok := top["output"]; ok {
+		if _, chat := top["choices"]; !chat {
+			return mapResponsesOutput(top, strip, f)
+		}
+	}
 	changed := false
 	if strip {
 		n := len(top)
@@ -279,6 +396,15 @@ func MapResponse(body []byte, strip bool, f func(text string) string) ([]byte, [
 		}
 		mch := false
 		if mc, ok := msg["content"]; ok {
+			var parts []map[string]json.RawMessage
+			if strip && json.Unmarshal(mc, &parts) == nil {
+				n := len(parts)
+				parts = textPartsOnly(parts)
+				b, _ := json.Marshal(parts)
+				mch = mch || len(parts) != n || string(b) != string(mc)
+				mc = b
+				msg["content"] = b
+			}
 			nc, out, ch, err := mapContent(mc, "assistant", g)
 			if err != nil {
 				return nil, nil, err
@@ -320,6 +446,131 @@ func MapResponse(body []byte, strip bool, f func(text string) string) ([]byte, [
 	top["choices"] = b
 	out, err := json.Marshal(top)
 	return out, texts, err
+}
+
+// The fields of a guarded Responses answer, and of its output items.
+var (
+	responsesFields = []string{"id", "object", "created_at", "model", "status", "output", "usage", "incomplete_details"}
+	messageItem     = []string{"id", "type", "role", "status", "content"}
+	callItem        = []string{"id", "type", "call_id", "name", "arguments", "status"}
+	textPart        = []string{"type", "text", "refusal"}
+)
+
+// mapResponsesOutput is MapResponse for a Responses API answer: the text
+// of output messages and the arguments of function calls go through f.
+// With strip, only those items and the known fields stay; reasoning items
+// and anything else are removed (not inspected, so not let through).
+func mapResponsesOutput(top map[string]json.RawMessage, strip bool, f func(string) string) ([]byte, []string, error) {
+	if strip {
+		keepOnly(top, responsesFields)
+		if d, ok := top["incomplete_details"]; ok && !isNull(d) {
+			top["incomplete_details"] = keepReason(d)
+		}
+	}
+	var items []map[string]json.RawMessage
+	if raw := top["output"]; !isNull(raw) {
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return nil, nil, errors.New("guard: output is not a list of items")
+		}
+	}
+	g := func(_, s string) string { return f(s) }
+	var texts []string
+	kept := items[:0]
+	for _, it := range items {
+		if it == nil {
+			return nil, nil, errors.New("guard: an output item is not an object")
+		}
+		var typ string
+		_ = json.Unmarshal(it["type"], &typ)
+		switch typ {
+		case "message":
+			if strip {
+				keepOnly(it, messageItem)
+			}
+			var parts []map[string]json.RawMessage
+			if c := it["content"]; c != nil && !isNull(c) {
+				if err := json.Unmarshal(c, &parts); err != nil {
+					return nil, nil, errors.New("guard: an output message content is not a list of parts")
+				}
+			}
+			if strip {
+				parts = textPartsOnly(parts)
+			}
+			for _, p := range parts {
+				if p == nil {
+					return nil, nil, errors.New("guard: an output part is not an object")
+				}
+			}
+			b, _ := json.Marshal(parts)
+			nc, out, _, err := mapContent(b, "assistant", g)
+			if err != nil {
+				return nil, nil, err
+			}
+			for _, m := range out {
+				texts = append(texts, m.Content)
+			}
+			it["content"] = nc
+		case "function_call":
+			if strip {
+				keepOnly(it, callItem)
+			}
+			if a, ok := it["arguments"]; ok && !isNull(a) {
+				na, out, _, err := mapContent(a, "tool_call", g)
+				if err != nil {
+					return nil, nil, err
+				}
+				for _, m := range out {
+					texts = append(texts, m.Content)
+				}
+				it["arguments"] = na
+			}
+		default:
+			if strip {
+				continue
+			}
+		}
+		kept = append(kept, it)
+	}
+	ob, err := json.Marshal(kept)
+	if err != nil {
+		return nil, nil, err
+	}
+	top["output"] = ob
+	b, err := json.Marshal(top)
+	return b, texts, err
+}
+
+// textPartsOnly keeps the parts of an answer the guards read (text,
+// output_text, refusal), with only their known fields; any other part —
+// no type, an unknown one — would go out uninspected, so it goes.
+// FuzzMapResponse found a part without a type carrying text through.
+func textPartsOnly(parts []map[string]json.RawMessage) []map[string]json.RawMessage {
+	kept := parts[:0]
+	for _, p := range parts {
+		if p == nil {
+			continue
+		}
+		var typ string
+		_ = json.Unmarshal(p["type"], &typ)
+		switch typ {
+		case "text", "output_text", "refusal":
+			keepOnly(p, textPart)
+			kept = append(kept, p)
+		}
+	}
+	return kept
+}
+
+// keepReason keeps only a string "reason" of incomplete_details.
+func keepReason(raw json.RawMessage) json.RawMessage {
+	var d struct {
+		Reason string `json:"reason"`
+	}
+	if json.Unmarshal(raw, &d) != nil || !metaRE.MatchString(d.Reason) {
+		return json.RawMessage("null")
+	}
+	b, _ := json.Marshal(d)
+	return b
 }
 
 func isNull(raw json.RawMessage) bool { return bytes.Equal(bytes.TrimSpace(raw), []byte("null")) }

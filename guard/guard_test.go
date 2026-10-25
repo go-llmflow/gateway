@@ -100,6 +100,55 @@ func TestMapResponse(t *testing.T) {
 	}
 }
 
+func TestMapRequestResponses(t *testing.T) {
+	body := `{"model":"m","instructions":"be brief","input":[` +
+		`{"role":"user","content":"plain"},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"part"},{"type":"input_image","image_url":"x"}]},` +
+		`{"type":"function_call","call_id":"c","name":"f","arguments":"{\"q\":1}"},` +
+		`{"type":"function_call_output","call_id":"c","output":"result"}]}`
+	out, msgs, err := MapRequest([]byte(body), upper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"BE BRIEF"`, `"PLAIN"`, `"PART"`, `{\"Q\":1}`, `"RESULT"`, `"image_url":"x"`} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("%s missing from %s", want, out)
+		}
+	}
+	var roles []string
+	for _, m := range msgs {
+		roles = append(roles, m.Role)
+	}
+	if strings.Join(roles, ",") != "system,user,user,tool_call,tool" {
+		t.Fatalf("%v", roles)
+	}
+	// A string input is a user prompt, as before.
+	if _, msgs, err := MapRequest([]byte(`{"input":"hi"}`), upper); err != nil || msgs[0].Content != "HI" {
+		t.Fatal(msgs, err)
+	}
+	// An item the guards cannot read is refused, not passed.
+	if _, _, err := MapRequest([]byte(`{"input":[{"type":"reasoning","summary":[{"text":"x"}]}]}`), upper); err == nil {
+		t.Fatal("reasoning input item accepted")
+	}
+}
+
+func TestMapResponseResponses(t *testing.T) {
+	body := `{"id":"resp_1","object":"response","created_at":1,"model":"m","status":"completed","instructions":"echo",` +
+		`"output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"secret thoughts"}]},` +
+		`{"type":"message","id":"msg","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello","annotations":[],"logprobs":[{"token":"hello"}]}]},` +
+		`{"type":"function_call","call_id":"c","name":"f","arguments":"{\"a\":\"b\"}"}],` +
+		`"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5,"input_tokens_details":{"cached_tokens":0,"input_tokens_per_turn":[3]}}}`
+	out, texts, err := MapResponse([]byte(body), true, strings.ToUpper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if strings.Contains(s, "hello") || !strings.Contains(s, `"HELLO"`) || strings.Contains(s, "thoughts") || strings.Contains(s, "echo") ||
+		strings.Contains(s, "logprobs") || !strings.Contains(s, `{\"A\":\"B\"}`) || !strings.Contains(s, `"input_tokens":3`) || len(texts) != 2 {
+		t.Fatalf("%s %q", s, texts)
+	}
+}
+
 func TestCombine(t *testing.T) {
 	a := func(string) []Span { return []Span{{Start: 0, End: 5, Category: "a", Action: "log"}} }
 	b := func(string) []Span {
@@ -580,6 +629,7 @@ func FuzzMapRequest(f *testing.F) {
 	f.Add([]byte(`{"messages":[{"role":"user","content":"SECRET12345"}]}`))
 	f.Add([]byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"SECRET55555"}]}],"prompt":["x"]}`))
 	f.Add([]byte(`{"input":["SECRET1111",[1,2]]}`))
+	f.Add([]byte(`{"instructions":"SECRET0000","input":[{"role":"user","content":[{"type":"input_text","text":"SECRET12345"}]},{"type":"function_call_output","output":"SECRET9999"}]}`))
 	f.Fuzz(func(t *testing.T, in []byte) {
 		mask := func(_, s string) string { return Apply(s, secretFinder(s), Placeholder) }
 		out, msgs, err := MapRequest(in, mask)
@@ -599,6 +649,27 @@ func FuzzMapRequest(f *testing.F) {
 		_, again, err := MapRequest(out, func(_, s string) string { return s })
 		if err != nil || len(again) != len(msgs) {
 			t.Fatalf("remap: %v, %d texts then %d", err, len(msgs), len(again))
+		}
+	})
+}
+
+// FuzzMapResponse: a guarded answer (chat or Responses) holds no secret in
+// any string but the identifiers.
+func FuzzMapResponse(f *testing.F) {
+	f.Add([]byte(`{"choices":[{"message":{"content":"SECRET12345","reasoning_content":"SECRET1111"}}]}`))
+	f.Add([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"SECRET12345"}]},{"type":"reasoning","summary":[{"text":"SECRET1234"}]}],"instructions":"SECRET0000"}`))
+	f.Add([]byte(`{"output":[{"type":"function_call","arguments":"SECRET5555"}],"error":{"message":"SECRET7777"}}`))
+	f.Fuzz(func(t *testing.T, in []byte) {
+		out, _, err := MapResponse(in, true, func(s string) string { return Apply(s, secretFinder(s), Placeholder) })
+		if err != nil {
+			return
+		}
+		var v any
+		if json.Unmarshal(out, &v) != nil {
+			t.Fatalf("invalid JSON out of %q", in)
+		}
+		if k := secretIn(v, ""); k != "" {
+			t.Fatalf("secret left in %s: %s", k, out)
 		}
 	})
 }
