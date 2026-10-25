@@ -16,6 +16,9 @@ type Usage struct {
 	PromptTokensDetails *struct {
 		CachedTokens int64 `json:"cached_tokens"`
 	} `json:"prompt_tokens_details,omitempty"`
+	// AudioSeconds is the duration of transcribed audio, when vLLM reports
+	// it (TranscriptionUsageAudio) instead of tokens.
+	AudioSeconds float64 `json:"-"`
 }
 
 // Cached returns the number of cached prompt tokens.
@@ -30,8 +33,13 @@ func (u Usage) Cached() int64 {
 // prompt). An upstream is trusted, but a wrong count must not become a
 // negative charge.
 func (u Usage) Valid() bool {
-	return u.PromptTokens >= 0 && u.CompletionTokens >= 0 && u.Cached() >= 0 && u.Cached() <= u.PromptTokens
+	return u.PromptTokens >= 0 && u.CompletionTokens >= 0 && u.Cached() >= 0 && u.Cached() <= u.PromptTokens &&
+		u.AudioSeconds >= 0 && u.AudioSeconds <= maxAudioSeconds
 }
+
+// maxAudioSeconds bounds a reported duration (a week): beyond it the count
+// is wrong, and must not become a charge.
+const maxAudioSeconds = 7 * 24 * 3600
 
 type usageEnvelope struct {
 	Usage   *Usage            `json:"usage"`

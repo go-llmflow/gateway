@@ -69,6 +69,9 @@ type Request struct {
 	MaxTokens int64
 	// Stripped lists the fields removed from the body.
 	Stripped []string
+	// TextOut: the client asked a transcription as plain text; the gateway
+	// asked vLLM for JSON (which carries the usage) and answers the text.
+	TextOut bool
 }
 
 // Errors returned by Rewrite.

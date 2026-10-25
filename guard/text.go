@@ -478,6 +478,11 @@ func MapResponse(body []byte, strip bool, f func(text string) string) ([]byte, [
 			return mapRerankOutput(top, strip, f)
 		}
 	}
+	if _, ok := top["text"]; ok {
+		if _, chat := top["choices"]; !chat {
+			return mapTranscriptOutput(top, strip, f)
+		}
+	}
 	changed := false
 	if strip {
 		n := len(top)
@@ -745,6 +750,52 @@ func mapMessagesOutput(top map[string]json.RawMessage, strip bool, f func(string
 	top["content"] = cb
 	out, err := json.Marshal(top)
 	return out, texts, err
+}
+
+// mapTranscriptOutput is MapResponse for a JSON transcription: the text
+// goes through f. With strip, the segments and words (which repeat the
+// text piece by piece) and every other field go, but the usage, duration
+// and language.
+func mapTranscriptOutput(top map[string]json.RawMessage, strip bool, f func(string) string) ([]byte, []string, error) {
+	var s string
+	if err := json.Unmarshal(top["text"], &s); err != nil {
+		return nil, nil, errors.New("guard: a transcription text is not a string")
+	}
+	if strip {
+		for k, v := range top {
+			switch k {
+			case "text", "usage":
+			case "duration":
+				var n float64
+				if json.Unmarshal(v, &n) != nil {
+					delete(top, k)
+				}
+			case "language":
+				var l string
+				if json.Unmarshal(v, &l) != nil || !metaRE.MatchString(l) {
+					delete(top, k)
+				}
+			default:
+				delete(top, k)
+			}
+		}
+		if u, ok := top["usage"]; ok && !wellTyped("usage", u) {
+			// {type: "duration", seconds}: a name and a number.
+			var d struct {
+				Type    string  `json:"type"`
+				Seconds float64 `json:"seconds"`
+			}
+			if json.Unmarshal(u, &d) != nil || !metaRE.MatchString(d.Type) {
+				delete(top, "usage")
+			} else {
+				top["usage"], _ = json.Marshal(d)
+			}
+		}
+	}
+	ns := f(s)
+	top["text"], _ = json.Marshal(ns)
+	out, err := json.Marshal(top)
+	return out, []string{ns}, err
 }
 
 // mapRerankOutput is MapResponse for a rerank answer: the documents it

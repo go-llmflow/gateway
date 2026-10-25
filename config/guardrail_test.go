@@ -74,6 +74,27 @@ guardrail "ext" {
 	}
 }
 
+func TestParseAudioLimits(t *testing.T) {
+	c, err := parse(strings.Replace(valid, "cached_per_mtok = 0.001", "cached_per_mtok = 0.001\n    audio_per_hour = 0.5", 1) + "limits { max_audio_bytes = 1048576 }\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ModelGroups[0].Cost.AudioPerHour != 0.5 || c.Limits.MaxAudioBytes != 1<<20 {
+		t.Fatalf("%+v %+v", c.ModelGroups[0].Cost, c.Limits)
+	}
+	if d, _ := parse(valid); d.Limits.MaxAudioBytes != DefaultMaxAudioBytes {
+		t.Fatalf("default %d", d.Limits.MaxAudioBytes)
+	}
+	for _, bad := range []string{"limits { max_audio_bytes = 0 }\n", "limits { max_audio_bytes = 2147483648 }\n"} {
+		if _, err := parse(valid + bad); err == nil {
+			t.Errorf("%s accepted", bad)
+		}
+	}
+	if _, err := parse(strings.Replace(valid, "cached_per_mtok = 0.001", "cached_per_mtok = 0.001\n    audio_per_hour = -1", 1)); err == nil {
+		t.Error("negative audio price accepted")
+	}
+}
+
 func TestParseGuardrailsRejects(t *testing.T) {
 	cases := map[string]string{
 		"type":            `guardrail "a" { type = "magic" }`,

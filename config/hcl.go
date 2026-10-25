@@ -320,6 +320,8 @@ type limitsHCL struct {
 	MaxRequestDurationRange    hcl.Range `hcl:"max_request_duration,attr_value_range"`
 	MaxResponseBytes           *int64    `hcl:"max_response_bytes,optional"`
 	MaxResponseBytesRange      hcl.Range `hcl:"max_response_bytes,attr_value_range"`
+	MaxAudioBytes              *int64    `hcl:"max_audio_bytes,optional"`
+	MaxAudioBytesRange         hcl.Range `hcl:"max_audio_bytes,attr_value_range"`
 }
 
 type fairHCL struct {
@@ -392,6 +394,7 @@ type costHCL struct {
 	InputPerMTok  *float64  `hcl:"input_per_mtok,optional"`
 	OutputPerMTok *float64  `hcl:"output_per_mtok,optional"`
 	CachedPerMTok *float64  `hcl:"cached_per_mtok,optional"`
+	AudioPerHour  *float64  `hcl:"audio_per_hour,optional"`
 	DefRange      hcl.Range `hcl:",def_range"`
 }
 
@@ -593,9 +596,15 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		MaxBodyBytes: DefaultMaxBodyBytes, MaxHeaderBytes: DefaultMaxHeaderBytes,
 		ReadHeaderTimeout: DefaultReadHeaderTimeout, ReadTimeout: DefaultReadTimeout, IdleTimeout: DefaultIdleTimeout,
 		UpstreamHeaderTimeout: DefaultUpstreamHeaderTimeout, MaxRequestDuration: DefaultMaxRequestDuration,
-		MaxResponseBytes: DefaultMaxResponseBytes,
+		MaxResponseBytes: DefaultMaxResponseBytes, MaxAudioBytes: DefaultMaxAudioBytes,
 	}
 	if l := raw.Limits; l != nil {
+		if l.MaxAudioBytes != nil {
+			c.Limits.MaxAudioBytes = *l.MaxAudioBytes
+			if c.Limits.MaxAudioBytes <= 0 || c.Limits.MaxAudioBytes > 1<<30 {
+				v.errf(l.MaxAudioBytesRange, "Invalid audio limit", "max_audio_bytes = %d: want 1..1073741824", c.Limits.MaxAudioBytes)
+			}
+		}
 		if l.MaxBodyBytes != nil {
 			c.Limits.MaxBodyBytes = *l.MaxBodyBytes
 			if c.Limits.MaxBodyBytes <= 0 || c.Limits.MaxBodyBytes > 1<<30 {
@@ -716,13 +725,14 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			v.errf(m.ClassRange, "Invalid class", "class = %q: want \"interactive\", \"batch\" or \"guard\"", g.Class)
 		}
 		if m.Cost != nil {
-			for _, x := range []*float64{m.Cost.InputPerMTok, m.Cost.OutputPerMTok, m.Cost.CachedPerMTok} {
+			for _, x := range []*float64{m.Cost.InputPerMTok, m.Cost.OutputPerMTok, m.Cost.CachedPerMTok, m.Cost.AudioPerHour} {
 				if x != nil && !(*x >= 0 && *x < math.Inf(1)) {
 					v.errf(m.Cost.DefRange, "Invalid cost", "costs must be finite and non-negative")
 					break
 				}
 			}
-			g.Cost = Cost{InputPerMTok: f64(m.Cost.InputPerMTok), OutputPerMTok: f64(m.Cost.OutputPerMTok), CachedPerMTok: f64(m.Cost.CachedPerMTok)}
+			g.Cost = Cost{InputPerMTok: f64(m.Cost.InputPerMTok), OutputPerMTok: f64(m.Cost.OutputPerMTok), CachedPerMTok: f64(m.Cost.CachedPerMTok),
+				AudioPerHour: f64(m.Cost.AudioPerHour)}
 		}
 		if len(m.Upstreams) == 0 {
 			v.errf(m.DefRange, "No upstream", "model %q needs at least one upstream block", m.Name)

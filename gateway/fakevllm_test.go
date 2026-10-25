@@ -1,9 +1,12 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -73,6 +76,9 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 	raw, _ := io.ReadAll(r.Body)
 	var body map[string]any
 	_ = json.Unmarshal(raw, &body)
+	if r.URL.Path == "/v1/audio/transcriptions" {
+		body = parseFakeForm(r.Header.Get("Content-Type"), raw)
+	}
 	f.mu.Lock()
 	f.hits++
 	f.reqs = append(f.reqs, recorded{Header: r.Header.Clone(), Body: body, Path: r.URL.Path})
@@ -107,6 +113,26 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	switch r.URL.Path {
+	case "/v1/audio/transcriptions":
+		text := "hello world"
+		if reply != nil {
+			text = strings.Join(reply, "")
+		}
+		tb, _ := json.Marshal(text)
+		if body["stream"] == "true" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			for _, d := range strings.SplitAfter(text, " ") {
+				db, _ := json.Marshal(d)
+				fmt.Fprintf(w, "data: {\"object\":\"transcription.chunk\",\"choices\":[{\"delta\":{\"content\":%s}}]}\n\n", db)
+			}
+			if body["stream_include_usage"] == "true" {
+				fmt.Fprint(w, "data: {\"object\":\"transcription.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":50,\"completion_tokens\":5,\"total_tokens\":55}}\n\n")
+			}
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		fmt.Fprintf(w, `{"text":%s,"segments":[{"text":%s}],"usage":{"type":"duration","seconds":90}}`, tb, tb)
+		return
 	case "/v1/rerank", "/v2/rerank":
 		docs, _ := body["documents"].([]any)
 		var results []string
@@ -152,6 +178,29 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	cb, _ := json.Marshal(content)
 	fmt.Fprintf(w, `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":%s}}],"usage":%s}`, cb, usage)
+}
+
+// parseFakeForm reads a multipart form into its fields as strings, with
+// file_name, file_type and file_bytes for the file.
+func parseFakeForm(ctype string, raw []byte) map[string]any {
+	out := map[string]any{}
+	_, params, err := mime.ParseMediaType(ctype)
+	if err != nil {
+		return out
+	}
+	mr := multipart.NewReader(bytes.NewReader(raw), params["boundary"])
+	for {
+		p, err := mr.NextPart()
+		if err != nil {
+			return out
+		}
+		v, _ := io.ReadAll(p)
+		if p.FormName() == "file" {
+			out["file_name"], out["file_type"], out["file_bytes"] = p.FileName(), p.Header.Get("Content-Type"), len(v)
+			continue
+		}
+		out[p.FormName()] = string(v)
+	}
 }
 
 // serveMessages answers like vLLM's Anthropic Messages API: input_tokens

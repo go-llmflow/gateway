@@ -42,8 +42,8 @@ func requestID() string {
 func (g *group) cost(u openai.Usage) float64 {
 	c := g.cfg.Cost
 	uncached := u.PromptTokens - u.Cached()
-	return (float64(uncached)*c.InputPerMTok + float64(u.Cached())*c.CachedPerMTok +
-		float64(u.CompletionTokens)*c.OutputPerMTok) / 1e6
+	return (float64(uncached)*c.InputPerMTok+float64(u.Cached())*c.CachedPerMTok+
+		float64(u.CompletionTokens)*c.OutputPerMTok)/1e6 + u.AudioSeconds/3600*c.AudioPerHour
 }
 
 // proxy handles one OpenAI-compatible endpoint of the chat family.
@@ -64,7 +64,24 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			return
 		}
 		pol := s.policyFor(key)
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.maxBody(pol)))
+		var body []byte
+		var audio *audioFile
+		var err error
+		if ep == openai.Transcriptions {
+			// The form's fields become the JSON view the pipeline reads;
+			// the audio is kept aside (see audio.go).
+			body, audio, err = parseAudioForm(w, r, s.cfg.Limits.MaxAudioBytes)
+			switch {
+			case errors.Is(err, errAudioTooBig):
+				apiError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "audio file too large")
+				return
+			case err != nil:
+				apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+				return
+			}
+		} else {
+			body, err = io.ReadAll(http.MaxBytesReader(w, r.Body, s.maxBody(pol)))
+		}
 		if err != nil {
 			var mbe *http.MaxBytesError
 			if errors.As(err, &mbe) {
@@ -239,7 +256,17 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), s.cfg.Limits.MaxRequestDuration)
 		defer cancel()
 		var resp *http.Response
-		resp, u, tUp, err = s.send(ctx, g, path, out, r.Header.Get("Accept"), grant.Priority, rid)
+		if audio != nil {
+			form, ctype, ferr := buildAudioForm(out, audio)
+			if ferr != nil {
+				status = http.StatusBadRequest
+				apiError(w, status, "invalid_request_error", ferr.Error())
+				return
+			}
+			resp, u, tUp, err = s.sendTyped(ctx, g, path, form, ctype, r.Header.Get("Accept"), grant.Priority, rid)
+		} else {
+			resp, u, tUp, err = s.send(ctx, g, path, out, r.Header.Get("Accept"), grant.Priority, rid)
+		}
 		pre = tUp.Sub(t0)
 		if err != nil {
 			if r.Context().Err() != nil {
@@ -335,6 +362,18 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				}
 				data = guarded
 			}
+			if req.TextOut {
+				// The client asked for plain text; vLLM was asked for JSON
+				// (for its usage).
+				text, ok := openai.TranscriptText(data)
+				if !ok {
+					status = http.StatusBadGateway
+					apiError(w, status, "upstream_error", "the transcription answer has no text")
+					return
+				}
+				data = []byte(text)
+				h.Set("Content-Type", "text/plain; charset=utf-8")
+			}
 		}
 		if keepContent {
 			respBody = data
@@ -349,6 +388,11 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 // and 5xx answers while nothing has been sent to the client. The returned
 // upstream has its in-flight count incremented; the caller decrements it.
 func (s *Server) send(ctx context.Context, g *group, path string, body []byte, accept string, priority int, rid string) (*http.Response, *upstream, time.Time, error) {
+	return s.sendTyped(ctx, g, path, body, "application/json", accept, priority, rid)
+}
+
+// sendTyped is send for a body of another media type (a multipart form).
+func (s *Server) sendTyped(ctx context.Context, g *group, path string, body []byte, ctype, accept string, priority int, rid string) (*http.Response, *upstream, time.Time, error) {
 	tried := map[*upstream]bool{}
 	tFirst := time.Time{}
 	lastErr := errors.New("no upstream")
@@ -369,7 +413,7 @@ func (s *Server) send(ctx context.Context, g *group, path string, body []byte, a
 		// forwarded, so client X-Vllm-Priority, x-pass-* or Authorization
 		// headers cannot reach vLLM.
 		req.Header = http.Header{}
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", ctype)
 		if accept == "text/event-stream" || accept == "application/json" {
 			req.Header.Set("Accept", accept)
 		}

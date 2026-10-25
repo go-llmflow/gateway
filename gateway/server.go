@@ -367,6 +367,9 @@ func (s *Server) Handler() http.Handler {
 	// vLLM's rerank (score models), Jina/Cohere v1 and Cohere v2 shapes.
 	mux.Handle("POST /v1/rerank", inf(s.proxyFor(openai.Rerank, "/v1/rerank")))
 	mux.Handle("POST /v2/rerank", inf(s.proxyFor(openai.Rerank, "/v2/rerank")))
+	// Whisper-style ASR on vLLM; a multipart form, bounded by
+	// limits.max_audio_bytes.
+	mux.Handle("POST /v1/audio/transcriptions", inf(s.proxyFor(openai.Transcriptions, "/v1/audio/transcriptions")))
 	// Tokenization: authenticated and rate limited like everything else,
 	// not charged, not guarded.
 	mux.Handle("POST /tokenize", inf(s.proxyFor(openai.Tokenize, "/tokenize")))
