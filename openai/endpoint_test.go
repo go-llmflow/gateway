@@ -63,6 +63,26 @@ func TestResponsesUsage(t *testing.T) {
 	}
 }
 
+func TestRewritePlain(t *testing.T) {
+	out, _, err := RewriteFor(Rerank, []byte(`{"model":"m","query":"q","documents":["a"],"priority":1,"cache_salt":"x"}`), resolveAll, Isolation{CacheSalt: "ours"})
+	if b := decode(t, out); err != nil || b["cache_salt"] != "ours" || b["priority"] != nil || b["model"] != "up-m" {
+		t.Fatalf("%s %v", out, err)
+	}
+	out, _, err = RewriteFor(Tokenize, []byte(`{"model":"m","messages":[],"chat_template":"{{x}}"}`), resolveAll, Isolation{CacheSalt: "ours"})
+	if b := decode(t, out); err != nil || b["cache_salt"] != nil || b["chat_template"] != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	if u, ok := ParseUsageFor(Rerank, []byte(`{"usage":{"total_tokens":12}}`)); !ok || u.PromptTokens != 12 {
+		t.Fatalf("%+v %v", u, ok)
+	}
+	if u, ok := ParseUsageFor(Tokenize, []byte(`{"count":3}`)); !ok || u.PromptTokens != 0 {
+		t.Fatalf("%+v %v", u, ok)
+	}
+	if Tokenize.Metered() || Detokenize.Guarded() || !Rerank.Guarded() {
+		t.Fatal("endpoint flags")
+	}
+}
+
 func FuzzRewriteResponses(f *testing.F) {
 	f.Add([]byte(`{"model":"m","input":"hi","store":true,"priority":3}`))
 	f.Add([]byte(`{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"x","uuid":"u"}]}],"stream":true}`))
