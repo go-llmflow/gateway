@@ -750,7 +750,7 @@ Clients send the whole conversation in `input`, as they do with chat completions
 
 Input items of any other type are refused, since the guardrails cannot read them. In the answer, output message text and function-call arguments are masked. Reasoning items, annotations, log probabilities and every unknown field are removed.
 
-A streamed Responses request under post-call guardrails is refused (400, ask with `"stream": false`).
+A streamed Responses request under post-call guardrails is refused (400, ask with `"stream": false`). Its events repeat the text in several shapes (`.delta`, `.done`, the final response) that the stream filter does not rewrite yet. Without post-call guardrails, streams pass through unchanged.
 
 ### Rerank and tokenization
 
@@ -830,7 +830,43 @@ Blocks the guardrails cannot read are refused, an Anthropic `document` among the
 - an upstream `error` event keeps its type, but not its message;
 - any other event stops the stream with an `error` event.
 
-Masking inside tool JSON reads the JSON text as is, so a value written with `\u` escapes is not unescaped first. Its events repeat the text in several shapes (`.delta`, `.done`, the final response) that the stream filter does not rewrite yet. Without post-call guardrails, streams pass through unchanged.
+Masking inside tool JSON reads the JSON text as is, so a value written with `\u` escapes is not unescaped first.
+
+## Traces
+
+OpenTelemetry traces, with the official Go SDK, exported over OTLP/HTTP (`/v1/traces`, port 4318 by convention) or OTLP/gRPC (port 4317):
+
+```hcl
+tracing {
+  endpoint             = "https://otel.example.org:4318"   # grpc: "otel.example.org:4317"
+  protocol             = "http"                            # or "grpc"
+  sample_ratio         = 0.1                               # parent-based, ratio of new traces
+  token_file           = "vault:secret/llmflow#otel"       # optional bearer for the collector
+  insecure             = false                             # true allows http:// and plaintext gRPC
+  trust_client_context = false
+}
+```
+
+A request is one server span, `llmflow <route>`. Its children are:
+
+- `auth`;
+- `guardrails.pre` and `guardrails.post`, with one `guardrail <name>` span per classifier call;
+- `upstream`, the call to vLLM and its response, with a `fallback` event when one occurs.
+
+The **W3C trace context of the upstream span is sent to vLLM** (`traceparent`/`tracestate`, which vLLM's tracing reads). vLLM's own spans therefore join the trace when vLLM runs with `--otlp-traces-endpoint`.
+
+**Client trace context.** By default it is not continued. Every request starts a new trace, as the W3C Trace Context specification advises for an entry point: callers cannot force sampling, and requests cannot be correlated across tenants. `trust_client_context = true` continues it.
+
+**What spans carry.** Only metadata:
+
+- organisation, team and key id;
+- model and pool;
+- priority and borrowing;
+- status;
+- token counts and whether they were estimated;
+- guardrail types, verdicts and categories.
+
+**Never a prompt or an answer.** A test asserts this. Without a `tracing` block, the tracer is a no-op.
 
 ## Metrics
 

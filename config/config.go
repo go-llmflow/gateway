@@ -97,6 +97,27 @@ type Config struct {
 	// applies to the orgs and teams it names and to the keys created with
 	// it.
 	Guardrails []Guardrail
+	// Tracing, when set, exports OpenTelemetry traces over OTLP.
+	Tracing *Tracing
+}
+
+// Tracing configures OpenTelemetry traces (OTLP/HTTP or OTLP/gRPC).
+type Tracing struct {
+	// Endpoint is the collector: a URL for http (…:4318, /v1/traces is
+	// added), host:port for grpc (…:4317).
+	Endpoint string
+	Protocol string // "http" or "grpc"
+	// Insecure allows http:// and plaintext gRPC.
+	Insecure    bool
+	SampleRatio float64
+	ServiceName string
+	// TokenFile is a secret reference to a bearer token for the collector.
+	TokenFile string
+	// TrustClientContext continues a client's W3C trace (traceparent);
+	// false (default): every request starts a new trace, as the W3C
+	// guidance advises for an entry point (no sampling forced by callers,
+	// no correlation across tenants).
+	TrustClientContext bool
 }
 
 // Logging is a per-team request log.

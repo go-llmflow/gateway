@@ -16,6 +16,9 @@ import (
 	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/openai"
 	"github.com/go-llmflow/gateway/store"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // nextFallback returns the next fallback of primary the key may use and
@@ -80,10 +83,18 @@ var errStreamGuarded = errors.New("this endpoint cannot be streamed under post-c
 func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		t0 := time.Now()
+		sctx, span := s.trace.startRequest(r, path)
+		defer span.End()
+		r = r.WithContext(sctx)
+		_, authSpan := s.trace.tracer.Start(sctx, "auth")
 		key, ok := s.authenticate(w, r)
+		authSpan.End()
 		if !ok {
+			span.SetAttributes(attribute.Bool("llmflow.authenticated", false))
 			return
 		}
+		span.SetAttributes(attribute.String("llmflow.org", key.Org), attribute.String("llmflow.team", key.Team),
+			attribute.String("llmflow.key", key.ID))
 		pol := s.policyFor(key)
 		var body []byte
 		var audio *audioFile
@@ -262,6 +273,14 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			if u != nil {
 				upstreamLabel = redactURL(u.base)
 			}
+			span.SetAttributes(attribute.String("llmflow.model", g.cfg.Name), attribute.String("llmflow.pool", g.cfg.Pool),
+				attribute.Int("llmflow.priority", grant.Priority), attribute.Bool("llmflow.borrowing", grant.Borrowing),
+				attribute.Int("http.response.status_code", status), attribute.Int64("llmflow.prompt_tokens", usage.PromptTokens),
+				attribute.Int64("llmflow.completion_tokens", usage.CompletionTokens), attribute.Bool("llmflow.estimated", estimated),
+				attribute.Bool("llmflow.stream", req.Stream))
+			if status >= 500 {
+				span.SetStatus(codes.Error, http.StatusText(status))
+			}
 			rec := store.Record{
 				Time: end.UTC(), Org: key.Org, Team: key.Team, Project: key.Project, KeyID: key.ID, Model: g.cfg.Name, Pool: g.cfg.Pool,
 				Upstream: upstreamLabel, PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
@@ -276,6 +295,10 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 
 		ctx, cancel := context.WithTimeout(r.Context(), s.cfg.Limits.MaxRequestDuration)
 		defer cancel()
+		// The upstream span covers the call and the response (the stream,
+		// for a stream); its context is what vLLM receives as traceparent.
+		ctx, upSpan := s.trace.tracer.Start(ctx, "upstream", trace.WithSpanKind(trace.SpanKindClient))
+		defer upSpan.End()
 		var resp *http.Response
 		sendOnce := func() error {
 			if audio != nil {
@@ -319,6 +342,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				resp, u = nil, nil
 			}
 			s.met.fallbacks.add(1, g.cfg.Name, next.cfg.Name)
+			upSpan.AddEvent("fallback", trace.WithAttributes(attribute.String("from", g.cfg.Name), attribute.String("to", next.cfg.Name)))
 			grant.Release(0)
 			g = next
 			scope.model = g.cfg.Name
@@ -484,6 +508,9 @@ func (s *Server) sendTyped(ctx context.Context, g *group, path string, body []by
 		req.Header.Set("Authorization", "Bearer "+u.apiKey)
 		req.Header.Set("X-Vllm-Priority", strconv.Itoa(priority))
 		req.Header.Set("X-Request-Id", rid)
+		// W3C trace context (vLLM reads traceparent/tracestate): built by
+		// the gateway's tracer, never copied from the client.
+		s.trace.inject(ctx, req.Header)
 		req.ContentLength = int64(len(body))
 		u.inflight.Add(1)
 		t := time.Now()

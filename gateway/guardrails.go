@@ -21,6 +21,9 @@ import (
 	"github.com/go-llmflow/gateway/openai"
 	"github.com/go-llmflow/gateway/store"
 	"github.com/go-llmflow/pii"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Guardrails. A request goes through the guardrails of its key's org, its
@@ -277,6 +280,8 @@ func (rq *guardReq) maskWith(stage string, blocked *error) func(string) string {
 func (s *Server) pre(ctx context.Context, rq *guardReq, body []byte) ([]byte, error) {
 	t0 := time.Now()
 	defer func() { s.met.guardSeconds.observe(time.Since(t0).Seconds()) }()
+	ctx, span := s.trace.tracer.Start(ctx, "guardrails.pre")
+	defer span.End()
 	var blocked error
 	mask := rq.maskWith("pre", &blocked)
 	out, msgs, err := guard.MapRequest(body, func(_, text string) string { return mask(text) })
@@ -297,6 +302,8 @@ func (s *Server) pre(ctx context.Context, rq *guardReq, body []byte) ([]byte, er
 func (s *Server) post(ctx context.Context, rq *guardReq, data []byte) ([]byte, error) {
 	t0 := time.Now()
 	defer func() { s.met.guardSeconds.observe(time.Since(t0).Seconds()) }()
+	ctx, span := s.trace.tracer.Start(ctx, "guardrails.post")
+	defer span.End()
 	var blocked error
 	mask := rq.maskWith("post", &blocked)
 	out, texts, err := guard.MapResponse(data, true, mask)
@@ -332,8 +339,16 @@ func (s *Server) classifyAll(ctx context.Context, rq *guardReq, stage, completio
 			defer wg.Done()
 			cctx, cancel := context.WithTimeout(ctx, g.cfg.Timeout)
 			defer cancel()
+			cctx, span := s.trace.tracer.Start(cctx, "guardrail "+g.cfg.Name,
+				trace.WithAttributes(attribute.String("llmflow.guardrail.type", g.cfg.Type), attribute.String("llmflow.stage", stage)))
+			defer span.End()
 			v, err := g.classify(cctx, rq, rq.msgs, completion, stage == "post")
 			errs[i] = s.judge(rq, g, stage, v, err)
+			// The verdict's categories and the error class, never content.
+			span.SetAttributes(attribute.Bool("llmflow.flagged", v.Flagged), attribute.StringSlice("llmflow.categories", v.Categories))
+			if errs[i] != nil {
+				span.SetStatus(codes.Error, errs[i].Error())
+			}
 		}()
 	}
 	wg.Wait()

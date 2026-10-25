@@ -112,6 +112,11 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 		}
 		s.ExportCredentials[e.Name] = cr
 	}
+	if c.Tracing != nil {
+		if err := get("tracing token_file", c.Tracing.TokenFile, &s.TracingToken); err != nil {
+			return s, err
+		}
+	}
 	s.GuardrailTokens = map[string]string{}
 	for _, g := range c.Guardrails {
 		var tok string

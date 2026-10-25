@@ -54,6 +54,8 @@ type Secrets struct {
 	ExportCredentials map[string]export.Credentials
 	// GuardrailTokens are the bearer tokens of http guardrails, by name.
 	GuardrailTokens map[string]string
+	// TracingToken is the OTLP collector's bearer token (empty: none).
+	TracingToken string
 }
 
 // Server is the gateway.
@@ -113,6 +115,9 @@ type Server struct {
 	guardOrder  map[string]int
 	guardAudit  *guardAuditQueue
 	guardClient *http.Client
+	// trace is the OpenTelemetry tracer (a noop one without a tracing
+	// block).
+	trace *tracing
 
 	cancel context.CancelFunc
 	bg     sync.WaitGroup
@@ -258,6 +263,11 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 	if err := s.buildGuardrails(); err != nil {
 		return nil, err
 	}
+	tr, err := newTracing(cfg.Tracing, secrets.TracingToken)
+	if err != nil {
+		return nil, err
+	}
+	s.trace = tr
 	if s.guardAudit != nil {
 		s.guardAudit.onDrop = func() {
 			s.raise(context.Background(), "guardrail_audit_dropped", map[string]any{"dropped": s.guardAudit.dropped.Load()})
@@ -346,6 +356,10 @@ func (s *Server) Close(ctx context.Context) {
 	// Last: the final checkpoint above queued its anchor.
 	for _, q := range s.exports {
 		q.Close(ctx)
+	}
+	// Flush the spans still batched.
+	if err := s.trace.shutdown(ctx); err != nil {
+		s.log.Error("tracing shutdown", "err", err)
 	}
 }
 
