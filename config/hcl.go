@@ -66,6 +66,7 @@ type fileHCL struct {
 	Exports              []exportHCL    `hcl:"export,block"`
 	Logging              []loggingHCL   `hcl:"logging,block"`
 	Guardrails           []guardrailHCL `hcl:"guardrail,block"`
+	Tracing              *tracingHCL    `hcl:"tracing,block"`
 }
 
 type loggingHCL struct {
@@ -1158,6 +1159,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		c.SCIM = cs
 	}
 	c.Guardrails = v.guardrails(raw.Guardrails, orgs, teams, modelClass)
+	c.Tracing = v.tracing(raw.Tracing)
 	// Every *_file attribute is a secret reference: a file, or a field of
 	// an OpenBao/Vault KV v2 secret (package secret).
 	for _, ref := range c.SecretRefs() {
@@ -1201,6 +1203,9 @@ func (c *Config) SecretRefs() []string {
 	}
 	for _, g := range c.Guardrails {
 		add(g.TokenFile)
+	}
+	if c.Tracing != nil {
+		add(c.Tracing.TokenFile)
 	}
 	out = append(out, c.KeyFiles()...)
 	return out
