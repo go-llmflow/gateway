@@ -78,6 +78,7 @@ jobs:
           - { target: FuzzReadAudioForm, pkg: ./gateway }
           - { target: FuzzTranscriptionRewrite, pkg: ./openai }
           - { target: FuzzEscapedFindings, pkg: ./guard }
+          - { target: FuzzUIForms, pkg: ./gateway }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

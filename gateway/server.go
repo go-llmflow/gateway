@@ -118,6 +118,9 @@ type Server struct {
 	// trace is the OpenTelemetry tracer (a noop one without a tracing
 	// block).
 	trace *tracing
+	// adminFuncs are the admin API handlers by route pattern, audited, for
+	// the admin UI.
+	adminFuncs map[string]adminHandler
 
 	cancel context.CancelFunc
 	bg     sync.WaitGroup
@@ -396,7 +399,15 @@ func (s *Server) Handler() http.Handler {
 	if s.scimBackend != nil {
 		mux.Handle("/scim/v2/", s.scimHandler())
 	}
-	return mux
+	// The UI's security headers go on every response under /ui/, including
+	// the ones the mux writes itself (the redirect that cleans "//", 404s,
+	// 405s), not only on the pages the UI handlers render.
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/ui/") {
+			uiHeaders(w)
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 // HTTPServer returns an http.Server with the configured limits.
