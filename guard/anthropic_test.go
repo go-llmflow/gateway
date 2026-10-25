@@ -96,6 +96,43 @@ func TestAnthropicFilterMasksAndRenumbers(t *testing.T) {
 	}
 }
 
+// TestAnthropicFilterEscapedToolInput: a token written with \u escapes and
+// split across input_json_delta fragments is masked, since the tool input
+// is held whole and read through every JSON layer.
+func TestAnthropicFilterEscapedToolInput(t *testing.T) {
+	deep := Deep(func(_, s string) string { return Apply(s, Combine(s, []Finder{secretFinder}), Placeholder) })
+	// "SECRET12345" with S, E and 3 escaped, cut in the middle of escapes.
+	parts := []string{`{"env": "\u00`, `53ECRET123`, `45", "n": 1}`}
+	events := []string{aev("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"sh","input":{}}}`)}
+	for _, p := range parts {
+		events = append(events, aev("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":`+quoted(p)+`}}`))
+	}
+	events = append(events, aev("content_block_stop", `{"type":"content_block_stop","index":0}`))
+	run := func(mask bool) string {
+		var dst bytes.Buffer
+		f := newAnthropicFilter(&dst)
+		if mask {
+			f.MaskJSON = func(in string) (string, error) { return deep("", in), nil }
+		}
+		for _, ev := range events {
+			if _, err := f.Write([]byte(ev)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		text, _, _ := anthropicOut(t, dst.String())
+		return text[0]
+	}
+	// The control: read fragment by fragment, the decoded input leaks.
+	if dec, _ := unescapeJSON(run(false)); !strings.Contains(dec, "SECRET12345") {
+		t.Fatalf("the control does not reproduce the bypass: %q", dec)
+	}
+	var input map[string]any
+	got := run(true)
+	if err := json.Unmarshal([]byte(got), &input); err != nil || input["env"] != "[TOKEN]" || input["n"] != float64(1) {
+		t.Fatalf("%q %v", got, err)
+	}
+}
+
 func TestAnthropicFilterRefuses(t *testing.T) {
 	for _, evs := range [][]string{
 		{aev("bogus", `{"type":"bogus"}`)},

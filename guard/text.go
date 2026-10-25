@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"strconv"
 )
 
 // Message is one piece of conversation text with its role: "system",
@@ -262,20 +263,33 @@ func mapJSONStrings(raw json.RawMessage, role string, f func(string, string) str
 		}
 		var out []Message
 		changed := false
+		next := make(map[string]json.RawMessage, len(obj))
 		for k, v := range obj {
 			nv, msgs, ch, err := mapJSONStrings(v, role, f, depth+1)
 			if err != nil {
 				return nil, nil, false, err
 			}
 			out = append(out, msgs...)
-			if ch {
-				obj[k], changed = nv, true
+			// A key is text too: a secret can be a key as well as a value.
+			nk := f(role, k)
+			out = append(out, Message{role, nk})
+			if ch || nk != k {
+				changed = true
 			}
+			// Two keys masked alike: keep both, numbered (nothing of the
+			// original key in the suffix).
+			for i, base := 2, nk; ; i++ {
+				if _, dup := next[nk]; !dup {
+					break
+				}
+				nk = base + "#" + strconv.Itoa(i)
+			}
+			next[nk] = nv
 		}
 		if !changed {
 			return raw, out, false, nil
 		}
-		nb, err := json.Marshal(obj)
+		nb, err := json.Marshal(next)
 		return nb, out, true, err
 	case '[':
 		var list []json.RawMessage

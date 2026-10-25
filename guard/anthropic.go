@@ -30,6 +30,12 @@ type AnthropicStreamFilter struct {
 	CheckEvery  int
 	Check       func(block int, completion string, final bool) error
 	BlockEvent  func(err error) []byte
+	// MaskJSON, when set, masks a tool call's whole input: the JSON of a
+	// tool_use block is held until the block ends (input_json_delta
+	// fragments cannot be decoded piecewise, and a \u-escaped secret split
+	// across them would pass a streaming read), then masked through every
+	// JSON layer (Deep) and released in one delta. An error blocks.
+	MaskJSON func(input string) (string, error)
 
 	pending []byte
 	blocks  map[int]*anthropicBlock
@@ -41,7 +47,11 @@ type anthropicBlock struct {
 	kind  string // "text", "json", "drop"
 	index int    // client index
 	ch    choiceState
+	json  []byte // a held tool input (MaskJSON)
 }
+
+// maxToolInput bounds a held tool input.
+const maxToolInput = 1 << 20
 
 // Write accepts SSE bytes.
 func (f *AnthropicStreamFilter) Write(p []byte) (int, error) {
@@ -254,6 +264,13 @@ func (f *AnthropicStreamFilter) deltaBlock(data []byte) error {
 	default:
 		return f.block(errors.New("guard: a delta that does not match its block"))
 	}
+	if b.kind == "json" && f.MaskJSON != nil {
+		b.json = append(b.json, text...)
+		if len(b.json) > maxToolInput {
+			return f.block(errors.New("guard: a tool input too long to inspect"))
+		}
+		return nil
+	}
 	out, err := f.pass(b, text, false)
 	if err != nil || out == "" {
 		return err
@@ -278,6 +295,25 @@ func (f *AnthropicStreamFilter) stopBlock(i int) error {
 	delete(f.blocks, i)
 	if b.kind == "drop" {
 		return nil
+	}
+	if b.kind == "json" && f.MaskJSON != nil {
+		masked, err := f.MaskJSON(string(b.json))
+		if err != nil {
+			return f.block(err)
+		}
+		// The whole input goes through the gate at once; no holdback is
+		// needed, it was read whole.
+		b.ch.hb = nil
+		out, err := f.pass(b, masked, true)
+		if err != nil {
+			return err
+		}
+		if out != "" {
+			if err := f.emitDelta(b, out); err != nil {
+				return err
+			}
+		}
+		return f.emit("content_block_stop", map[string]any{"index": b.index})
 	}
 	out, err := f.pass(b, "", true)
 	if err != nil {

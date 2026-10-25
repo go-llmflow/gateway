@@ -369,6 +369,15 @@ model "llama-guard" {
 - tool-call arguments;
 - the completions `prompt` and the embeddings `input`.
 
+**Every JSON layer is decoded first** (since v0.7.1). The finders read the text the model will read, not its encoding:
+
+- A text that is itself a JSON document is parsed, and each key and string is read in turn. Tool-call arguments, tool inputs and tool results are such documents.
+- `\uXXXX` and the other JSON escapes are decoded.
+
+Masks land on the decoded form, and the request is re-encoded. A secret written `ghp_…` in tool arguments, or an IBAN escaped in a tool result, is found and masked like the plain form.
+
+In v0.7.0 these layers were read encoded, which was a guardrail bypass. `FuzzEscapedFindings` now checks that escaping any part of a request never finds less than the plain form. In a Messages stream, a tool call's input is held whole until its block ends, then masked through every layer and released at once.
+
 The classifying guardrails then run **concurrently**, each under its own `timeout`, on the **masked** request. So no classifier ever sees what was masked, and an external one least of all. vLLM gets the masked prompt, and so does the content log. Post-call works the same way on the answer.
 
 **Actions.**
@@ -830,7 +839,7 @@ Blocks the guardrails cannot read are refused, an Anthropic `document` among the
 - an upstream `error` event keeps its type, but not its message;
 - any other event stops the stream with an `error` event.
 
-Masking inside tool JSON reads the JSON text as is, so a value written with `\u` escapes is not unescaped first.
+A tool call's input is held until its block ends, so that every JSON layer can be decoded and masked (bounded at 1 MiB). It then arrives as one delta.
 
 ## Traces
 

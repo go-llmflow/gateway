@@ -158,12 +158,13 @@ func TestMapRequestMessages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"SYS"`, `"PLAIN"`, `"HMM"`, `"signature":"sig"`, `"cmd":"LS"`, `"A"`, `"deep":"B"`, `"n":3`, `"OUT"`, `"data":"zz"`} {
+	// Keys of a tool input are text too (a secret can be a key).
+	for _, want := range []string{`"SYS"`, `"PLAIN"`, `"HMM"`, `"signature":"sig"`, `"CMD":"LS"`, `"A"`, `"DEEP":"B"`, `"N":3`, `"OUT"`, `"data":"zz"`} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("%s missing from %s", want, out)
 		}
 	}
-	if len(msgs) != 7 { // sys, plain, hmm, ls, a, b, out
+	if len(msgs) != 11 { // sys, plain, hmm, ls, a, b, out, and the keys cmd, args, deep, n
 		t.Fatalf("%d texts: %v", len(msgs), msgs)
 	}
 	if _, _, err := MapRequest([]byte(`{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"text","data":"x"}}]}]}`), upper); err == nil {
@@ -184,8 +185,8 @@ func TestMapResponseMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(out)
-	if strings.Contains(s, "thoughts") || strings.Contains(s, "cited_text") || !strings.Contains(s, `"HELLO"`) || !strings.Contains(s, `"q":"FIND"`) ||
-		!strings.Contains(s, `"stop_reason":"end_turn"`) || !strings.Contains(s, `"input_tokens":3`) || len(texts) != 2 {
+	if strings.Contains(s, "thoughts") || strings.Contains(s, "cited_text") || !strings.Contains(s, `"HELLO"`) || !strings.Contains(s, `"Q":"FIND"`) ||
+		!strings.Contains(s, `"stop_reason":"end_turn"`) || !strings.Contains(s, `"input_tokens":3`) || len(texts) != 3 {
 		t.Fatalf("%s %q", s, texts)
 	}
 }
