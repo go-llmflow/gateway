@@ -126,7 +126,10 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		}
 		// Guardrails, last of the checks before vLLM: a guard model costs
 		// GPU time, not spent on a request refused for cheaper reasons.
-		guards, err := s.guardsFor(key)
+		var guards []*guardrail
+		if ep.Guarded() {
+			guards, err = s.guardsFor(key)
+		}
 		if err != nil {
 			s.limiter.release(key.ID, 0)
 			s.met.denied.add(1, key.Team, "guardrail")

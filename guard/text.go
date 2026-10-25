@@ -87,12 +87,25 @@ func MapRequest(body []byte, f func(role, text string) string) ([]byte, []Messag
 			top[key], changed = nv, true
 		}
 	}
-	for _, key := range []string{"prompt", "input"} {
+	// Rerank: the query (a string or content parts) and the documents (a
+	// string or a list of strings; document objects are items mapItems
+	// refuses, as it cannot read them).
+	if raw, ok := top["query"]; ok && !isNull(raw) {
+		nv, out, ch, err := mapContent(raw, "user", f)
+		if err != nil {
+			return nil, nil, err
+		}
+		msgs = append(msgs, out...)
+		if ch {
+			top["query"], changed = nv, true
+		}
+	}
+	for _, key := range []string{"prompt", "input", "documents"} {
 		raw, ok := top[key]
 		if !ok || isNull(raw) {
 			continue
 		}
-		if key == "input" && isItemList(raw) {
+		if key != "prompt" && isItemList(raw) {
 			nv, out, ch, err := mapItems(raw, f)
 			if err != nil {
 				return nil, nil, err
@@ -460,6 +473,11 @@ func MapResponse(body []byte, strip bool, f func(text string) string) ([]byte, [
 	if _, chat := top["choices"]; !chat && typ == "message" {
 		return mapMessagesOutput(top, strip, f)
 	}
+	if _, ok := top["results"]; ok {
+		if _, chat := top["choices"]; !chat {
+			return mapRerankOutput(top, strip, f)
+		}
+	}
 	changed := false
 	if strip {
 		n := len(top)
@@ -725,6 +743,72 @@ func mapMessagesOutput(top map[string]json.RawMessage, strip bool, f func(string
 		return nil, nil, err
 	}
 	top["content"] = cb
+	out, err := json.Marshal(top)
+	return out, texts, err
+}
+
+// mapRerankOutput is MapResponse for a rerank answer: the documents it
+// echoes go through f (they were masked on the way in already; this keeps
+// it so whatever the upstream returns). With strip, a result keeps only
+// index, relevance_score and document.text.
+func mapRerankOutput(top map[string]json.RawMessage, strip bool, f func(string) string) ([]byte, []string, error) {
+	if strip {
+		keepOnly(top, []string{"id", "model", "usage", "results"})
+	}
+	var results []map[string]json.RawMessage
+	if raw := top["results"]; !isNull(raw) {
+		if err := json.Unmarshal(raw, &results); err != nil {
+			return nil, nil, errors.New("guard: results is not a list of objects")
+		}
+	}
+	var texts []string
+	for _, r := range results {
+		if r == nil {
+			return nil, nil, errors.New("guard: a result is not an object")
+		}
+		if strip {
+			for k := range r {
+				if k != "index" && k != "relevance_score" && k != "document" {
+					delete(r, k)
+				}
+			}
+			for _, k := range []string{"index", "relevance_score"} {
+				var n float64
+				if v, ok := r[k]; ok && json.Unmarshal(v, &n) != nil {
+					delete(r, k)
+				}
+			}
+		}
+		d, ok := r["document"]
+		if !ok || isNull(d) {
+			continue
+		}
+		var doc map[string]json.RawMessage
+		if err := json.Unmarshal(d, &doc); err != nil || doc == nil {
+			if strip {
+				delete(r, "document")
+			}
+			continue
+		}
+		if strip {
+			keepOnly(doc, []string{"text"})
+		}
+		if t, ok := doc["text"]; ok {
+			var s string
+			if err := json.Unmarshal(t, &s); err != nil {
+				return nil, nil, errors.New("guard: a document text is not a string")
+			}
+			ns := f(s)
+			texts = append(texts, ns)
+			doc["text"], _ = json.Marshal(ns)
+		}
+		r["document"], _ = json.Marshal(doc)
+	}
+	rb, err := json.Marshal(results)
+	if err != nil {
+		return nil, nil, err
+	}
+	top["results"] = rb
 	out, err := json.Marshal(top)
 	return out, texts, err
 }

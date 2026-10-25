@@ -34,7 +34,23 @@ const (
 	// itself: vllm/entrypoints/anthropic, v0.32.0, converts it to a chat
 	// completion with the same raw request, so X-Vllm-Priority applies).
 	Messages
+	// Rerank is /v1/rerank (vLLM's Jina/Cohere-style rerank for score
+	// models).
+	Rerank
+	// Tokenize and Detokenize are vLLM's /tokenize and /detokenize: no
+	// generation, nothing to charge.
+	Tokenize
+	Detokenize
 )
+
+// Metered reports whether the endpoint's work is charged: when usage is
+// missing, the gateway estimates it for a metered endpoint only.
+func (ep Endpoint) Metered() bool { return ep != Tokenize && ep != Detokenize }
+
+// Guarded reports whether the guardrails apply. Tokenization sends the text
+// to vLLM's API server only (no model runs) and returns token ids; masking
+// it would only make the count wrong.
+func (ep Endpoint) Guarded() bool { return ep != Tokenize && ep != Detokenize }
 
 // ErrStateful refuses Responses features that keep state in vLLM.
 //
@@ -56,6 +72,11 @@ func RewriteFor(ep Endpoint, body []byte, resolve func(model string) (string, er
 	case Responses:
 	case Messages:
 		return rewriteMessages(body, resolve, iso)
+	case Rerank:
+		return rewritePlain(body, resolve, iso.CacheSalt)
+	case Tokenize, Detokenize:
+		// No cache_salt field there (vllm/entrypoints/serve/tokenize).
+		return rewritePlain(body, resolve, "")
 	default:
 		return Rewrite(body, resolve, iso)
 	}
@@ -162,6 +183,10 @@ func ParseUsageFor(ep Endpoint, body []byte) (Usage, bool) {
 	case Responses:
 	case Messages:
 		return parseMessagesUsage(body)
+	case Rerank:
+		return parseRerankUsage(body)
+	case Tokenize, Detokenize:
+		return Usage{}, true
 	default:
 		return ParseUsage(body)
 	}
