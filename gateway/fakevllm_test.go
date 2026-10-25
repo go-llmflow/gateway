@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -21,6 +22,17 @@ type fakeVLLM struct {
 	status int           // answer with this status when non-zero
 	gate   chan struct{} // when set, completions wait on it
 	hits   int
+	// reply, when set, is the answer's content: joined for a JSON answer,
+	// one delta per element for a stream (default "hi"; t0, t1, t2).
+	reply []string
+	// classify answers /classify (a guard classifier) when set.
+	classify func(inputs []string) string
+}
+
+func (f *fakeVLLM) setReply(parts ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reply = parts
 }
 
 type recorded struct {
@@ -64,8 +76,15 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.hits++
 	f.reqs = append(f.reqs, recorded{Header: r.Header.Clone(), Body: body, Path: r.URL.Path})
-	status, gate := f.status, f.gate
+	status, gate, reply, classify := f.status, f.gate, f.reply, f.classify
 	f.mu.Unlock()
+	if r.URL.Path == "/classify" && classify != nil && status == 0 {
+		var in struct{ Input []string }
+		_ = json.Unmarshal(raw, &in)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, classify(in.Input))
+		return
+	}
 	if gate != nil {
 		select {
 		case <-gate:
@@ -82,9 +101,17 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		fl := w.(http.Flusher)
-		for i := 0; i < 3; i++ {
-			fmt.Fprintf(w, "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"t%d\"}}],\"usage\":null}\n\n", i)
+		deltas := reply
+		if deltas == nil {
+			deltas = []string{"t0", "t1", "t2"}
+		}
+		for _, d := range deltas {
+			b, _ := json.Marshal(d)
+			fmt.Fprintf(w, "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":%s}}],\"usage\":null}\n\n", b)
 			fl.Flush()
+		}
+		if reply != nil {
+			fmt.Fprint(w, "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n")
 		}
 		if so, _ := body["stream_options"].(map[string]any); so["include_usage"] == true {
 			fmt.Fprintf(w, "data: {\"id\":\"c\",\"choices\":[],\"usage\":%s}\n\n", usage)
@@ -93,5 +120,10 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}],"usage":%s}`, usage)
+	content := "hi"
+	if reply != nil {
+		content = strings.Join(reply, "")
+	}
+	cb, _ := json.Marshal(content)
+	fmt.Fprintf(w, `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":%s}}],"usage":%s}`, cb, usage)
 }

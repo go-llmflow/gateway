@@ -317,6 +317,91 @@ at 8 MiB compressed. They go through the export's bounded queue: a batch
 dropped or given up is counted and alerted like any export write
 (`export_dropped`, `export_failed`).
 
+### Guardrails
+
+Guardrails check prompts before vLLM (stage `pre`) and completions after it (stage `post`, streams included). A request gets the guardrails of its key's organisation, of its team, and of the key itself. A key can add guardrails, `POST /admin/keys {"guardrails": ["pii"]}`, but it can never remove one.
+
+```hcl
+guardrail "secrets" {
+  type  = "hide_secrets"                 # tokens and URL credentials, via go-gitsafe/gitsafe redact
+  orgs  = ["etabA"]                      # and/or teams = [...]
+}
+guardrail "pii" {
+  type    = "pii"                        # via go-llmflow/pii
+  teams   = ["lab-med"]
+  action  = "mask"                       # default for every kind
+  actions = { iban = "block", nir = "block", phone = "log" }
+}
+guardrail "safety" {
+  type               = "llama_guard"
+  model              = "llama-guard"     # a model block with class = "guard"
+  teams              = ["lab-med"]
+  action             = "block"
+  actions            = { S6 = "log" }    # per category, S1…S14
+  stream_check_bytes = 1024
+  timeout            = "2s"
+  on_error           = "block"           # fail-closed (default); "allow" is fail-open
+}
+guardrail "injection" {
+  type      = "prompt_guard"             # stage pre only
+  model     = "prompt-guard"
+  threshold = 0.9
+}
+guardrail "vendor" {                     # off unless written, and then only with:
+  type           = "http"
+  url            = "https://guard.example.org/check"
+  token_file     = "vault:secret/llmflow#guard"
+  allow_external = true                  # prompts and completions leave the site
+}
+
+model "llama-guard" {
+  upstream_model = "meta-llama/Llama-Guard-3-8B"
+  pool           = "guard"
+  class          = "guard"               # not callable by clients, not in /v1/models
+  key_file       = "vault:secret/llmflow#vllm"
+  upstream "g0" { base_url = "http://gpu09:8000" }   # vllm serve meta-llama/Llama-Guard-3-8B
+}
+```
+
+**Order.** The masking guardrails (`hide_secrets`, `pii`) run first, in configuration order, on every text of the request:
+
+- message contents and their text parts;
+- tool-call arguments;
+- the completions `prompt` and the embeddings `input`.
+
+The classifying guardrails then run **concurrently**, each under its own `timeout`, on the **masked** request. So no classifier ever sees what was masked, and an external one least of all. vLLM gets the masked prompt, and so does the content log. Post-call works the same way on the answer.
+
+**Actions.**
+
+- `mask` replaces the match with `[KIND]`, for example `[TOKEN]`, `[EMAIL]` or `[IBAN]`.
+- `block` refuses with `400 guardrail_violation`, naming the guardrail and the categories.
+- `log` only records the finding.
+
+A guardrail that errs or times out refuses with `503` when it is fail-closed (the default). When it is `on_error = "allow"`, the request goes through and the error is counted.
+
+**Audit and metrics.** Every finding and every error is written to the audit log, kind `guardrail`, action `guardrail.<mask|block|log|allow>`. The entry holds the guardrail, the stage, the category, the count and the request id, never the text. A request that passes every guardrail is only counted, since auditing it would put a database write on every request. The metrics are:
+
+- `llmflow_guardrail_decisions_total{guard,stage,action}`;
+- `llmflow_guardrail_errors_total{guard,outcome}`;
+- `llmflow_guardrail_seconds`;
+- `llmflow_denied_total{reason="guardrail"}`.
+
+The retention kind `guardrail` applies to these entries.
+
+**Streams.** Masking uses a bounded hold-back of 256 bytes per choice. It holds the last 256 bytes and any match still growing, and releases everything before them, masked. The full answer is never buffered. The latency added is the time to generate the first 256 bytes, about 64 tokens, once at the start of the stream; after that, each chunk releases as much as it adds.
+
+Classifiers on a stream gate the text: the completion is judged every `stream_check_bytes` new bytes, and those bytes are released only once accepted. The text therefore arrives in bursts of that size, each one delayed by one classifier call. A refusal ends the stream with an error event (`guardrail_violation`) and `[DONE]`. Text already released stays released, but nothing that was not checked has been sent.
+
+Guarded answers keep only the fields the guardrails know. Log probabilities, reasoning text and unknown fields are removed (see limitation 15).
+
+**Guard models are local.** Llama Guard is served by vLLM as a chat model whose chat template builds the classification prompt. Prompt Guard 2 is served on vLLM's `/classify` endpoint (a pooling model); input longer than its 512 tokens is sent as up to 64 segments of 1500 bytes. The gateway reaches both through its own routing (upstream choice, retries, cooldown) at **vLLM priority 0**.
+
+They do **not** go through the fair-share pool. A guard call is the gateway checking the team's work, not more of that work, and queueing it behind the team's own requests would add their wait to every one. Their **cost is charged to the team**, though: a spend record and its budgets, under the guard model's name, so `GET /admin/spend?group_by=team,model` shows it.
+
+**HTTP adapter.** It POSTs `{"guardrail", "stage", "messages", "completion"}`, receives the already-masked text, and expects `{"action": "allow"|"block"|"log", "categories": [...]}`. Answers are capped at 64 KiB and redirects are not followed. It is refused at configuration time without `allow_external = true`, and `serve` logs a warning at start that prompts leave the site.
+
+All guard answers are parsed defensively and fuzzed (`FuzzParseGuardAnswers`), as are the hold-back (`FuzzHoldback`: streamed in any pieces equals masked whole), the SSE rewriter (`FuzzStreamFilter`: no secret in any released string) and the request mapping (`FuzzMapRequest`).
+
 ## Budgets
 
 A budget caps the GPU-hours of one scope per `day`, `week` or `month` (UTC
@@ -835,6 +920,13 @@ Open defects (v0.2.0):
     can still be removed, and a stolen signing key can sign new history after
     it. Keep the key in OpenBao/Vault, verify with a public key kept
     elsewhere, and keep an anchor on write-once storage.
+15. **What guardrails do not inspect**, and how each gap is handled:
+    - Streamed tool-call arguments cannot be masked, so a guarded stream that carries them is stopped. Ask for tool calls without `stream`.
+    - Reasoning text (`reasoning_content`), refusals and any field the guards do not know are removed from guarded answers, not inspected. The same goes for log probabilities.
+    - A secret whose start appears more than 256 bytes before it can match is not seen in a stream. One example is a URL userinfo longer than about 250 bytes before its `@`.
+    - A span still open after 64 KiB is released masked as far as it has reached. Its tail goes out in clear if that tail no longer matches on its own.
+    - Audit entries of guardrail decisions are written asynchronously. When the queue is full they are dropped, counted (`llmflow_guardrail_audit_dropped_total`) and alerted.
+16. **Phone numbers have no checksum**: a PII guardrail that masks them also masks 10-digit references that start with 0. This was measured in go-llmflow/pii.
 
 ## References
 
@@ -869,6 +961,12 @@ Opened while building v0.1.0–v0.4.0, and cited where used above:
   [Dynamic TPM/RPM Allocation](https://docs.litellm.ai/docs/proxy/dynamic_rate_limit),
   [virtual keys](https://docs.litellm.ai/docs/proxy/virtual_keys) (key
   regeneration and grace period).
+- Guardrails (v0.6.0):
+  - Meta, the [Llama Guard 3 model card](https://huggingface.co/meta-llama/Llama-Guard-3-8B) (categories S1–S14) and its [prompt format](https://dev.meta.ai/llama/docs/model-cards-and-prompt-formats/llama-guard-3/). The classifier judges the last `User` or `Agent` turn. It answers `safe`, or `unsafe` followed on the next line by the comma-separated categories.
+  - The [Llama Prompt Guard 2 86M model card](https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M): an mDeBERTa sequence classifier with labels benign and malicious and a 512-token context. Longer input is split into segments.
+  - vLLM: the [OpenAI-compatible server](https://docs.vllm.ai/en/latest/serving/online_serving/) and the [classification API](https://docs.vllm.ai/en/latest/models/pooling_models/classify/), `/classify` with `{"model", "input": [...]}` and response `data[].label`/`probs`.
+  - [go-gitsafe/gitsafe](https://github.com/go-gitsafe/gitsafe) `redact`, v0.17.0. `Find` was added there for this gateway.
+  - [go-llmflow/pii](https://github.com/go-llmflow/pii) v0.1.0, whose README cites ISO 13616, INSEE, ISO/IEC 7812-1, E.164, RFC 5322, RFC 5321 and RFC 4291.
 
 ## Development
 

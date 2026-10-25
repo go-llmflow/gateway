@@ -428,6 +428,9 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request, p *principal)
 		MaxInFlight int      `json:"max_inflight"`
 		Tags        []string `json:"tags"`
 		Policy      string   `json:"policy"`
+		// Guardrails the key adds to its org's and team's. Adding a guard
+		// only restricts the key, so members may too.
+		Guardrails []string `json:"guardrails"`
 	}
 	if !readJSON(w, r, &in) {
 		return
@@ -435,6 +438,16 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request, p *principal)
 	if in.Policy != "" && s.policies[in.Policy] == nil {
 		apiError(w, http.StatusBadRequest, "invalid_request_error", "no policy named "+strconv.Quote(in.Policy)+" in the configuration")
 		return
+	}
+	if len(in.Guardrails) > 16 {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", "at most 16 guardrails")
+		return
+	}
+	for _, g := range in.Guardrails {
+		if s.guardrails[g] == nil {
+			apiError(w, http.StatusBadRequest, "invalid_request_error", "no guardrail named "+strconv.Quote(g)+" in the configuration")
+			return
+		}
 	}
 	if in.RPM < 0 || in.TPM < 0 || in.MaxInFlight < 0 || len(in.Name) > 128 {
 		apiError(w, http.StatusBadRequest, "invalid_request_error", "limits must be non-negative and the name at most 128 bytes")
@@ -471,7 +484,7 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request, p *principal)
 	}
 	secret, id, hash := store.GenerateKey()
 	k := store.Key{ID: id, Hash: hash, Team: in.Team, Project: in.Project, Owner: owner, Name: in.Name,
-		RPM: in.RPM, TPM: in.TPM, MaxInFlight: in.MaxInFlight, Tags: in.Tags, Policy: in.Policy}
+		RPM: in.RPM, TPM: in.TPM, MaxInFlight: in.MaxInFlight, Tags: in.Tags, Policy: in.Policy, Guardrails: in.Guardrails}
 	if err := s.st.CreateKey(r.Context(), k); err != nil {
 		storeError(w, err)
 		return

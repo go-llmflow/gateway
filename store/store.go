@@ -77,6 +77,9 @@ type Key struct {
 	Rotation Rotation `json:"rotation,omitzero"`
 	// Policy names the request policy of the key (empty: its team's).
 	Policy string `json:"policy,omitempty"`
+	// Guardrails names guardrails the key adds to those of its org and
+	// team (it can add, never remove).
+	Guardrails []string `json:"guardrails,omitempty"`
 }
 
 // Matches reports whether h is the key's secret, or its previous secret

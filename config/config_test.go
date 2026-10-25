@@ -669,6 +669,7 @@ func TestUnknownNamesRejected(t *testing.T) {
 func FuzzParse(f *testing.F) {
 	f.Add([]byte(valid))
 	f.Add([]byte(valid + loggingExport + "logging \"a\" {\n  teams = [\"etabA\"]\n  destination = \"logs\"\n  content = true\n}\n"))
+	f.Add([]byte(valid + guardModel + "guardrail \"a\" {\n  type = \"llama_guard\"\n  model = \"lg\"\n  actions = { S1 = \"log\" }\n  teams = [\"etabA\"]\n}\n"))
 	f.Add([]byte(valid + `store { kind = "postgres" dsn_file = "/d" }`))
 	f.Add([]byte("master_key_file = \"$${x}\"\nmodel \"m\" {\n upstream \"u\" {\n  base_url = \"http://h\"\n  key_file = <<EOT\n/k\nEOT\n }\n}\npool \"m\" { capacity = 1 }\n"))
 	f.Add([]byte(valid + policyBlocks))

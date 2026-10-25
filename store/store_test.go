@@ -219,9 +219,9 @@ func contract(t *testing.T, s Store) {
 
 	// A key's request policy is kept.
 	_, pid2, ph2 := GenerateKey()
-	must(s.CreateKey(ctx, Key{ID: pid2, Hash: ph2, Team: "etabA", Policy: "strict"}))
-	if k, err := s.GetKey(ctx, pid2); err != nil || k.Policy != "strict" {
-		t.Fatalf("key policy: %+v %v", k, err)
+	must(s.CreateKey(ctx, Key{ID: pid2, Hash: ph2, Team: "etabA", Policy: "strict", Guardrails: []string{"pii", "secrets", "pii"}}))
+	if k, err := s.GetKey(ctx, pid2); err != nil || k.Policy != "strict" || len(k.Guardrails) != 2 || k.Guardrails[0] != "pii" {
+		t.Fatalf("key policy and guardrails: %+v %v", k, err)
 	}
 	must(s.RevokeKey(ctx, pid2))
 

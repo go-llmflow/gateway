@@ -112,6 +112,14 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 		}
 		s.ExportCredentials[e.Name] = cr
 	}
+	s.GuardrailTokens = map[string]string{}
+	for _, g := range c.Guardrails {
+		var tok string
+		if err := get("guardrail "+g.Name+" token_file", g.TokenFile, &tok); err != nil {
+			return s, err
+		}
+		s.GuardrailTokens[g.Name] = tok
+	}
 	s.UpstreamKeys = map[string]string{}
 	for _, f := range c.KeyFiles() {
 		var k string
