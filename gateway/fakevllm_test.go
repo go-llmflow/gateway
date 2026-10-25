@@ -97,6 +97,10 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	usage := `{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,"prompt_tokens_details":{"cached_tokens":40}}`
+	if r.URL.Path == "/v1/responses" {
+		f.serveResponses(w, body, reply)
+		return
+	}
 	if stream, _ := body["stream"].(bool); stream {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -126,4 +130,32 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	cb, _ := json.Marshal(content)
 	fmt.Fprintf(w, `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":%s}}],"usage":%s}`, cb, usage)
+}
+
+// serveResponses answers like vLLM's Responses API: a response object with
+// output items and Responses usage, or its event stream ending with
+// response.completed.
+func (f *fakeVLLM) serveResponses(w http.ResponseWriter, body map[string]any, reply []string) {
+	if reply == nil {
+		reply = []string{"hi"}
+	}
+	usage := `{"input_tokens":100,"input_tokens_details":{"cached_tokens":40},"output_tokens":20,"total_tokens":120}`
+	text, _ := json.Marshal(strings.Join(reply, ""))
+	resp := fmt.Sprintf(`{"id":"resp_1","object":"response","created_at":1,"model":"meta/llama","status":"completed","output":[`+
+		`{"type":"reasoning","id":"rs","summary":[{"type":"summary_text","text":"thinking"}]},`+
+		`{"type":"message","id":"msg","role":"assistant","status":"completed","content":[{"type":"output_text","text":%s,"annotations":[]}]}],"usage":%s}`, text, usage)
+	if stream, _ := body["stream"].(bool); stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"usage\":null}}\n\n")
+		for _, d := range reply {
+			b, _ := json.Marshal(d)
+			fmt.Fprintf(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":%s}\n\n", b)
+			fl.Flush()
+		}
+		fmt.Fprintf(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":%s}\n\n", resp)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprint(w, resp)
 }

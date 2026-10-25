@@ -691,8 +691,38 @@ entries, and checkpoints sign a self-describing message
 | `GET /admin/fairshare` | reservations, in-flight, borrowing, usage, LF and rank per pool and organisation |
 
 Client routes: `POST /v1/chat/completions`, `/v1/completions`,
-`/v1/embeddings`, `GET /v1/models`. `GET /healthz` returns 503 when the budget
+`/v1/embeddings`, `/v1/responses`, `GET /v1/models`. `GET /healthz` returns 503 when the budget
 state is stale and fail-closed is on.
+
+### Responses API
+
+`POST /v1/responses` is proxied to vLLM's own Responses endpoint (served by vLLM natively; v0.32.0 checked), through the same pipeline as chat:
+
+- authentication;
+- the policy, budget and rate checks;
+- guardrails;
+- fair-share priority;
+- the tenant's `cache_salt`;
+- accounting from the Responses usage (`input_tokens`, `input_tokens_details.cached_tokens`, `output_tokens`), which a stream carries in its final `response.completed` event.
+
+`priority`, `request_id`, `cache_salt` and the other engine fields are stripped, as they are for chat.
+
+**Stateless only.** vLLM keeps every response in the memory of the instance that produced it (`store` defaults to true there). Anyone holding the id can then read it back, continue it (`previous_response_id`) or cancel it. Behind a gateway, that state would be shared by every tenant and would live on one upstream among several. So the gateway works as follows:
+
+- it forces `"store": false`;
+- it refuses `previous_response_id`, `background`, `conversation` and stored `prompt` with a 400 that says so;
+- it does not route `GET /v1/responses/{id}` or `.../cancel`.
+
+Clients send the whole conversation in `input`, as they do with chat completions.
+
+**Guardrails.** Guardrails read the request's `instructions` and its `input` items:
+
+- message text and parts (`input_text`, `output_text`);
+- function-call arguments and outputs.
+
+Input items of any other type are refused, since the guardrails cannot read them. In the answer, output message text and function-call arguments are masked. Reasoning items, annotations, log probabilities and every unknown field are removed.
+
+A streamed Responses request under post-call guardrails is refused (400, ask with `"stream": false`). Its events repeat the text in several shapes (`.delta`, `.done`, the final response) that the stream filter does not rewrite yet. Without post-call guardrails, streams pass through unchanged.
 
 ## Metrics
 
@@ -893,7 +923,8 @@ Open defects (v0.2.0):
    twice; both are counted in metrics; budgets count the cost until the next
    refresh only.
 7. No TLS termination in the gateway (put it behind a TLS proxy); the admin API
-   shares the client listener; `/v1/responses` is not proxied.
+   shares the client listener; `/v1/responses` is served statelessly only
+   (see [Responses API](#responses-api)).
 8. `C` is static configuration; the gateway does not measure or adapt it.
 9. **Admin principals are read from the store on every admin request** (no
    cache): fine for admin traffic, but the admin API fails with the store.
