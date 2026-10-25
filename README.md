@@ -695,6 +695,33 @@ Client routes: `POST /v1/chat/completions`, `/v1/completions`,
 `/v1/audio/transcriptions`, `/tokenize`, `/detokenize`, `GET /v1/models`. `GET /healthz` returns 503 when the budget
 state is stale and fail-closed is on.
 
+### Fallbacks
+
+A model group can name fallback groups, tried in order:
+
+```hcl
+model "llama-70b" {
+  pool      = "b300"
+  fallbacks = ["llama-8b"]     # at most 4; not a guard model, not itself
+  # …
+}
+```
+
+**When.** Before anything has reached the client, in either of two cases:
+
+- no upstream of the group took the request (all down, failing or cooling down, after the usual retries);
+- vLLM answered `429` or `503` (saturated).
+
+The request then moves to the next fallback that its team is allowed to use and whose budgets it has not exceeded. Any other answer, a `400` for instance, is final.
+
+**What it keeps.** Fair share and accounting stay exact:
+
+- the request leaves the first pool and **acquires in the target pool**, so it gets its organisation's priority there;
+- the body is rewritten for the target's upstream model;
+- the request is **charged, budgeted and recorded under the model that served it**, at that model's prices and in its pool.
+
+**Visibility.** The response carries `X-Llmflow-Model: <model used>`, and `llmflow_fallbacks_total{from,to}` counts the moves. Guardrails have already run on the prompt and run on the answer, whichever model produced it.
+
 ### Responses API
 
 `POST /v1/responses` is proxied to vLLM's own Responses endpoint (served by vLLM natively; v0.32.0 checked), through the same pipeline as chat:

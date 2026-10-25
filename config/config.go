@@ -411,6 +411,10 @@ type ModelGroup struct {
 	Class         Class
 	Upstreams     []Upstream
 	Cost          Cost
+	// Fallbacks are tried in order when no upstream of this group can take
+	// the request (all down, or vLLM answers 429/503) before anything was
+	// sent to the client.
+	Fallbacks []string
 }
 
 // Defaults.

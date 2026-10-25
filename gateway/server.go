@@ -510,6 +510,7 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 	s.met.gpuHours.write(w)
 	s.met.denied.write(w)
 	s.met.retries.write(w)
+	s.met.fallbacks.write(w)
 	s.met.estimated.write(w)
 	s.met.softAlerts.write(w)
 	if s.alerts != nil {

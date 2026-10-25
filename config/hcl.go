@@ -417,6 +417,8 @@ type modelHCL struct {
 	Class              *string       `hcl:"class,optional"`
 	ClassRange         hcl.Range     `hcl:"class,attr_value_range"`
 	KeyFile            *string       `hcl:"key_file,optional"`
+	Fallbacks          []string      `hcl:"fallbacks,optional"`
+	FallbacksRange     hcl.Range     `hcl:"fallbacks,attr_value_range"`
 	Cost               *costHCL      `hcl:"cost,block"`
 	Upstreams          []upstreamHCL `hcl:"upstream,block"`
 	DefRange           hcl.Range     `hcl:",def_range"`
@@ -753,6 +755,33 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			g.Upstreams = append(g.Upstreams, Upstream{Name: u.Name, BaseURL: u.BaseURL, KeyFile: key})
 		}
 		c.ModelGroups = append(c.ModelGroups, g)
+	}
+	// Fallbacks name other model groups, checked once all are known.
+	for i, m := range raw.Models {
+		if len(m.Fallbacks) == 0 || i >= len(c.ModelGroups) {
+			continue
+		}
+		where := "model " + strconv.Quote(m.Name)
+		if c.ModelGroups[i].Class == Guard {
+			v.errf(m.FallbacksRange, "Fallback on a guard model", "%s: a guard model has no fallbacks", where)
+		}
+		if len(m.Fallbacks) > 4 {
+			v.errf(m.FallbacksRange, "Too many fallbacks", "%s: at most 4", where)
+		}
+		seen := map[string]bool{}
+		for _, fb := range m.Fallbacks {
+			cl, ok := modelClass[fb]
+			switch {
+			case !ok:
+				v.errf(m.FallbacksRange, "Unknown model", "%s: fallback %q names no model block", where, fb)
+			case fb == m.Name || seen[fb]:
+				v.errf(m.FallbacksRange, "Invalid fallback", "%s: fallback %q is the model itself or repeated", where, fb)
+			case cl == Guard:
+				v.errf(m.FallbacksRange, "Invalid fallback", "%s: fallback %q is a guard model", where, fb)
+			}
+			seen[fb] = true
+		}
+		c.ModelGroups[i].Fallbacks = m.Fallbacks
 	}
 	if t := raw.Tags; t != nil {
 		if !validHeaderName(t.Header) {
