@@ -561,6 +561,7 @@ func TestPostgresContract(t *testing.T) {
 	contract(t, p)
 	contractUsers(t, p)
 	contractModels(t, p)
+	contractTools(t, p)
 	contractAudit(t, p)
 	// The table refuses an UPDATE: rewriting history needs more than SQL
 	// access to the gateway's own role.

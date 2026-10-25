@@ -243,6 +243,12 @@ type Store interface {
 	// TeamModels returns every team's non-empty model list.
 	TeamModels(ctx context.Context) (map[string][]string, error)
 
+	// SetTeamTools replaces the MCP tool patterns a team may use
+	// ("server.tool", "server.*" or "*"); an empty list allows none.
+	SetTeamTools(ctx context.Context, team string, tools []string) error
+	// TeamTools returns every team's non-empty tool list.
+	TeamTools(ctx context.Context) (map[string][]string, error)
+
 	// SetBudget creates or replaces a budget's period, maximum and soft
 	// limit; a temporary increase already granted is kept.
 	SetBudget(ctx context.Context, b Budget) error

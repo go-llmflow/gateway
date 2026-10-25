@@ -27,10 +27,32 @@ func contractModels(t *testing.T, s Store) {
 	}
 }
 
+// contractTools runs after contract (etabA exists).
+func contractTools(t *testing.T, s Store) {
+	ctx := context.Background()
+	if err := s.SetTeamTools(ctx, "etabA", []string{"gh.*", "docs.search", "gh.*"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTeamTools(ctx, "nobody", []string{"*"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown team: %v", err)
+	}
+	tt, err := s.TeamTools(ctx)
+	if err != nil || len(tt) != 1 || len(tt["etabA"]) != 2 || tt["etabA"][0] != "docs.search" || tt["etabA"][1] != "gh.*" {
+		t.Fatalf("team tools %v %v", tt, err)
+	}
+	if err := s.SetTeamTools(ctx, "etabA", nil); err != nil {
+		t.Fatal(err)
+	}
+	if tt, _ := s.TeamTools(ctx); len(tt) != 0 {
+		t.Fatalf("cleared: %v", tt)
+	}
+}
+
 func TestMemoryModels(t *testing.T) {
 	m := NewMemory()
 	contract(t, m)
 	contractModels(t, m)
+	contractTools(t, m)
 	boom := errors.New("boom")
 	m.SetFail(boom)
 	_, err := m.TeamModels(context.Background())

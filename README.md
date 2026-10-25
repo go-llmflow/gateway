@@ -20,6 +20,10 @@ Built for a 4-node HGX B300 cluster (32 GPUs) shared by two institutions, A
   temporary increases and soft-budget alerts (webhook, e-mail);
 - per-request accounting in PostgreSQL and spend reports (JSON, CSV, and
   pipe-delimited like `sreport --parsable2`) to reconcile with Slurm;
+- an MCP gateway (`/mcp`, revision 2026-07-28 and 2025-11-25) in front of
+  configured tool servers, with per-team tool allow-lists and every call
+  audited;
+- a server-rendered admin web UI (no JavaScript) behind SSO;
 - Prometheus metrics; streaming pass-through without buffering.
 
 ```sh
@@ -684,7 +688,8 @@ fields, folded invalid UTF-8 to U+FFFD so two different values could hash
 alike; rows written as version 1 still verify.
 
 **Retention.** Entries are kept for ever unless a retention is set per kind
-(`admin`, `auth` for SSO, `scim`, `system` for what the gateway does itself):
+(`admin`, `auth` for SSO, `scim`, `system` for what the gateway does itself,
+`guardrail` for guardrail decisions, `tool` for MCP tool calls):
 
 ```hcl
 audit {
@@ -723,6 +728,7 @@ entries, and checkpoints sign a self-describing message
 | `GET /admin/teams?org=`, `POST /admin/teams`, `DELETE /admin/teams/{name}` | list, create `{"name","org"}`, disable (its projects and keys too) |
 | `GET` / `POST /admin/teams/{team}/projects`, `DELETE /admin/teams/{team}/projects/{name}` | list, create `{"name"}`, disable (revokes its keys) |
 | `GET` / `PUT /admin/teams/{team}/models` | the model groups the team may use: `{"models":[…]}` (team admin and above; empty list = every configured model). A hidden model answers 404 like an unknown one and is left out of `/v1/models` |
+| `GET` / `PUT /admin/teams/{team}/tools` | the MCP tools the team may call: `{"tools":["github.*","docs.search","*"]}` (set by organisation admins and above, read by anyone who sees the team; empty list = no tool). Returns the list and the configured servers. See [MCP tools](#mcp-tools) |
 | `GET /admin/keys?team=`, `POST /admin/keys`, `DELETE /admin/keys/{id}` | list (no secrets), create `{"team","project","name","rpm","tpm","max_inflight"}` (`project` optional; the `llmf-…` secret is returned once), revoke |
 | `POST /admin/keys/{id}/rotate` | new secret for the same key `{"grace_period":"24h"}` (body optional; at most `720h`): returns `{"id","key","previous_expires_at"}` once. The key keeps its ID, so limits, budgets, allowlists and reports continue; the replaced secret stays valid until the grace period ends (absent or `0s`: revoked at once). Who may: the team's admins, or the member who owns the key. Logged as an `audit` event `key.rotated`, without the secret. On other replicas a replaced secret can outlive its deadline by at most `key_cache_ttl` |
 | `PUT /admin/keys/{id}/rotation` | scheduled rotation `{"every":"720h","grace_period":"24h","target":"vault:secret/llmflow/keys/<team>/<name>#key"}` (`every` between `1h` and `8784h`; `grace_period` above 0 and shorter than `every`; `{"every":"0s"}` clears it). Needs a `key_rotation { vault_prefix = "secret/llmflow/keys", check_interval = "1h" }` block and a `vault` block whose token may `patch` and `create` under the prefix. Every `check_interval`, a due key gets a new secret, written into that KV v2 field (merge patch, so other fields stay) where the client reads it; the old secret stays valid for the grace period. The target must lie under `vault_prefix/<the key's team>/`, so a team admin writes only where the team's secrets live. Replicas rotate a key once (the rotation is conditional on the current secret); if the write fails the rotation is undone, the old secret keeps working and the key is retried at the next check. Audit events `key.rotation_scheduled`, `key.rotated`, `key.rotation_failed` |
@@ -736,7 +742,7 @@ entries, and checkpoints sign a self-describing message
 
 Client routes: `POST /v1/chat/completions`, `/v1/completions`,
 `/v1/embeddings`, `/v1/responses`, `/v1/messages`, `/v1/rerank`, `/v2/rerank`,
-`/v1/audio/transcriptions`, `/tokenize`, `/detokenize`, `GET /v1/models`. `GET /healthz` returns 503 when the budget
+`/v1/audio/transcriptions`, `/tokenize`, `/detokenize`, `GET /v1/models`, and `POST /mcp` with `mcp_server` blocks. `GET /healthz` returns 503 when the budget
 state is stale and fail-closed is on.
 
 ### Fallbacks
@@ -875,6 +881,34 @@ Blocks the guardrails cannot read are refused, an Anthropic `document` among the
 - any other event stops the stream with an `error` event.
 
 A tool call's input is held until its block ends, so that every JSON layer can be decoded and masked (bounded at 1 MiB). It then arrives as one delta.
+
+## MCP tools
+
+`POST /mcp` is an [MCP](https://modelcontextprotocol.io/specification/2026-07-28) server in front of the tool servers of the configuration. It speaks the Streamable HTTP binding of revision **2026-07-28** (per-request `_meta`, mirrored headers, `server/discover`). For older clients it also speaks the initialize handshake of **2025-11-25**, 2025-06-18 and 2025-03-26. A client authenticates with its virtual key, like any other request.
+
+```hcl
+mcp_server "github" {
+  url        = "https://mcp.example.org/github/mcp"
+  token_file = "vault:secret/llmflow/mcp#github"   # bearer sent to the server, from the secret source
+  protocol   = "2026-07-28"                        # or 2025-11-25 / 2025-06-18 / 2025-03-26
+  timeout    = "60s"                               # per call, 1s to 10m
+  max_response_bytes = 8388608                     # per response, 1 KiB to 64 MiB
+}
+```
+
+- **Tools are named `<server>.<tool>`** (server names are `[A-Za-z0-9_-]{1,32}`). A tool whose name is outside `[A-Za-z0-9_.-]{1,128}`, or whose `x-mcp-header` annotations break the specification's constraints, is left out of the list and logged.
+- **Per-team allow-lists, closed by default.** A team with no list sees no tool. An organisation administrator sets the list with `PUT /admin/teams/{team}/tools` `{"tools":["github.*","docs.search"]}`. A pattern is `*`, `<server>.*` or `<server>.<tool>`, and it must name a configured server. Team administrators can read the list but cannot widen it. `tools/list` returns only the allowed tools. A call to any other tool answers `-32602 Unknown tool`, exactly like a tool that does not exist, and the refusal is audited (`tool.denied`).
+- **Every call is audited before it is made.** A `tool.call` entry (kind `tool`) names the key, its organisation, team and project, the tool, and the SHA-256 and size of the canonical arguments; the arguments themselves are never stored. If that entry cannot be written, the call is not made (503). A `tool.result` entry follows with the outcome (`ok`, `tool_error`, `input_required`, `server_error`, `unavailable`, `malformed`) and the duration. `llmflow_tool_calls_total{team,server,status}` counts the calls.
+- **No server outside the configuration is reachable.** Clients name tools, never URLs. The gateway sends requests only to the `url` of an `mcp_server` block and does not follow redirects. It does not use an environment proxy, and it never fetches anything a server returns (icons, resource links). A URL with credentials, a query or a fragment is refused at load time, and a `token_file` needs https (http only to loopback).
+- **Tokens to the tool servers** come from the secret source (`token_file`: a file or an OpenBao/Vault KV v2 field) and are sent as `Authorization: Bearer`. The client's key is never forwarded.
+- Tool calls count against the key's RPM and in-flight limits; they cost no GPU-hours.
+- The binding is enforced. For a modern request, `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` (Base64 sentinel decoded) must match the body; otherwise the answer is 400 `-32020`. An unsupported version gets 400 `-32022` with the supported list. A browser `Origin` gets 403, and GET or DELETE gets 405. The gateway mirrors `x-mcp-header` parameters into `Mcp-Param-*` headers toward modern servers. Arguments are re-encoded from one parse, so duplicate keys cannot be read differently on each side.
+- **Multi round-trip requests** pass through. An `input_required` result goes back to a modern client, and its retry, with `inputResponses` and `requestState`, is forwarded. A legacy client gets an error instead, because it cannot answer.
+- Answers are single JSON objects (no SSE toward clients, so no progress notifications); a server's SSE response stream is read to its final response. A server's tool list is cached for a minute, the teams' allow-lists for 5 seconds (a change on the same replica applies at once).
+
+Parsers and the endpoint are fuzzed: `FuzzParseMessage`, `FuzzHeaderValue` (sentinel round trip, no control character in a header), `FuzzHeaderParams`, `FuzzReadResponse` (JSON and SSE), and `FuzzMCPEndpoint`, which checks that the tool server only ever sees allowed tools.
+
+Not covered: OAuth 2.1 discovery (protected resource metadata, RFC 9728). Clients use their virtual key as a static bearer token, which the specification allows as a custom strategy. Also not covered: resources and prompts, and guardrails on tool arguments and results.
 
 ## Traces
 

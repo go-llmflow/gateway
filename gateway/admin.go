@@ -45,6 +45,8 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	h("DELETE /admin/teams/{name}", s.disableTeam)
 	h("GET /admin/teams/{team}/models", s.getTeamModels)
 	h("PUT /admin/teams/{team}/models", s.setTeamModels)
+	h("GET /admin/teams/{team}/tools", s.getTeamTools)
+	h("PUT /admin/teams/{team}/tools", s.setTeamTools)
 	h("GET /admin/teams/{team}/projects", s.listProjects)
 	h("POST /admin/teams/{team}/projects", s.createProject)
 	h("DELETE /admin/teams/{team}/projects/{name}", s.disableProject)

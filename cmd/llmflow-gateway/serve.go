@@ -125,6 +125,14 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 		}
 		s.GuardrailTokens[g.Name] = tok
 	}
+	s.MCPTokens = map[string]string{}
+	for _, m := range c.MCPServers {
+		var tok string
+		if err := get("mcp_server "+m.Name+" token_file", m.TokenFile, &tok); err != nil {
+			return s, err
+		}
+		s.MCPTokens[m.Name] = tok
+	}
 	s.UpstreamKeys = map[string]string{}
 	for _, f := range c.KeyFiles() {
 		var k string

@@ -176,8 +176,10 @@ type metrics struct {
 	guardDecisions *counterVec // guard, stage, action
 	guardErrors    *counterVec // guard, outcome
 	guardSeconds   *histogram
-	overhead       *histogram
-	upstreamT      *histogram
+	// toolCalls counts MCP tool calls by team, server and outcome.
+	toolCalls *counterVec // team, server, status
+	overhead  *histogram
+	upstreamT *histogram
 }
 
 func newMetrics() *metrics {
@@ -198,6 +200,9 @@ func newMetrics() *metrics {
 			"Guardrail calls that failed or timed out, by guardrail and outcome (blocked: fail-closed; allowed: fail-open).", "guard", "outcome"),
 		guardSeconds: newHistogram("llmflow_guardrail_seconds", "Time spent in guardrails per request and stage (concurrent classifiers count once).",
 			[]float64{0.0001, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5}),
+		toolCalls: newCounterVec("llmflow_tool_calls_total",
+			"MCP tool calls by team, tool server and outcome (ok, tool_error, input_required, server_error, unavailable, malformed, denied, audit_failed, list_failed).",
+			"team", "server", "status"),
 		estimated: newCounterVec("llmflow_usage_estimated_total",
 			"Requests charged with estimated tokens because vLLM's usage never reached the gateway (client gone first).", "team", "model"),
 		overhead: newHistogram("llmflow_overhead_seconds", "Time spent in the gateway itself (request handling before the upstream call plus response handling after it).",
