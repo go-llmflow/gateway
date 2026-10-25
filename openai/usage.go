@@ -95,12 +95,20 @@ func CopySSE(dst io.Writer, flush func(), src io.Reader, dropUsage bool) (Stream
 // .failed) event, and its text in response.output_text.delta events.
 func CopySSEFor(ep Endpoint, dst io.Writer, flush func(), src io.Reader, dropUsage bool) (StreamResult, error) {
 	inspectEvent, countDeltas := inspectEvent, countDeltas
-	if ep == Responses {
+	switch ep {
+	case Responses:
 		inspectEvent = func(ev []byte) (Usage, bool, bool) {
 			u, ok := inspectResponsesEvent(ev)
 			return u, ok, false
 		}
 		countDeltas = func(ev []byte) int64 { return int64(bytes.Count(ev, responsesDelta)) }
+	case Messages:
+		t := &messagesUsageTracker{}
+		inspectEvent = func(ev []byte) (Usage, bool, bool) {
+			u, ok := t.inspect(ev)
+			return u, ok, false
+		}
+		countDeltas = func(ev []byte) int64 { return int64(bytes.Count(ev, messagesDelta)) }
 	}
 	br := bufio.NewReaderSize(src, 64<<10)
 	var (

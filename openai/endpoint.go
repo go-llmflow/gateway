@@ -30,6 +30,10 @@ const (
 	Embeddings
 	// Responses is /v1/responses (OpenAI Responses API).
 	Responses
+	// Messages is /v1/messages (Anthropic Messages API, served by vLLM
+	// itself: vllm/entrypoints/anthropic, v0.32.0, converts it to a chat
+	// completion with the same raw request, so X-Vllm-Priority applies).
+	Messages
 )
 
 // ErrStateful refuses Responses features that keep state in vLLM.
@@ -48,7 +52,11 @@ var statefulFields = []string{"previous_response_id", "background", "conversatio
 
 // RewriteFor is Rewrite for one endpoint.
 func RewriteFor(ep Endpoint, body []byte, resolve func(model string) (string, error), iso Isolation) ([]byte, Request, error) {
-	if ep != Responses {
+	switch ep {
+	case Responses:
+	case Messages:
+		return rewriteMessages(body, resolve, iso)
+	default:
 		return Rewrite(body, resolve, iso)
 	}
 	var req Request
@@ -150,7 +158,11 @@ func (r responsesUsage) usage() Usage {
 
 // ParseUsageFor reads the usage of a non-streamed answer of ep.
 func ParseUsageFor(ep Endpoint, body []byte) (Usage, bool) {
-	if ep != Responses {
+	switch ep {
+	case Responses:
+	case Messages:
+		return parseMessagesUsage(body)
+	default:
 		return ParseUsage(body)
 	}
 	var env struct {

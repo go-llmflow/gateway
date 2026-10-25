@@ -138,7 +138,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		if len(guards) > 0 {
 			rq = &guardReq{s: s, key: key, scope: scope, rid: requestID(), guards: guards}
 			defer rq.finish()
-			if ep == openai.Responses && req.Stream && rq.hasStage("post") {
+			if (ep == openai.Responses || ep == openai.Messages) && req.Stream && rq.hasStage("post") {
 				s.limiter.release(key.ID, 0)
 				apiError(w, http.StatusBadRequest, "invalid_request_error", errStreamGuarded.Error())
 				return

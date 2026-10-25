@@ -401,10 +401,12 @@ func wellTyped(k string, v json.RawMessage) bool {
 		var n float64
 		return json.Unmarshal(v, &n) == nil
 	case "stop_reason":
-		// vLLM's stop_reason is a token id or the stop string matched; a
-		// string is text, and goes.
+		// vLLM's stop_reason is a token id or the stop string matched,
+		// Anthropic's a name (end_turn, tool_use…): a number or a short
+		// name passes, free text goes.
 		var n float64
-		return isNull(v) || json.Unmarshal(v, &n) == nil
+		var s string
+		return isNull(v) || json.Unmarshal(v, &n) == nil || json.Unmarshal(v, &s) == nil && metaRE.MatchString(s)
 	case "usage":
 		var u any
 		return json.Unmarshal(v, &u) == nil && numericTree(u, 0)
