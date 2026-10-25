@@ -67,6 +67,7 @@ type fileHCL struct {
 	Logging              []loggingHCL   `hcl:"logging,block"`
 	Guardrails           []guardrailHCL `hcl:"guardrail,block"`
 	Tracing              *tracingHCL    `hcl:"tracing,block"`
+	MCPServers           []mcpServerHCL `hcl:"mcp_server,block"`
 }
 
 type loggingHCL struct {
@@ -100,7 +101,7 @@ type auditHCL struct {
 }
 
 // AuditKinds are the kinds of audit entries (retention is set per kind).
-var AuditKinds = []string{"admin", "auth", "scim", "system", "guardrail"}
+var AuditKinds = []string{"admin", "auth", "scim", "system", "guardrail", "tool"}
 
 type exportHCL struct {
 	Name           string    `hcl:"name,label"`
@@ -1160,6 +1161,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	}
 	c.Guardrails = v.guardrails(raw.Guardrails, orgs, teams, modelClass)
 	c.Tracing = v.tracing(raw.Tracing)
+	c.MCPServers = v.mcpServers(raw.MCPServers)
 	// Every *_file attribute is a secret reference: a file, or a field of
 	// an OpenBao/Vault KV v2 secret (package secret).
 	for _, ref := range c.SecretRefs() {
@@ -1206,6 +1208,9 @@ func (c *Config) SecretRefs() []string {
 	}
 	if c.Tracing != nil {
 		add(c.Tracing.TokenFile)
+	}
+	for _, m := range c.MCPServers {
+		add(m.TokenFile)
 	}
 	out = append(out, c.KeyFiles()...)
 	return out

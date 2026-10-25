@@ -22,7 +22,7 @@ type AuditEntry struct {
 	V         int
 	Seq       int64
 	Time      time.Time // microsecond precision
-	Kind      string    // admin, auth, scim, system
+	Kind      string    // admin, auth, scim, system, guardrail, tool
 	Actor     string
 	Roles     string // JSON list of the actor's role bindings
 	Action    string

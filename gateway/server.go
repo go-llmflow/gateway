@@ -56,6 +56,8 @@ type Secrets struct {
 	GuardrailTokens map[string]string
 	// TracingToken is the OTLP collector's bearer token (empty: none).
 	TracingToken string
+	// MCPTokens are the bearer tokens of the tool servers, by name.
+	MCPTokens map[string]string
 }
 
 // Server is the gateway.
@@ -121,6 +123,11 @@ type Server struct {
 	// adminFuncs are the admin API handlers by route pattern, audited, for
 	// the admin UI.
 	adminFuncs map[string]adminHandler
+	// mcpServers are the tool servers by name, in configuration order
+	// (mcpOrder); toolLists caches the teams' tool allow-lists.
+	mcpServers map[string]*mcpServer
+	mcpOrder   []string
+	toolLists  *toolListCache
 
 	cancel context.CancelFunc
 	bg     sync.WaitGroup
@@ -266,6 +273,7 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 	if err := s.buildGuardrails(); err != nil {
 		return nil, err
 	}
+	s.buildMCP()
 	tr, err := newTracing(cfg.Tracing, secrets.TracingToken)
 	if err != nil {
 		return nil, err
@@ -395,6 +403,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /healthz", s.withClientAddr(s.cfg.Routes.Healthz, http.HandlerFunc(s.healthz)))
 	// /metrics: from an allowed network, or anywhere with the metrics token.
 	mux.Handle("GET /metrics", s.withClientAddr(nil, http.HandlerFunc(s.metrics)))
+	// MCP: one endpoint for every method (GET and DELETE answer 405).
+	if len(s.mcpServers) > 0 {
+		mux.Handle("/mcp", inf(s.mcpHandler))
+	}
 	s.adminRoutes(mux)
 	if s.scimBackend != nil {
 		mux.Handle("/scim/v2/", s.scimHandler())
@@ -545,6 +557,7 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 	s.met.auditFailures.write(w)
 	s.met.guardDecisions.write(w)
 	s.met.guardErrors.write(w)
+	s.met.toolCalls.write(w)
 	s.met.guardSeconds.write(w)
 	if s.guardAudit != nil {
 		writeHeader(w, "llmflow_guardrail_audit_dropped_total", "Guardrail decisions not audited because the audit queue was full.", "counter")

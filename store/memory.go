@@ -20,6 +20,7 @@ type Memory struct {
 	records    []Record
 	u          memUsers
 	teamModels map[string][]string
+	teamTools  map[string][]string
 	allow      map[AllowKey][]string
 	scimDocs   memSCIM
 	audit      memAudit

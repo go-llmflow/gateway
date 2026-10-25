@@ -79,6 +79,11 @@ jobs:
           - { target: FuzzTranscriptionRewrite, pkg: ./openai }
           - { target: FuzzEscapedFindings, pkg: ./guard }
           - { target: FuzzUIForms, pkg: ./gateway }
+          - { target: FuzzMCPEndpoint, pkg: ./gateway }
+          - { target: FuzzParseMessage, pkg: ./mcp }
+          - { target: FuzzHeaderValue, pkg: ./mcp }
+          - { target: FuzzHeaderParams, pkg: ./mcp }
+          - { target: FuzzReadResponse, pkg: ./mcp }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

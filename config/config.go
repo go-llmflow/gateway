@@ -99,6 +99,8 @@ type Config struct {
 	Guardrails []Guardrail
 	// Tracing, when set, exports OpenTelemetry traces over OTLP.
 	Tracing *Tracing
+	// MCPServers are the tool servers exposed at /mcp.
+	MCPServers []MCPServer
 }
 
 // Tracing configures OpenTelemetry traces (OTLP/HTTP or OTLP/gRPC).
