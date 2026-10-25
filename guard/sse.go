@@ -390,13 +390,14 @@ var metaRE = regexp.MustCompile(`^[A-Za-z0-9._:/@+-]{0,256}$`)
 // is dropped: it could be text in a place the guards do not read.
 func wellTyped(k string, v json.RawMessage) bool {
 	switch k {
-	case "id", "object", "model", "system_fingerprint", "service_tier", "finish_reason", "role":
+	case "id", "object", "model", "system_fingerprint", "service_tier", "finish_reason", "role",
+		"status", "type", "call_id", "name":
 		if isNull(v) {
 			return true
 		}
 		var s string
 		return json.Unmarshal(v, &s) == nil && metaRE.MatchString(s)
-	case "created", "index":
+	case "created", "created_at", "index":
 		var n float64
 		return json.Unmarshal(v, &n) == nil
 	case "stop_reason":
@@ -414,6 +415,14 @@ func wellTyped(k string, v json.RawMessage) bool {
 func numericTree(v any, depth int) bool {
 	switch x := v.(type) {
 	case nil, float64:
+		return true
+	case []any:
+		// Responses usage has per-turn lists of counts.
+		for _, e := range x {
+			if _, ok := e.(float64); !ok {
+				return false
+			}
+		}
 		return true
 	case map[string]any:
 		if depth > 2 {
