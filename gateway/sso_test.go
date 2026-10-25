@@ -24,7 +24,7 @@ type ssoEnv struct {
 	clock time.Time
 }
 
-func newSSOEnv(t *testing.T, clientSecret string) *ssoEnv {
+func newSSOEnv(t testing.TB, clientSecret string) *ssoEnv {
 	t.Helper()
 	idp := newFakeIdP(t)
 	idp.secret = clientSecret

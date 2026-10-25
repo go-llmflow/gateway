@@ -515,6 +515,39 @@ sso {
 - Sessions live in the memory of the replica that created them: behind
   several replicas, use sticky sessions (open: sessions in PostgreSQL).
 
+### Admin web UI
+
+With an `sso` block, `/ui/` serves a web console for administrators
+(`/admin/login?next=ui` signs in and lands there). It is server-rendered
+HTML with **no JavaScript** at all, under a strict policy on every `/ui/`
+response:
+
+```
+Content-Security-Policy: default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'
+```
+
+plus `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and
+`Cache-Control: no-store`. The one stylesheet is served by the gateway; no
+third-party asset is loaded.
+
+| page | |
+|---|---|
+| Keys | list per team; create (the secret is shown **once**, on a page not cached), rotate with a grace period, revoke |
+| Budgets | budgets with spent and limit; set and delete |
+| Spend | GPU-hours, requests and tokens over a period, grouped by org, team, project, key, model, pool or tag |
+| Fair share | live state per pool: reservation, in flight, borrowing, LF and rank |
+| Audit | entries page by page, and a button that verifies the chain (status of the checkpoints and the anchor) |
+
+The UI holds no privilege of its own: every page calls the admin API's
+handlers in-process with the signed-in person, so it sees and changes exactly
+what the API lets their roles (an organisation administrator sees their
+organisation only), and every change is audited as through the API. Only an
+SSO session is accepted (no bearer token, no session: redirected to the
+login); without an `sso` block `/ui/` answers 404. Every form carries the
+session's CSRF token, forms must be `application/x-www-form-urlencoded`, at
+most 16 KiB, and the `Origin` checks of the API apply. The form handlers are
+fuzzed (`FuzzUIForms`: no 5xx, the policy on every answer, no script tag).
+
 **SAML federations (RENATER, eduGAIN)** go through
 [`go-authn/bridge`](https://github.com/go-authn/bridge) (`authn-bridge`), an
 OpenID provider in front of a SAML federation, rather than SATOSA. Register
@@ -698,6 +731,8 @@ entries, and checkpoints sign a self-describing message
 | `GET /admin/spend?from=&to=&group_by=&format=` | spend report: requests, prompt / completion / cached tokens, GPU-hours and estimated requests, grouped by any of `org`, `team`, `project`, `key`, `model`, `pool`, `tag` (default `org,team`), as `json`, `csv` or `parsable2` (pipe-delimited like `sreport --parsable2`). Filtered to what the caller may see: an org admin sees their organisation, a member their own keys. A request with several tags counts once under each tag |
 | `GET /admin/usage.csv?from=&to=` | the v0.1 export: `group_by=team,pool`, CSV |
 | `GET /admin/fairshare` | reservations, in-flight, borrowing, usage, LF and rank per pool and organisation |
+| `GET /admin/audit?from=&limit=` | audit entries with sequence ≥ `from` (default 1), at most `limit` (default 50, ≤ 200), as a JSON list; proxy admins and viewers only |
+| `POST /admin/audit/verify` | recomputes the chain and checks the signed checkpoints with the gateway's own key, and the newest anchored checkpoint when an anchor export is configured: `{"ok","first","last","entries","checkpoints","unsigned","anchored","anchor_seq","signed","problems"}`. One verification at a time (429 otherwise); proxy admins and viewers only. For an independent check use `llmflow-gateway audit verify` with a public key kept elsewhere |
 
 Client routes: `POST /v1/chat/completions`, `/v1/completions`,
 `/v1/embeddings`, `/v1/responses`, `/v1/messages`, `/v1/rerank`, `/v2/rerank`,

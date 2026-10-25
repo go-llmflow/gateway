@@ -26,7 +26,7 @@ const (
 )
 
 type env struct {
-	t   *testing.T
+	t   testing.TB
 	srv *Server
 	gw  *httptest.Server
 	st  *store.Memory
