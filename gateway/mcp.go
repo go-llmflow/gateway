@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/mcp"
@@ -499,15 +500,15 @@ func (s *Server) mcpCallTool(ctx context.Context, q *mcpReq, key store.Key, r *h
 	if err != nil {
 		var se *mcp.ErrServer
 		if errors.As(err, &se) {
-			outcome["status"], outcome["error"] = "server_error", se.E.Message
+			outcome["status"], outcome["error"] = "server_error", clip(se.E.Message, 256)
 			code := mcp.CodeInternal
 			if se.E.Code == mcp.CodeInvalidParams {
 				code = mcp.CodeInvalidParams
 			}
-			q.fail(http.StatusOK, &mcp.Error{Code: code, Message: "tool server: " + se.E.Message})
+			q.fail(http.StatusOK, &mcp.Error{Code: code, Message: "tool server: " + clip(se.E.Message, 4096)})
 			return
 		}
-		outcome["status"], outcome["error"] = "unavailable", err.Error()
+		outcome["status"], outcome["error"] = "unavailable", clip(err.Error(), 256)
 		s.log.Warn("mcp: tool call failed", "tool", name, "err", err)
 		q.fail(http.StatusOK, mcp.Errorf(mcp.CodeInternal, "tool server unavailable"))
 		return
@@ -541,6 +542,17 @@ func (s *Server) mcpCallTool(ctx context.Context, q *mcpReq, key store.Key, r *h
 		return
 	}
 	q.result(obj)
+}
+
+// clip bounds a message from a tool server, on a rune boundary.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
 }
 
 // appendToolAudit writes a tool entry and returns the error (the caller
