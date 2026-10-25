@@ -691,7 +691,7 @@ entries, and checkpoints sign a self-describing message
 | `GET /admin/fairshare` | reservations, in-flight, borrowing, usage, LF and rank per pool and organisation |
 
 Client routes: `POST /v1/chat/completions`, `/v1/completions`,
-`/v1/embeddings`, `/v1/responses`, `GET /v1/models`. `GET /healthz` returns 503 when the budget
+`/v1/embeddings`, `/v1/responses`, `/v1/messages`, `GET /v1/models`. `GET /healthz` returns 503 when the budget
 state is stale and fail-closed is on.
 
 ### Responses API
@@ -722,7 +722,40 @@ Clients send the whole conversation in `input`, as they do with chat completions
 
 Input items of any other type are refused, since the guardrails cannot read them. In the answer, output message text and function-call arguments are masked. Reasoning items, annotations, log probabilities and every unknown field are removed.
 
-A streamed Responses request under post-call guardrails is refused (400, ask with `"stream": false`). Its events repeat the text in several shapes (`.delta`, `.done`, the final response) that the stream filter does not rewrite yet. Without post-call guardrails, streams pass through unchanged.
+A streamed Responses request under post-call guardrails is refused (400, ask with `"stream": false`).
+
+### Anthropic Messages API
+
+`POST /v1/messages` is proxied to **vLLM's own Anthropic endpoint**, with no translation in the gateway. vLLM v0.32.0 serves `/v1/messages` natively (`vllm/entrypoints/anthropic`): it converts each request to a chat completion with the same raw request, so the gateway's `X-Vllm-Priority` and `cache_salt` apply.
+
+Coding agents that speak the Messages API can therefore use local models. Point them at the gateway, with a virtual key as the bearer token.
+
+**Accounting.** It follows vLLM's `AnthropicUsage`. There `input_tokens` excludes the cached prompt, so the gateway charges `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` as prompt, of which `cache_read_input_tokens` are cached.
+
+In a stream, the input counts come from `message_start` and the output count from the final `message_delta`.
+
+`/v1/messages/count_tokens` is not routed.
+
+Errors carry both shapes: OpenAI's `{"error": {...}}` and Anthropic's top-level `"type": "error"`.
+
+**Guardrails.** The request is mapped in full:
+
+- `system` (a string or text blocks);
+- text blocks and `thinking` blocks in the history;
+- `tool_result` content;
+- every string inside `tool_use` inputs.
+
+Blocks the guardrails cannot read are refused, an Anthropic `document` among them.
+
+**Streams are guarded** with an Anthropic event filter that works like the chat one:
+
+- text blocks (`text_delta`) and tool calls (`input_json_delta`, masked in the JSON text) go through the hold-back and the classifier gate;
+- `thinking` blocks are removed, and the remaining blocks are renumbered from 0;
+- `message_start` and `message_delta` keep only their known fields;
+- an upstream `error` event keeps its type, but not its message;
+- any other event stops the stream with an `error` event.
+
+Masking inside tool JSON reads the JSON text as is, so a value written with `\u` escapes is not unescaped first. Its events repeat the text in several shapes (`.delta`, `.done`, the final response) that the stream filter does not rewrite yet. Without post-call guardrails, streams pass through unchanged.
 
 ## Metrics
 

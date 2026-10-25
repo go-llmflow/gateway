@@ -101,6 +101,10 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 		f.serveResponses(w, body, reply)
 		return
 	}
+	if r.URL.Path == "/v1/messages" {
+		f.serveMessages(w, body, reply)
+		return
+	}
 	if stream, _ := body["stream"].(bool); stream {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -130,6 +134,33 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	cb, _ := json.Marshal(content)
 	fmt.Fprintf(w, `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":%s}}],"usage":%s}`, cb, usage)
+}
+
+// serveMessages answers like vLLM's Anthropic Messages API: input_tokens
+// excludes the cached prompt (60 + 40 cached = 100).
+func (f *fakeVLLM) serveMessages(w http.ResponseWriter, body map[string]any, reply []string) {
+	if reply == nil {
+		reply = []string{"hi"}
+	}
+	text, _ := json.Marshal(strings.Join(reply, ""))
+	if stream, _ := body["stream"].(bool); stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":60,\"cache_read_input_tokens\":40,\"output_tokens\":0}}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		for _, d := range reply {
+			b, _ := json.Marshal(d)
+			fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":%s}}\n\n", b)
+			fl.Flush()
+		}
+		fmt.Fprint(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":60,\"cache_read_input_tokens\":40,\"output_tokens\":20}}\n\n")
+		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant","model":"meta/llama","stop_reason":"end_turn","stop_sequence":null,`+
+		`"content":[{"type":"thinking","thinking":"pondering"},{"type":"text","text":%s}],"usage":{"input_tokens":60,"cache_read_input_tokens":40,"output_tokens":20}}`, text)
 }
 
 // serveResponses answers like vLLM's Responses API: a response object with

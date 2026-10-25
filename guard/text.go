@@ -70,15 +70,21 @@ func MapRequest(body []byte, f func(role, text string) string) ([]byte, []Messag
 			top["messages"] = b
 		}
 	}
-	if raw, ok := top["instructions"]; ok && !isNull(raw) {
-		// The Responses API's system prompt.
+	// The system prompt outside messages: the Responses API's
+	// instructions, the Anthropic Messages API's system (a string or text
+	// blocks).
+	for _, key := range []string{"instructions", "system"} {
+		raw, ok := top[key]
+		if !ok || isNull(raw) {
+			continue
+		}
 		nv, out, ch, err := mapContent(raw, "system", f)
 		if err != nil {
 			return nil, nil, err
 		}
 		msgs = append(msgs, out...)
 		if ch {
-			top["instructions"], changed = nv, true
+			top[key], changed = nv, true
 		}
 	}
 	for _, key := range []string{"prompt", "input"} {
@@ -135,39 +141,73 @@ func mapContent(raw json.RawMessage, role string, f func(string, string) string)
 	var out []Message
 	changed := false
 	for _, p := range parts {
-		var typ, text string
+		if p == nil {
+			return nil, nil, false, errors.New("guard: a content part is not an object")
+		}
+		var typ string
 		_ = json.Unmarshal(p["type"], &typ)
+		field, partRole, nested := "", role, false
 		switch typ {
 		case "text", "input_text", "output_text":
+			field = "text"
 		case "refusal":
 			// A refusal is text too (Responses output, chat parts).
-			if _, ok := p["refusal"]; ok {
-				var r string
-				if err := json.Unmarshal(p["refusal"], &r); err != nil {
-					return nil, nil, false, errors.New("guard: a refusal part has no refusal string")
+			field = "refusal"
+		case "thinking":
+			// Anthropic thinking blocks sent back in the history.
+			field = "thinking"
+		case "tool_result":
+			// Anthropic: a string or a list of blocks.
+			field, partRole, nested = "content", "tool", true
+		case "tool_use":
+			// Anthropic: the call's input is a JSON object; every string
+			// in it is text.
+			if in, ok := p["input"]; ok && !isNull(in) {
+				nv, msgs, ch, err := mapJSONStrings(in, "tool_call", f, 0)
+				if err != nil {
+					return nil, nil, false, err
 				}
-				nr := f(role, r)
-				out = append(out, Message{role, nr})
-				if nr != r {
-					b, _ := json.Marshal(nr)
-					p["refusal"], changed = b, true
+				out = append(out, msgs...)
+				if ch {
+					p["input"], changed = nv, true
 				}
 			}
+			continue
+		case "image", "image_url", "input_image", "input_audio", "audio_url", "video_url", "file", "input_file", "redacted_thinking":
+			// Media and opaque blobs: no text to read.
 			continue
 		default:
+			// A part the guards do not know may carry text (an Anthropic
+			// "document" with a text source does): refused, not passed.
+			return nil, nil, false, errors.New("guard: content parts of type " + strconvQuote(typ) + " cannot be inspected")
+		}
+		raw, ok := p[field]
+		if !ok || isNull(raw) {
 			continue
 		}
-		if err := json.Unmarshal(p["text"], &text); err != nil {
-			return nil, nil, false, errors.New("guard: a text part has no text string")
-		}
-		nt := f(role, text)
-		out = append(out, Message{role, nt})
-		if nt != text {
-			b, err := json.Marshal(nt)
-			if err != nil {
+		var nv json.RawMessage
+		var msgs []Message
+		var ch bool
+		if nested {
+			var err error
+			if nv, msgs, ch, err = mapContent(raw, partRole, f); err != nil {
 				return nil, nil, false, err
 			}
-			p["text"], changed = b, true
+		} else {
+			var text string
+			if err := json.Unmarshal(raw, &text); err != nil {
+				return nil, nil, false, errors.New("guard: a " + typ + " part has no " + field + " string")
+			}
+			nt := f(partRole, text)
+			msgs = []Message{{partRole, nt}}
+			if nt != text {
+				nv, _ = json.Marshal(nt)
+				ch = true
+			}
+		}
+		out = append(out, msgs...)
+		if ch {
+			p[field], changed = nv, true
 		}
 	}
 	if !changed {
@@ -175,6 +215,79 @@ func mapContent(raw json.RawMessage, role string, f func(string, string) string)
 	}
 	b, err := json.Marshal(parts)
 	return b, out, true, err
+}
+
+// maxJSONDepth bounds the nesting mapJSONStrings walks.
+const maxJSONDepth = 32
+
+// mapJSONStrings calls f on every string value of a JSON value (an
+// Anthropic tool_use input), keys excepted.
+func mapJSONStrings(raw json.RawMessage, role string, f func(string, string) string, depth int) (json.RawMessage, []Message, bool, error) {
+	if depth > maxJSONDepth {
+		return nil, nil, false, errors.New("guard: a tool input is nested too deeply")
+	}
+	b := bytes.TrimSpace(raw)
+	if len(b) == 0 {
+		return raw, nil, false, nil
+	}
+	switch b[0] {
+	case '"':
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return nil, nil, false, err
+		}
+		ns := f(role, s)
+		if ns == s {
+			return raw, []Message{{role, s}}, false, nil
+		}
+		nb, err := json.Marshal(ns)
+		return nb, []Message{{role, ns}}, true, err
+	case '{':
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(b, &obj); err != nil {
+			return nil, nil, false, err
+		}
+		var out []Message
+		changed := false
+		for k, v := range obj {
+			nv, msgs, ch, err := mapJSONStrings(v, role, f, depth+1)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			out = append(out, msgs...)
+			if ch {
+				obj[k], changed = nv, true
+			}
+		}
+		if !changed {
+			return raw, out, false, nil
+		}
+		nb, err := json.Marshal(obj)
+		return nb, out, true, err
+	case '[':
+		var list []json.RawMessage
+		if err := json.Unmarshal(b, &list); err != nil {
+			return nil, nil, false, err
+		}
+		var out []Message
+		changed := false
+		for i, v := range list {
+			nv, msgs, ch, err := mapJSONStrings(v, role, f, depth+1)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			out = append(out, msgs...)
+			if ch {
+				list[i], changed = nv, true
+			}
+		}
+		if !changed {
+			return raw, out, false, nil
+		}
+		nb, err := json.Marshal(list)
+		return nb, out, true, err
+	}
+	return raw, nil, false, nil
 }
 
 // isItemList reports whether raw is a list whose first element is an
@@ -341,6 +454,11 @@ func MapResponse(body []byte, strip bool, f func(text string) string) ([]byte, [
 		if _, chat := top["choices"]; !chat {
 			return mapResponsesOutput(top, strip, f)
 		}
+	}
+	var typ string
+	_ = json.Unmarshal(top["type"], &typ)
+	if _, chat := top["choices"]; !chat && typ == "message" {
+		return mapMessagesOutput(top, strip, f)
 	}
 	changed := false
 	if strip {
@@ -538,6 +656,77 @@ func mapResponsesOutput(top map[string]json.RawMessage, strip bool, f func(strin
 	top["output"] = ob
 	b, err := json.Marshal(top)
 	return b, texts, err
+}
+
+// The fields of a guarded Anthropic message and of its blocks.
+var (
+	messagesFields = []string{"id", "type", "role", "model", "content", "stop_reason", "usage"}
+	textBlock      = []string{"type", "text"}
+	toolUseBlock   = []string{"type", "id", "name", "input"}
+)
+
+// mapMessagesOutput is MapResponse for an Anthropic Messages answer: text
+// blocks and every string of tool_use inputs go through f. With strip,
+// thinking and any other block are removed, and only known fields stay.
+func mapMessagesOutput(top map[string]json.RawMessage, strip bool, f func(string) string) ([]byte, []string, error) {
+	if strip {
+		keepOnly(top, messagesFields)
+	}
+	var blocks []map[string]json.RawMessage
+	if raw := top["content"]; raw != nil && !isNull(raw) {
+		if err := json.Unmarshal(raw, &blocks); err != nil {
+			return nil, nil, errors.New("guard: content is not a list of blocks")
+		}
+	}
+	g := func(_, s string) string { return f(s) }
+	var texts []string
+	kept := blocks[:0]
+	for _, b := range blocks {
+		if b == nil {
+			return nil, nil, errors.New("guard: a content block is not an object")
+		}
+		var typ string
+		_ = json.Unmarshal(b["type"], &typ)
+		switch typ {
+		case "text":
+			if strip {
+				keepOnly(b, textBlock)
+			}
+			var s string
+			if err := json.Unmarshal(b["text"], &s); err != nil {
+				return nil, nil, errors.New("guard: a text block has no text string")
+			}
+			ns := f(s)
+			texts = append(texts, ns)
+			b["text"], _ = json.Marshal(ns)
+		case "tool_use":
+			if strip {
+				keepOnly(b, toolUseBlock)
+			}
+			if in, ok := b["input"]; ok && !isNull(in) {
+				nv, msgs, _, err := mapJSONStrings(in, "tool_call", g, 0)
+				if err != nil {
+					return nil, nil, err
+				}
+				for _, m := range msgs {
+					texts = append(texts, m.Content)
+				}
+				b["input"] = nv
+			}
+		default:
+			if strip {
+				continue
+			}
+		}
+		kept = append(kept, b)
+	}
+	cb, err := json.Marshal(kept)
+	if err != nil {
+		return nil, nil, err
+	}
+	top["content"] = cb
+	out, err := json.Marshal(top)
+	return out, texts, err
 }
 
 // textPartsOnly keeps the parts of an answer the guards read (text,

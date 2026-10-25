@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/go-llmflow/gateway/config"
-	"github.com/go-llmflow/gateway/guard"
 	"github.com/go-llmflow/gateway/openai"
 	"github.com/go-llmflow/gateway/store"
 )
@@ -285,9 +284,9 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			}
 			// Post-call guardrails sit between vLLM and the client (and the
 			// content log, which keeps what the client got).
-			var sf *guard.StreamFilter
+			var sf streamGuard
 			if rq != nil && resp.StatusCode < 300 {
-				if sf = s.streamFilter(r.Context(), rq, dst); sf != nil {
+				if sf = s.streamGuardFor(ep, r.Context(), rq, dst); sf != nil {
 					dst = sf
 				}
 			}

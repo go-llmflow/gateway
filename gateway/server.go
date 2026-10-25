@@ -359,6 +359,11 @@ func (s *Server) Handler() http.Handler {
 	// Stateless: GET /v1/responses/{id} and cancel are not proxied (stored
 	// responses would be shared by every tenant; see openai.ErrStateful).
 	mux.Handle("POST /v1/responses", inf(s.proxyFor(openai.Responses, "/v1/responses")))
+	// Anthropic Messages, served by vLLM itself (no translation here).
+	// /v1/messages/count_tokens is not routed: vLLM computes it outside the
+	// generation path, so it would escape rate limits for nothing a client
+	// needs from a local model.
+	mux.Handle("POST /v1/messages", inf(s.proxyFor(openai.Messages, "/v1/messages")))
 	mux.Handle("GET /v1/models", inf(s.models))
 	mux.Handle("GET /healthz", s.withClientAddr(s.cfg.Routes.Healthz, http.HandlerFunc(s.healthz)))
 	// /metrics: from an allowed network, or anywhere with the metrics token.
@@ -384,11 +389,15 @@ func (s *Server) HTTPServer() *http.Server {
 	}
 }
 
-// apiError writes an OpenAI-style error body.
+// apiError writes an error body that both OpenAI and Anthropic clients
+// read: OpenAI's {"error": {message, type, code}}, plus Anthropic's
+// top-level "type": "error" (its error object has the same type and
+// message fields).
 func apiError(w http.ResponseWriter, status int, typ, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{
+		"type":  "error",
 		"error": map[string]any{"message": msg, "type": typ, "code": status},
 	})
 }
