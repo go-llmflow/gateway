@@ -67,6 +67,10 @@ jobs:
           - { target: FuzzRequiredFields, pkg: ./gateway }
           - { target: FuzzParseCheckpoint, pkg: ./audit }
           - { target: FuzzValidKey, pkg: ./export }
+          - { target: FuzzHoldback, pkg: ./guard }
+          - { target: FuzzStreamFilter, pkg: ./guard }
+          - { target: FuzzMapRequest, pkg: ./guard }
+          - { target: FuzzParseGuardAnswers, pkg: ./guard }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
