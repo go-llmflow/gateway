@@ -347,6 +347,9 @@ type Limits struct {
 	UpstreamHeaderTimeout time.Duration
 	MaxRequestDuration    time.Duration
 	MaxResponseBytes      int64
+	// MaxAudioBytes bounds an audio upload (/v1/audio/transcriptions); the
+	// default is vLLM's own (VLLM_MAX_AUDIO_CLIP_FILESIZE_MB, 25 MB).
+	MaxAudioBytes int64
 }
 
 // FairShare tunes the fair-share scheduler.
@@ -385,6 +388,9 @@ type Cost struct {
 	InputPerMTok  float64
 	OutputPerMTok float64
 	CachedPerMTok float64
+	// AudioPerHour is the price of transcription, in GPU-hours per hour of
+	// audio (vLLM reports a transcription's usage as a duration).
+	AudioPerHour float64
 }
 
 // Upstream is one vLLM server of a model group.
@@ -418,6 +424,7 @@ const (
 	DefaultUpstreamHeaderTimeout = 10 * time.Minute
 	DefaultMaxRequestDuration    = 30 * time.Minute
 	DefaultMaxResponseBytes      = 64 << 20
+	DefaultMaxAudioBytes         = 25 << 20
 	DefaultHalfLife              = 7 * 24 * time.Hour
 	DefaultHealthInterval        = 5 * time.Second
 	DefaultHealthTimeout         = 2 * time.Second

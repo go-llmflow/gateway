@@ -41,6 +41,11 @@ const (
 	// generation, nothing to charge.
 	Tokenize
 	Detokenize
+	// Transcriptions is /v1/audio/transcriptions (Whisper-style ASR models).
+	// Its body is multipart/form-data; the gateway turns the form fields
+	// into a JSON view for the shared pipeline (see package gateway) and
+	// rebuilds the form for vLLM.
+	Transcriptions
 )
 
 // Metered reports whether the endpoint's work is charged: when usage is
@@ -77,6 +82,8 @@ func RewriteFor(ep Endpoint, body []byte, resolve func(model string) (string, er
 	case Tokenize, Detokenize:
 		// No cache_salt field there (vllm/entrypoints/serve/tokenize).
 		return rewritePlain(body, resolve, "")
+	case Transcriptions:
+		return rewriteTranscription(body, resolve)
 	default:
 		return Rewrite(body, resolve, iso)
 	}
@@ -185,6 +192,8 @@ func ParseUsageFor(ep Endpoint, body []byte) (Usage, bool) {
 		return parseMessagesUsage(body)
 	case Rerank:
 		return parseRerankUsage(body)
+	case Transcriptions:
+		return parseTranscriptionUsage(body)
 	case Tokenize, Detokenize:
 		return Usage{}, true
 	default:

@@ -692,7 +692,7 @@ entries, and checkpoints sign a self-describing message
 
 Client routes: `POST /v1/chat/completions`, `/v1/completions`,
 `/v1/embeddings`, `/v1/responses`, `/v1/messages`, `/v1/rerank`, `/v2/rerank`,
-`/tokenize`, `/detokenize`, `GET /v1/models`. `GET /healthz` returns 503 when the budget
+`/v1/audio/transcriptions`, `/tokenize`, `/detokenize`, `GET /v1/models`. `GET /healthz` returns 503 when the budget
 state is stale and fail-closed is on.
 
 ### Responses API
@@ -739,6 +739,38 @@ Four more routes are proxied to vLLM's own endpoints.
 - They are **not guarded**: masking the text would make the token count wrong, and only token ids come back.
 
 A client `chat_template` is stripped from every request. vLLM already refuses one unless the server trusts request templates; the gateway removes it first.
+
+### Audio transcription
+
+`POST /v1/audio/transcriptions` serves Whisper-style ASR models on vLLM. The request is a `multipart/form-data` form (RFC 7578) with these fields:
+
+- `file`;
+- `model`, `language`, `prompt`, `response_format`, `temperature`;
+- `stream`, `stream_include_usage`;
+- `timestamp_granularities[]`, `max_completion_tokens`.
+
+**How the form is handled.** The gateway reads it once, within bounds:
+
+- the file is limited by `limits { max_audio_bytes }`, 25 MiB by default, which is vLLM's own default;
+- at most 32 parts;
+- each other field at most 8 KiB;
+- one file per request.
+
+Before forwarding, the gateway rebuilds the form for vLLM:
+
+- **only** the fields above are kept; `priority`, `request_id` and anything else are dropped;
+- the filename is reduced to its base name in a safe alphabet;
+- the part's media type is checked.
+
+The form's fields, without the audio, go through the shared pipeline as a JSON view: model resolution, policies, guardrails on `prompt`, and the content log. The content log therefore never holds audio.
+
+**Accounting.** vLLM reports a JSON transcription's usage as a duration (`{"type": "duration", "seconds": N}`). The gateway charges it with the model's `cost { audio_per_hour = … }` (GPU-hours per hour of audio). A stream's token usage, which the gateway always requests, is charged with the token prices.
+
+`response_format = "text"` carries no usage, so the gateway asks vLLM for JSON and answers the plain text itself.
+
+**Guardrails.** They mask the `prompt` field and the transcript. With post-call guardrails, segments and words (which repeat the text piece by piece) are removed from the answer. A streamed transcript goes through the chat stream filter.
+
+The audio itself is not inspected.
 
 ### Anthropic Messages API
 

@@ -75,6 +75,8 @@ jobs:
           - { target: FuzzRewriteResponses, pkg: ./openai }
           - { target: FuzzMessagesStream, pkg: ./openai }
           - { target: FuzzAnthropicStreamFilter, pkg: ./guard }
+          - { target: FuzzReadAudioForm, pkg: ./gateway }
+          - { target: FuzzTranscriptionRewrite, pkg: ./openai }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
