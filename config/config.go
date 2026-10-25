@@ -25,6 +25,9 @@ const (
 	Interactive Class = "interactive"
 	// Batch requests are throughput oriented (offline evaluation, synthetic data).
 	Batch Class = "batch"
+	// Guard models (Llama Guard, Prompt Guard) serve the gateway's
+	// guardrails only: clients cannot call them and /v1/models omits them.
+	Guard Class = "guard"
 )
 
 // Config is the validated configuration.
@@ -90,6 +93,10 @@ type Config struct {
 	// Teams in no logging block have none: spend metadata only, in the
 	// store.
 	Logging []Logging
+	// Guardrails inspect prompts before vLLM and completions after; each
+	// applies to the orgs and teams it names and to the keys created with
+	// it.
+	Guardrails []Guardrail
 }
 
 // Logging is a per-team request log.

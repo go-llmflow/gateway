@@ -51,6 +51,8 @@ type Secrets struct {
 	AuditKey string
 	// ExportCredentials are the S3 keys of each export, by name.
 	ExportCredentials map[string]export.Credentials
+	// GuardrailTokens are the bearer tokens of http guardrails, by name.
+	GuardrailTokens map[string]string
 }
 
 // Server is the gateway.
@@ -101,6 +103,15 @@ type Server struct {
 	// policies by name, and the policy of each team that has one.
 	policies   map[string]*config.Policy
 	teamPolicy map[string]string
+	// guardrails by name, the guardrails of each org and team, their
+	// configuration order, the audit queue of their decisions and the
+	// client of http guardrails.
+	guardrails  map[string]*guardrail
+	orgGuards   map[string][]string
+	teamGuards  map[string][]string
+	guardOrder  map[string]int
+	guardAudit  *guardAuditQueue
+	guardClient *http.Client
 
 	cancel context.CancelFunc
 	bg     sync.WaitGroup
@@ -238,6 +249,19 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 			s.teamPolicy[t] = p.Name
 		}
 	}
+	s.guardClient = &http.Client{
+		Transport: &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext, MaxIdleConnsPerHost: 64},
+		// A guardrail service's redirect could send prompts elsewhere.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	if err := s.buildGuardrails(); err != nil {
+		return nil, err
+	}
+	if s.guardAudit != nil {
+		s.guardAudit.onDrop = func() {
+			s.raise(context.Background(), "guardrail_audit_dropped", map[string]any{"dropped": s.guardAudit.dropped.Load()})
+		}
+	}
 	return s, nil
 }
 
@@ -290,6 +314,10 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 		s.bg.Add(1)
 		go func() { defer s.bg.Done(); s.rotationLoop(bctx) }()
+	}
+	if s.guardAudit != nil {
+		s.bg.Add(1)
+		go func() { defer s.bg.Done(); s.guardAuditLoop(bctx) }()
 	}
 	for _, l := range s.uniqueRequestLogs() {
 		s.bg.Add(1)
@@ -377,7 +405,7 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	}
 	data := make([]map[string]any, 0, len(s.gorder))
 	for _, n := range s.gorder {
-		if s.budget.modelAllowed(key.Team, n) {
+		if s.groups[n].cfg.Class != config.Guard && s.budget.modelAllowed(key.Team, n) {
 			data = append(data, map[string]any{"id": n, "object": "model", "owned_by": "llmflow"})
 		}
 	}
@@ -466,6 +494,13 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 		s.alerts.retried.write(w)
 	}
 	s.met.auditFailures.write(w)
+	s.met.guardDecisions.write(w)
+	s.met.guardErrors.write(w)
+	s.met.guardSeconds.write(w)
+	if s.guardAudit != nil {
+		writeHeader(w, "llmflow_guardrail_audit_dropped_total", "Guardrail decisions not audited because the audit queue was full.", "counter")
+		writeSample(w, "llmflow_guardrail_audit_dropped_total", nil, nil, float64(s.guardAudit.dropped.Load()))
+	}
 	s.writeExportMetrics(w)
 	s.met.overhead.write(w)
 	s.met.upstreamT.write(w)

@@ -271,6 +271,11 @@ func (m *Memory) CreateKey(_ context.Context, k Key) error {
 	} else {
 		k.Tags = nil
 	}
+	if len(k.Guardrails) > 0 {
+		k.Guardrails = dedupSorted(k.Guardrails)
+	} else {
+		k.Guardrails = nil
+	}
 	m.keys[k.ID] = &k
 	m.byHash[k.Hash] = k.ID
 	return nil

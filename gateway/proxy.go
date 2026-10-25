@@ -13,9 +13,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-llmflow/gateway/config"
+	"github.com/go-llmflow/gateway/guard"
 	"github.com/go-llmflow/gateway/openai"
 	"github.com/go-llmflow/gateway/store"
 )
+
+// guardRID returns the request id: the one the guardrails already used
+// (their guard-model calls and audit entries carry it), or a new one.
+func guardRID(rq *guardReq) string {
+	if rq != nil {
+		return rq.rid
+	}
+	return requestID()
+}
 
 var errUnknownModel = errors.New("unknown model")
 
@@ -56,15 +67,17 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			return
 		}
 		var g *group
-		out, req, err := openai.Rewrite(body, func(m string) (string, error) {
+		resolve := func(m string) (string, error) {
 			g = s.groups[m]
-			// A model hidden from the key's team answers exactly like an
-			// unknown one, so its existence is not revealed.
-			if g == nil || !s.budget.modelAllowed(key.Team, m) {
+			// A model hidden from the key's team, or a guard model (the
+			// gateway's own), answers exactly like an unknown one, so its
+			// existence is not revealed.
+			if g == nil || g.cfg.Class == config.Guard || !s.budget.modelAllowed(key.Team, m) {
 				return "", errUnknownModel
 			}
 			return g.cfg.UpstreamModel, nil
-		}, s.isolation(key))
+		}
+		out, req, err := openai.Rewrite(body, resolve, s.isolation(key))
 		switch {
 		case errors.Is(err, errUnknownModel):
 			apiError(w, http.StatusNotFound, "model_not_found", "the model does not exist")
@@ -103,6 +116,36 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			apiError(w, http.StatusTooManyRequests, "rate_limit_exceeded", err.Error())
 			return
 		}
+		// Guardrails, last of the checks before vLLM: a guard model costs
+		// GPU time, not spent on a request refused for cheaper reasons.
+		guards, err := s.guardsFor(key)
+		if err != nil {
+			s.limiter.release(key.ID, 0)
+			s.met.denied.add(1, key.Team, "guardrail")
+			apiError(w, http.StatusServiceUnavailable, "service_unavailable", err.Error())
+			return
+		}
+		var rq *guardReq
+		if len(guards) > 0 {
+			rq = &guardReq{s: s, key: key, scope: scope, rid: requestID(), guards: guards}
+			defer rq.finish()
+			masked, gerr := s.pre(r.Context(), rq, body)
+			if gerr != nil {
+				s.limiter.release(key.ID, 0)
+				s.met.denied.add(1, key.Team, "guardrail")
+				s.guardRefusal(w, gerr)
+				return
+			}
+			if !bytes.Equal(masked, body) {
+				// vLLM gets the masked prompt; so does the request log.
+				body = masked
+				if out, req, err = openai.Rewrite(body, resolve, s.isolation(key)); err != nil {
+					s.limiter.release(key.ID, 0)
+					apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+					return
+				}
+			}
+		}
 		promptEst := int64(len(out) / 4)
 		grant := g.pool.Acquire(key.Org, g.class, promptEst+req.MaxTokens)
 
@@ -121,7 +164,7 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			tUp, tUpEnd   time.Time
 			status        int
 			pre           time.Duration
-			rid           = requestID()
+			rid           = guardRID(rq)
 			usage         openai.Usage
 			estimated     bool
 			upstreamLabel string
@@ -226,7 +269,19 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 				cw = &captureWriter{ResponseWriter: w, max: maxContent}
 				dst = cw
 			}
+			// Post-call guardrails sit between vLLM and the client (and the
+			// content log, which keeps what the client got).
+			var sf *guard.StreamFilter
+			if rq != nil && resp.StatusCode < 300 {
+				if sf = s.streamFilter(r.Context(), rq, dst); sf != nil {
+					dst = sf
+				}
+			}
 			st, err = openai.CopySSE(dst, func() { _ = rc.Flush() }, resp.Body, !req.ClientWantsUsage)
+			if sf != nil && err == nil {
+				err = sf.Close()
+				_ = rc.Flush()
+			}
 			tUpEnd = time.Now()
 			if cw != nil {
 				respBody, respCut = cw.buf.Bytes(), cw.truncated
@@ -255,6 +310,15 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 		}
 		if resp.StatusCode < 300 {
 			usage, haveUsage = openai.ParseUsage(data)
+			if rq != nil && rq.hasStage("post") {
+				// The work is done and charged whatever the guards say.
+				guarded, gerr := s.post(r.Context(), rq, data)
+				if gerr != nil {
+					status = s.guardRefusal(w, gerr)
+					return
+				}
+				data = guarded
+			}
 		}
 		if keepContent {
 			respBody = data

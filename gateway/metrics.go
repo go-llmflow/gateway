@@ -169,8 +169,14 @@ type metrics struct {
 	// auditFailures counts audit entries or checkpoints that could not be
 	// written.
 	auditFailures *counterVec // kind
-	overhead      *histogram
-	upstreamT     *histogram
+	// guardDecisions counts guardrail findings by guard, stage and action
+	// (allow is not counted: it is every request); guardErrors the calls
+	// that failed, by guard and whether the request went on (fail-open).
+	guardDecisions *counterVec // guard, stage, action
+	guardErrors    *counterVec // guard, outcome
+	guardSeconds   *histogram
+	overhead       *histogram
+	upstreamT      *histogram
 }
 
 func newMetrics() *metrics {
@@ -183,6 +189,12 @@ func newMetrics() *metrics {
 		softAlerts: newCounterVec("llmflow_soft_budget_alerts_total", "Soft-budget limits reached (one per budget and period).", "kind"),
 		auditFailures: newCounterVec("llmflow_audit_failures_total",
 			"Audit entries (by kind) or checkpoints that could not be written.", "kind"),
+		guardDecisions: newCounterVec("llmflow_guardrail_decisions_total",
+			"Guardrail findings, by guardrail, stage (pre, post) and action (mask, block, log).", "guard", "stage", "action"),
+		guardErrors: newCounterVec("llmflow_guardrail_errors_total",
+			"Guardrail calls that failed or timed out, by guardrail and outcome (blocked: fail-closed; allowed: fail-open).", "guard", "outcome"),
+		guardSeconds: newHistogram("llmflow_guardrail_seconds", "Time spent in guardrails per request and stage (concurrent classifiers count once).",
+			[]float64{0.0001, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5}),
 		estimated: newCounterVec("llmflow_usage_estimated_total",
 			"Requests charged with estimated tokens because vLLM's usage never reached the gateway (client gone first).", "team", "model"),
 		overhead: newHistogram("llmflow_overhead_seconds", "Time spent in the gateway itself (request handling before the upstream call plus response handling after it).",

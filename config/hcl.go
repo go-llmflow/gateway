@@ -25,46 +25,47 @@ import (
 // diagnostic points at it.
 
 type fileHCL struct {
-	Listen               *string      `hcl:"listen,optional"`
-	ListenRange          hcl.Range    `hcl:"listen,attr_value_range"`
-	MasterKeyFile        string       `hcl:"master_key_file"`
-	MasterKeyFileRange   hcl.Range    `hcl:"master_key_file,attr_value_range"`
-	MetricsTokenFile     *string      `hcl:"metrics_token_file,optional"`
-	Retries              *int         `hcl:"retries,optional"`
-	RetriesRange         hcl.Range    `hcl:"retries,attr_value_range"`
-	BudgetRefresh        *string      `hcl:"budget_refresh,optional"`
-	BudgetRefreshRange   hcl.Range    `hcl:"budget_refresh,attr_value_range"`
-	KeyCacheTTL          *string      `hcl:"key_cache_ttl,optional"`
-	KeyCacheTTLRange     hcl.Range    `hcl:"key_cache_ttl,attr_value_range"`
-	ShutdownGrace        *string      `hcl:"shutdown_grace,optional"`
-	ShutdownGraceRange   hcl.Range    `hcl:"shutdown_grace,attr_value_range"`
-	ExposeOverheadHeader *bool        `hcl:"expose_overhead_header,optional"`
-	CacheIsolation       *string      `hcl:"cache_isolation,optional"`
-	CacheIsolationRange  hcl.Range    `hcl:"cache_isolation,attr_value_range"`
-	CacheSaltKeyFile     *string      `hcl:"cache_salt_key_file,optional"`
-	AuthFailures         *int         `hcl:"auth_failures_per_minute,optional"`
-	AuthFailuresRange    hcl.Range    `hcl:"auth_failures_per_minute,attr_value_range"`
-	Store                *storeHCL    `hcl:"store,block"`
-	Limits               *limitsHCL   `hcl:"limits,block"`
-	FairShare            *fairHCL     `hcl:"fairshare,block"`
-	Health               *healthHCL   `hcl:"health,block"`
-	Orgs                 []orgHCL     `hcl:"org,block"`
-	Tags                 *tagsHCL     `hcl:"tags,block"`
-	Alerts               *alertsHCL   `hcl:"alerts,block"`
-	Pools                []poolHCL    `hcl:"pool,block"`
-	Models               []modelHCL   `hcl:"model,block"`
-	Vault                *vaultHCL    `hcl:"vault,block"`
-	TrustedProxies       []string     `hcl:"trusted_proxies,optional"`
-	TrustedProxiesRange  hcl.Range    `hcl:"trusted_proxies,attr_value_range"`
-	Routes               *routesHCL   `hcl:"routes,block"`
-	JWT                  *jwtHCL      `hcl:"jwt,block"`
-	SSO                  *ssoHCL      `hcl:"sso,block"`
-	KeyRotation          *rotHCL      `hcl:"key_rotation,block"`
-	SCIM                 *scimHCL     `hcl:"scim,block"`
-	Policies             []policyHCL  `hcl:"policy,block"`
-	Audit                *auditHCL    `hcl:"audit,block"`
-	Exports              []exportHCL  `hcl:"export,block"`
-	Logging              []loggingHCL `hcl:"logging,block"`
+	Listen               *string        `hcl:"listen,optional"`
+	ListenRange          hcl.Range      `hcl:"listen,attr_value_range"`
+	MasterKeyFile        string         `hcl:"master_key_file"`
+	MasterKeyFileRange   hcl.Range      `hcl:"master_key_file,attr_value_range"`
+	MetricsTokenFile     *string        `hcl:"metrics_token_file,optional"`
+	Retries              *int           `hcl:"retries,optional"`
+	RetriesRange         hcl.Range      `hcl:"retries,attr_value_range"`
+	BudgetRefresh        *string        `hcl:"budget_refresh,optional"`
+	BudgetRefreshRange   hcl.Range      `hcl:"budget_refresh,attr_value_range"`
+	KeyCacheTTL          *string        `hcl:"key_cache_ttl,optional"`
+	KeyCacheTTLRange     hcl.Range      `hcl:"key_cache_ttl,attr_value_range"`
+	ShutdownGrace        *string        `hcl:"shutdown_grace,optional"`
+	ShutdownGraceRange   hcl.Range      `hcl:"shutdown_grace,attr_value_range"`
+	ExposeOverheadHeader *bool          `hcl:"expose_overhead_header,optional"`
+	CacheIsolation       *string        `hcl:"cache_isolation,optional"`
+	CacheIsolationRange  hcl.Range      `hcl:"cache_isolation,attr_value_range"`
+	CacheSaltKeyFile     *string        `hcl:"cache_salt_key_file,optional"`
+	AuthFailures         *int           `hcl:"auth_failures_per_minute,optional"`
+	AuthFailuresRange    hcl.Range      `hcl:"auth_failures_per_minute,attr_value_range"`
+	Store                *storeHCL      `hcl:"store,block"`
+	Limits               *limitsHCL     `hcl:"limits,block"`
+	FairShare            *fairHCL       `hcl:"fairshare,block"`
+	Health               *healthHCL     `hcl:"health,block"`
+	Orgs                 []orgHCL       `hcl:"org,block"`
+	Tags                 *tagsHCL       `hcl:"tags,block"`
+	Alerts               *alertsHCL     `hcl:"alerts,block"`
+	Pools                []poolHCL      `hcl:"pool,block"`
+	Models               []modelHCL     `hcl:"model,block"`
+	Vault                *vaultHCL      `hcl:"vault,block"`
+	TrustedProxies       []string       `hcl:"trusted_proxies,optional"`
+	TrustedProxiesRange  hcl.Range      `hcl:"trusted_proxies,attr_value_range"`
+	Routes               *routesHCL     `hcl:"routes,block"`
+	JWT                  *jwtHCL        `hcl:"jwt,block"`
+	SSO                  *ssoHCL        `hcl:"sso,block"`
+	KeyRotation          *rotHCL        `hcl:"key_rotation,block"`
+	SCIM                 *scimHCL       `hcl:"scim,block"`
+	Policies             []policyHCL    `hcl:"policy,block"`
+	Audit                *auditHCL      `hcl:"audit,block"`
+	Exports              []exportHCL    `hcl:"export,block"`
+	Logging              []loggingHCL   `hcl:"logging,block"`
+	Guardrails           []guardrailHCL `hcl:"guardrail,block"`
 }
 
 type loggingHCL struct {
@@ -98,7 +99,7 @@ type auditHCL struct {
 }
 
 // AuditKinds are the kinds of audit entries (retention is set per kind).
-var AuditKinds = []string{"admin", "auth", "scim", "system"}
+var AuditKinds = []string{"admin", "auth", "scim", "system", "guardrail"}
 
 type exportHCL struct {
 	Name           string    `hcl:"name,label"`
@@ -690,6 +691,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 
 	// models
 	models := map[string]bool{}
+	modelClass := map[string]Class{}
 	for _, m := range raw.Models {
 		g := ModelGroup{Name: m.Name, UpstreamModel: strOr(m.UpstreamModel, m.Name), Pool: strOr(m.Pool, m.Name), Class: Class(strOr(m.Class, string(Interactive)))}
 		if m.Name == "" || len(m.Name) > 256 || strings.ContainsAny(m.Name, "\x00\r\n") {
@@ -699,6 +701,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			v.errf(m.DefRange, "Duplicate model", "model %q is declared twice", m.Name)
 		}
 		models[m.Name] = true
+		modelClass[m.Name] = g.Class
 		if g.UpstreamModel == "" || strings.ContainsAny(g.UpstreamModel, "\x00\r\n") {
 			v.errf(m.UpstreamModelRange, "Invalid upstream model", "%q", g.UpstreamModel)
 		}
@@ -709,8 +712,8 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			}
 			v.errf(r, "Unknown pool", "model %q uses pool %q, which is not declared", m.Name, g.Pool)
 		}
-		if g.Class != Interactive && g.Class != Batch {
-			v.errf(m.ClassRange, "Invalid class", "class = %q: want \"interactive\" or \"batch\"", g.Class)
+		if g.Class != Interactive && g.Class != Batch && g.Class != Guard {
+			v.errf(m.ClassRange, "Invalid class", "class = %q: want \"interactive\", \"batch\" or \"guard\"", g.Class)
 		}
 		if m.Cost != nil {
 			for _, x := range []*float64{m.Cost.InputPerMTok, m.Cost.OutputPerMTok, m.Cost.CachedPerMTok} {
@@ -1115,6 +1118,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		}
 		c.SCIM = cs
 	}
+	c.Guardrails = v.guardrails(raw.Guardrails, orgs, teams, modelClass)
 	// Every *_file attribute is a secret reference: a file, or a field of
 	// an OpenBao/Vault KV v2 secret (package secret).
 	for _, ref := range c.SecretRefs() {
@@ -1155,6 +1159,9 @@ func (c *Config) SecretRefs() []string {
 	}
 	if c.Alerts.SMTP != nil {
 		add(c.Alerts.SMTP.PasswordFile)
+	}
+	for _, g := range c.Guardrails {
+		add(g.TokenFile)
 	}
 	out = append(out, c.KeyFiles()...)
 	return out

@@ -280,11 +280,11 @@ func (p *Postgres) CreateKey(ctx context.Context, k Key) error {
 		k.CreatedAt = time.Now().UTC()
 	}
 	tag, err := p.pool.Exec(ctx, `
-		INSERT INTO llmflow_keys (id, hash, team, project, name, rpm, tpm, max_inflight, created_at, owner, tags, policy)
-		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+		INSERT INTO llmflow_keys (id, hash, team, project, name, rpm, tpm, max_inflight, created_at, owner, tags, policy, guardrails)
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
 		WHERE EXISTS (SELECT 1 FROM llmflow_teams WHERE name = $3 AND NOT disabled)
 		  AND ($4 = '' OR EXISTS (SELECT 1 FROM llmflow_projects WHERE team = $3 AND name = $4 AND NOT disabled))`,
-		k.ID, k.Hash[:], k.Team, k.Project, k.Name, k.RPM, k.TPM, k.MaxInFlight, k.CreatedAt, k.Owner, dedupSorted(k.Tags), k.Policy)
+		k.ID, k.Hash[:], k.Team, k.Project, k.Name, k.RPM, k.TPM, k.MaxInFlight, k.CreatedAt, k.Owner, dedupSorted(k.Tags), k.Policy, dedupSorted(k.Guardrails))
 	switch {
 	case uniqueViolation(err):
 		return ErrExists
@@ -298,7 +298,7 @@ func (p *Postgres) CreateKey(ctx context.Context, k Key) error {
 	return nil
 }
 
-const keyCols = `k.id, k.hash, coalesce(t.org, ''), k.team, k.project, k.owner, k.tags, k.name, k.rpm, k.tpm, k.max_inflight, k.created_at, k.revoked, k.prev_hash, k.prev_expires, k.rotated_at, k.rotate_every, k.rotate_grace, k.rotate_target, k.policy`
+const keyCols = `k.id, k.hash, coalesce(t.org, ''), k.team, k.project, k.owner, k.tags, k.name, k.rpm, k.tpm, k.max_inflight, k.created_at, k.revoked, k.prev_hash, k.prev_expires, k.rotated_at, k.rotate_every, k.rotate_grace, k.rotate_target, k.policy, k.guardrails`
 const keyFrom = ` FROM llmflow_keys k LEFT JOIN llmflow_teams t ON t.name = k.team `
 
 func scanKey(r pgx.Row) (Key, error) {
@@ -306,9 +306,12 @@ func scanKey(r pgx.Row) (Key, error) {
 	var h, ph []byte
 	var pe, ra *time.Time
 	var every, grace int64
-	err := r.Scan(&k.ID, &h, &k.Org, &k.Team, &k.Project, &k.Owner, &k.Tags, &k.Name, &k.RPM, &k.TPM, &k.MaxInFlight, &k.CreatedAt, &k.Revoked, &ph, &pe, &ra, &every, &grace, &k.Rotation.Target, &k.Policy)
+	err := r.Scan(&k.ID, &h, &k.Org, &k.Team, &k.Project, &k.Owner, &k.Tags, &k.Name, &k.RPM, &k.TPM, &k.MaxInFlight, &k.CreatedAt, &k.Revoked, &ph, &pe, &ra, &every, &grace, &k.Rotation.Target, &k.Policy, &k.Guardrails)
 	if err != nil {
 		return k, err
+	}
+	if len(k.Guardrails) == 0 {
+		k.Guardrails = nil
 	}
 	k.Rotation.Every, k.Rotation.Grace = Duration(every), Duration(grace)
 	if ra != nil {

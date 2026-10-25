@@ -1,6 +1,6 @@
 module github.com/go-llmflow/gateway
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/go-authn/oidc v0.4.2
@@ -16,6 +16,8 @@ require (
 	github.com/agext/levenshtein v1.2.1 // indirect
 	github.com/apparentlymart/go-textseg/v15 v15.0.0 // indirect
 	github.com/apparentlymart/go-textseg/v17 v17.0.1 // indirect
+	github.com/go-gitsafe/gitsafe v0.17.0 // indirect
+	github.com/go-llmflow/pii v0.1.0 // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
