@@ -296,6 +296,10 @@ func TestQueueMetricSaturation(t *testing.T) {
 	e := newEnv(t, saturationConfig(t, a.URL(), b.URL(), "saturation_waiting = 2"))
 	_, keyB := e.newKey("etabB")
 	g := e.srv.groups["llama"]
+	// The health loop's first round scrapes the fake upstream (no queue
+	// metric: -1). Planting the value before that round ends let the scrape
+	// overwrite it under load (failed once at a load of 34): wait for it.
+	<-e.srv.probed
 	g.upstreams[0].waiting.Store(5) // as the health loop scraped it
 	expect(t, "borrower while vLLM queues", e.chatWith(keyB, chat), 200)
 	if b.count() != 1 {
