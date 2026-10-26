@@ -167,6 +167,11 @@ ha {
   forward_timeout      = "250ms"
   usage_persist        = "10s"
   on_owner_unreachable = "lowest_priority"  # or "reject" (503)
+  # optional (since v0.16.0): mutual TLS 1.3 on the internal port
+  tls_cert_file        = "vault:secret/llmflow/ha#cert"  # this replica's
+  tls_key_file         = "vault:secret/llmflow/ha#key"
+  tls_ca_file          = "/etc/llmflow/ha-ca.pem"        # signs every replica
+  tls_server_name      = "llmflow-ha"                    # the default
 }
 ```
 
@@ -195,7 +200,17 @@ ha {
   (5 minutes of clock difference are accepted); replays are refused with a
   sliding window per instance (RFC 4303, 3.4.3). The owner's address is read
   from the database and dialled only inside `peer_networks`, without
-  redirects, with `forward_timeout`; bodies are bounded.
+  redirects, with `forward_timeout`; bodies are bounded. With the three
+  `tls_*` files (secret references, all three or none) the channel runs
+  over mutual TLS 1.3: each replica presents its certificate, accepts only
+  peers the CA signed, and checks that the server's certificate carries
+  `tls_server_name` (replicas are dialled by IP). The HMAC signatures stay
+  (they bind each answer to its request and refuse replays). The cost is a
+  handshake per kept-alive connection, then AES-GCM on bodies of a few
+  hundred bytes; `BenchmarkAdmission/forwarded-mtls` measures it (not
+  measured yet: machine load above 4). Tested: a peer without a
+  certificate, with one from another CA, speaking plain HTTP, or expecting
+  another server name gets nothing, although it holds the HMAC secret.
 - **Failover.** Every replica reports its live grants to the owner each
   `heartbeat`. A new owner (epoch + 1) restores the decayed usage the
   previous one persisted every `usage_persist` (decayed by PostgreSQL's
@@ -1689,7 +1704,8 @@ security audit of 2026-10-26):
    in-flight count persisted up to `usage_persist` earlier; the fencing token
    is checked by PostgreSQL and by the replicas, not by vLLM, so a decision
    an owner made just before a long pause can still reach vLLM. The internal
-   channel is authenticated, not encrypted (keep it on a private network).
+   channel is authenticated but, without the `tls_*` files, not encrypted
+   (keep it on a private network, or set them: mutual TLS since v0.16.0).
 2. **Budgets lag.** Cost is known when a request ends, so a burst of long
    requests can overspend by what is in flight. Several gateways only see each
    other's spend at their next refresh.

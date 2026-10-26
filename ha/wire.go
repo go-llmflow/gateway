@@ -6,6 +6,7 @@ import (
 	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -216,11 +217,13 @@ func allowed(nets []netip.Prefix, addr string) bool {
 	return false
 }
 
-func newRPCClient(nets []netip.Prefix, timeout time.Duration) *http.Client {
+func newRPCClient(nets []netip.Prefix, timeout time.Duration, tc *tls.Config) *http.Client {
 	d := &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
 	return &http.Client{
 		Transport: &http.Transport{
-			Proxy: nil,
+			Proxy:               nil,
+			TLSClientConfig:     tc,
+			TLSHandshakeTimeout: timeout,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				if !allowed(nets, addr) {
 					return nil, errBadPeer
@@ -255,7 +258,11 @@ func (n *Node) call(ctx context.Context, addr, path string, in, out any) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, n.cfg.ForwardTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+path, bytes.NewReader(body))
+	scheme := "http://"
+	if n.cfg.ClientTLS != nil {
+		scheme = "https://"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, scheme+addr+path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

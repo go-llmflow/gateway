@@ -104,6 +104,20 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 		if len(s.HASecret) < ha.MinSecret {
 			return s, fmt.Errorf("ha secret_file: the shared secret must be at least %d bytes", ha.MinSecret)
 		}
+		for _, f := range []struct {
+			name, ref string
+			dst       *string
+		}{{"ha tls_cert_file", c.HA.TLSCertFile, &s.HATLSCert}, {"ha tls_key_file", c.HA.TLSKeyFile, &s.HATLSKey}, {"ha tls_ca_file", c.HA.TLSCAFile, &s.HATLSCA}} {
+			if err := get(f.name, f.ref, f.dst); err != nil {
+				return s, err
+			}
+		}
+		if s.HATLSCert != "" {
+			// check-config proves the pair and the CA parse.
+			if _, _, err := ha.MutualTLS([]byte(s.HATLSCert), []byte(s.HATLSKey), []byte(s.HATLSCA), c.HA.TLSServerName); err != nil {
+				return s, err
+			}
+		}
 	}
 	if c.Alerts.SMTP != nil {
 		if err := get("alerts smtp password_file", c.Alerts.SMTP.PasswordFile, &s.SMTPPassword); err != nil {

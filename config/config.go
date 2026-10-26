@@ -275,6 +275,11 @@ type HA struct {
 	// OnOwnerUnreachable: "lowest_priority" (default) admits at the lowest
 	// borrowing priority, "reject" answers 503.
 	OnOwnerUnreachable string
+	// TLSCertFile, TLSKeyFile and TLSCAFile (secret references, all three
+	// or none) put the internal channel under mutual TLS 1.3: every replica
+	// presents its certificate and accepts only peers signed by the CA,
+	// whose certificate carries TLSServerName.
+	TLSCertFile, TLSKeyFile, TLSCAFile, TLSServerName string
 }
 
 // KeyRotation configures scheduled key rotation.

@@ -32,6 +32,7 @@ package ha
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -95,6 +96,10 @@ type Config struct {
 	// yielded one only when fresh, and an owner that is no longer fresh
 	// yields. Nil: always ready and fresh (a pool of fixed upstreams).
 	Membership func(pool string) (ready, fresh bool)
+	// ClientTLS, when set, makes this node call its peers over TLS
+	// (MutualTLS); their listener must then serve the matching server
+	// configuration.
+	ClientTLS *tls.Config
 }
 
 // ErrNoOwner: no owner could be reached and the configuration refuses
@@ -200,7 +205,7 @@ func New(cfg Config, st store.HAStore) (*Node, error) {
 		cfg.UsagePersist = 10 * time.Second
 	}
 	n := &Node{
-		cfg: cfg, st: st, client: newRPCClient(cfg.PeerNetworks, cfg.ForwardTimeout),
+		cfg: cfg, st: st, client: newRPCClient(cfg.PeerNetworks, cfg.ForwardTimeout, cfg.ClientTLS),
 		rpcKey: deriveKey(cfg.Secret, "rpc v1"), replay: newReplayGuard(),
 		seqs: map[string]*atomic.Uint64{}, pools: map[string]*poolState{}, kick: make(chan struct{}, 1),
 	}
