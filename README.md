@@ -228,7 +228,8 @@ HCL design decisions:
     issuer   = "https://sso.example.org/realms/research"  # exact iss, https
     audience = "llmflow"                                   # required
     type     = "at+jwt"           # optional: refuse ID tokens
-    # jwks_url, username_claim, groups_claim, clock_skew ("1m"), min_refresh ("1m")
+    # jwks_url, username_claim, groups_claim, clock_skew ("1m"),
+    # min_refresh ("1m", at least "5s"; see "Key rotation" under Single sign-on)
     rpm = 60                      # limits per person, like a key's
     map {                         # first match wins
       value = "lab-physics"       # claim defaults to "groups"
@@ -530,6 +531,7 @@ sso {
   redirect_url       = "https://llm.example.org/admin/callback"
   scopes             = ["openid", "profile", "groups"]  # default openid, profile, email
   session_ttl        = "8h"                              # at most 168h
+  min_refresh        = "1m"                              # key set refetch bound, at least 5s
   role {                                               # groups -> role bindings
     value = "llm-admins"                               # claim defaults to "groups"
     role  = "proxy_admin"
@@ -542,6 +544,7 @@ sso {
 }
 ```
 
+- **Key rotation (`min_refresh`, both the `sso` and the `jwt` blocks).** The provider's key set is read at start-up. A token with a `kid` it lacks triggers one fetch, at most once per `min_refresh` (default 1 minute). A provider that rotates its keys more often than that will have logins refused right after a rotation, until `min_refresh` has passed; dex rotating every 30 s showed this (#60). Lower `min_refresh` for such a provider. The trade-off: a stream of forged `kid`s can make the gateway fetch the key set once per `min_refresh`, which is why the value is bounded below at 5 s.
 - `GET /admin/login` redirects to the provider; `GET /admin/callback` ends
   the login and redirects to `GET /admin/session`, which returns the user,
   their roles and the session's `csrf_token`. `POST /admin/logout` ends the
@@ -1125,7 +1128,11 @@ Enforced:
   issuer's public key cannot be used as an HS256 secret), `iss` compared
   whole, `aud` and `exp` required, bounded clock skew, an optional `typ`
   check (`type = "at+jwt"` refuses ID tokens, RFC 9068 §4), keys fetched over
-  https only, and at most one key-set fetch per `min_refresh` however many
+  https, or over http from a loopback address only (go-authn/oidc's
+  deliberate exemption: a loopback connection crosses no network link, which
+  is also what lets a provider run on the same host; any other http URL,
+  including one reached by a redirect, is refused), and at most one key-set
+  fetch per `min_refresh` however many
   unknown `kid`s arrive. Discovery happens at start-up: a gateway whose issuer
   does not answer does not start. The gateway only maps the verified identity:
   the `map` blocks are tried in order, the first whose `claim` (default
@@ -1347,7 +1354,7 @@ because it is built with 1.27.3. Measured with go-fleettools/modfloor, every
 fleet module in the gateway's build graph now declares `go 1.27.3`, and the
 gateway requires those releases:
 
-- go-authn/oidc v0.4.3 (#18), go-authn/rp v0.1.3 (#7), go-authn/scim v0.1.1 (#4);
+- go-authn/oidc v0.4.3 (#18), go-authn/rp v0.1.3 (#7; v0.2.0 since, for `min_refresh`), go-authn/scim v0.1.1 (#4);
 - go-volumes/interface #8 and go-volumes/pool #14 (untagged), go-volumes/s3 v0.2.1 (#17);
 - go-llmflow/pii v0.2.1 (#3);
 - go-gitsafe/gitsafe v0.17.1, which already declared it.

@@ -223,6 +223,8 @@ func TestParseRejectsWithPosition(t *testing.T) {
 		{"sso unknown role", valid + ssoBlock("https://idp.example", "https://gw.example/admin/callback", "role {\n    value = \"g\"\n    role = \"root\"\n  }"), "Invalid role"},
 		{"sso no openid", valid + strings.Replace(ssoBlock("https://idp.example", "https://gw.example/admin/callback", ""), "sso {", "sso {\n  scopes = [\"profile\"]", 1), "Invalid scopes"},
 		{"sso long session", valid + strings.Replace(ssoBlock("https://idp.example", "https://gw.example/admin/callback", ""), "sso {", "sso {\n  session_ttl = \"720h\"", 1), "Session too long"},
+		{"sso min_refresh too short", valid + strings.Replace(ssoBlock("https://idp.example", "https://gw.example/admin/callback", ""), "sso {", "sso {\n  min_refresh = \"1s\"", 1), "Key set refresh too short"},
+		{"jwt min_refresh too short", valid + strings.Replace(jwtBlock("https://idp.example", "a"), "jwt {", "jwt {\n  min_refresh = \"100ms\"", 1), "Key set refresh too short"},
 		{"retention kind", valid + "audit {\n  signing_key_file = \"/k\"\n  retention = { billing = \"48h\" }\n}\n", "Invalid retention"},
 		{"retention short", valid + "audit {\n  signing_key_file = \"/k\"\n  retention = { admin = \"1h\" }\n}\n", "Invalid retention"},
 		{"retention without key", valid + "audit { retention = { admin = \"48h\" } }\n", "Retention without signing key"},

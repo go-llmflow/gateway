@@ -187,6 +187,8 @@ type ssoHCL struct {
 	ScopesRange      hcl.Range    `hcl:"scopes,attr_value_range"`
 	SessionTTL       *string      `hcl:"session_ttl,optional"`
 	SessionTTLRange  hcl.Range    `hcl:"session_ttl,attr_value_range"`
+	MinRefresh       *string      `hcl:"min_refresh,optional"`
+	MinRefreshRange  hcl.Range    `hcl:"min_refresh,attr_value_range"`
 	Roles            []ssoRoleHCL `hcl:"role,block"`
 }
 
@@ -895,6 +897,9 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		if cj.ClockSkew > 10*time.Minute {
 			v.errf(j.ClockSkewRange, "Clock skew too large", "clock_skew %v: at most 10m", cj.ClockSkew)
 		}
+		if cj.MinRefresh < MinKeySetRefresh {
+			v.errf(j.MinRefreshRange, "Key set refresh too short", "min_refresh %v: at least %v (it bounds how often forged kids make the gateway ask the issuer)", cj.MinRefresh, MinKeySetRefresh)
+		}
 		for _, p := range []*int{j.RPM, j.TPM, j.MaxInFlight} {
 			if p != nil && *p < 0 {
 				v.errf(j.LimitsRange, "Invalid limit", "rpm, tpm and max_inflight must be non-negative")
@@ -926,7 +931,11 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	if o := raw.SSO; o != nil {
 		cs := &SSO{Issuer: o.Issuer, ClientID: o.ClientID, ClientSecretFile: strOr(o.ClientSecretFile, ""),
 			RedirectURL: o.RedirectURL, Scopes: o.Scopes,
-			SessionTTL: v.dur(o.SessionTTL, o.SessionTTLRange, "session_ttl", 8*time.Hour)}
+			SessionTTL: v.dur(o.SessionTTL, o.SessionTTLRange, "session_ttl", 8*time.Hour),
+			MinRefresh: v.dur(o.MinRefresh, o.MinRefreshRange, "min_refresh", time.Minute)}
+		if cs.MinRefresh < MinKeySetRefresh {
+			v.errf(o.MinRefreshRange, "Key set refresh too short", "min_refresh %v: at least %v (it bounds how often forged kids make the gateway ask the provider)", cs.MinRefresh, MinKeySetRefresh)
+		}
 		if len(cs.Scopes) == 0 {
 			cs.Scopes = []string{"openid", "profile", "email"}
 		}
