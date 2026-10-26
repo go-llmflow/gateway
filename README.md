@@ -654,9 +654,35 @@ third-party asset is loaded.
 |---|---|
 | Keys | list per team; create (the secret is shown **once**, on a page not cached), rotate with a grace period, revoke |
 | Budgets | budgets with spent and limit; set and delete |
-| Spend | GPU-hours, requests and tokens over a period, grouped by org, team, project, key, model, pool or tag |
+| Spend | GPU-hours (or a provider's currency), requests and tokens over a period, grouped by org, team, project, key, model, pool or tag |
+| Reports (since v0.13.0) | see below |
 | Fair share | live state per pool: reservation, in flight, borrowing, LF and rank |
 | Audit | entries page by page, and a button that verifies the chain (status of the checkpoints and the anchor) |
+
+**Reports** (`/ui/reports`) is the finance view of the spend report:
+
+- a period (date pickers, and links for the last 7 and 30 days, this month,
+  last month, this year), in UTC with the end excluded, shown on the page;
+  at most 366 days;
+- a grouping over every report dimension (`org`, `lab`, `team`, `project`,
+  `user`, `key`, `model`, `pool`, `tag`, `day`);
+- drill-down: each row of `org` links to its labs, a lab to its teams, then
+  projects, users and models; filters are listed and each can be removed;
+- the previous period of the same length, side by side (amount and change);
+- server-rendered SVG charts: the share per group (pie; the seven largest,
+  the rest as "other"), this period against the previous one (bars), and the
+  amount per day (time series).
+
+Every amount shows its unit, one section per unit: **GPU-hours** for the
+local pools, the **currency** of an external provider (for example `USD`) on
+its own; the two are never added together. The page reads
+`GET /admin/spend` like every other page, so an organisation administrator
+sees their organisation only. The charts are inline SVG with presentation
+attributes only (no `style` attribute, no script), so the policy above is
+unchanged; every label is escaped. The page's queries are fuzzed
+(`FuzzReportsQuery`). `GET /admin/spend` also accepts `group_by=day` (and
+`lab`, `user`), and every report now runs under a 60-second deadline in the
+store.
 
 The UI holds no privilege of its own: every page calls the admin API's
 handlers in-process with the signed-in person, so it sees and changes exactly

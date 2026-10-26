@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,9 @@ const (
 	// sreport --parsable2, for side-by-side reconciliation.
 	FormatParsable2 = "parsable2"
 )
+
+// ReportTimeout bounds the time one report may take in the store.
+const ReportTimeout = 60 * time.Second
 
 // ParseGroupBy splits a comma-separated dimension list.
 func ParseGroupBy(v string) ([]string, error) {
@@ -80,12 +84,18 @@ func (s *Server) usageCSV(w http.ResponseWriter, r *http.Request, p *principal) 
 // principal without a proxy role, the report is computed per team and key
 // first, filtered (teams the principal may view; for a member, only their
 // own keys), then regrouped onto the dimensions asked for.
+//
+// A report reads every record of its period: it runs under ReportTimeout
+// whatever the period (the API keeps accepting any period; the UI and the
+// exports also cap it at store.MaxReportSpan).
 func (s *Server) visibleReport(r *http.Request, p *principal, from, to time.Time, dims []string) ([]store.ReportRow, error) {
+	ctx, cancel := context.WithTimeout(r.Context(), ReportTimeout)
+	defer cancel()
 	if p.proxyView() {
-		return s.st.Report(r.Context(), from, to, dims)
+		return s.st.Report(ctx, from, to, dims)
 	}
 	inner, _ := store.ValidateDims(append(append([]string{}, dims...), "team", "key"))
-	rows, err := s.st.Report(r.Context(), from, to, inner)
+	rows, err := s.st.Report(ctx, from, to, inner)
 	if err != nil {
 		return nil, err
 	}
