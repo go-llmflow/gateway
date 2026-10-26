@@ -22,6 +22,7 @@ import (
 	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/export"
 	"github.com/go-llmflow/gateway/fairshare"
+	"github.com/go-llmflow/gateway/ha"
 	"github.com/go-llmflow/gateway/openai"
 	"github.com/go-llmflow/gateway/spool"
 	"github.com/go-llmflow/gateway/store"
@@ -59,6 +60,8 @@ type Secrets struct {
 	TracingToken string
 	// MCPTokens are the bearer tokens of the tool servers, by name.
 	MCPTokens map[string]string
+	// HASecret is the replicas' shared secret (ha block).
+	HASecret string
 }
 
 // Server is the gateway.
@@ -71,8 +74,13 @@ type Server struct {
 
 	groups  map[string]*group
 	gorder  []string
-	pools   map[string]*fairshare.Pool
+	pools   map[string]admitter
 	porder  []string
+	// ha shares the pools between replicas (nil: one replica); haServer
+	// serves its internal API.
+	ha         *ha.Node
+	haServer   *http.Server
+	haListener net.Listener
 	client  *http.Client
 	limiter *limiter
 	budget  *budgeter
@@ -162,7 +170,7 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 	s := &Server{
 		cfg: cfg, st: st, secrets: secrets, now: time.Now,
 		log:    slog.New(slog.DiscardHandler),
-		groups: map[string]*group{}, pools: map[string]*fairshare.Pool{},
+		groups: map[string]*group{}, pools: map[string]admitter{},
 		met: newMetrics(),
 	}
 	for _, o := range opts {
@@ -176,8 +184,13 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 		shares[o.Name] = o.Share
 	}
 	for _, p := range cfg.Pools {
-		s.pools[p.Name] = fairshare.NewPool(p.Name, p.Capacity, shares, cfg.FairShare.HalfLife, s.now)
+		s.pools[p.Name] = localPool{fairshare.NewPool(p.Name, p.Capacity, shares, cfg.FairShare.HalfLife, s.now)}
 		s.porder = append(s.porder, p.Name)
+	}
+	if cfg.HA != nil {
+		if err := s.buildHA(shares); err != nil {
+			return nil, err
+		}
 	}
 	// An upstream shared by several model groups (same URL, same key) is
 	// one object, so its in-flight count and cooldown are shared too.
@@ -355,6 +368,9 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.budget.refresh(ctx); err != nil {
 		s.log.Error("initial budget refresh failed", "err", err)
 	}
+	if err := s.startHA(ctx); err != nil {
+		return err
+	}
 	bctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.rec.start()
@@ -397,6 +413,8 @@ func (s *Server) Close(ctx context.Context) {
 	}
 	s.alertCancel()
 	s.bg.Wait()
+	// After the client listener drained: the pools' owners hand over.
+	s.closeHA(ctx)
 	s.rec.close(ctx)
 	// Last: the final checkpoint above queued its anchor.
 	for _, q := range s.exports {
@@ -593,10 +611,28 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 		{"llmflow_reserved", "Within-share slots: share x C apportioned to integers by largest remainder.", func(t fairshare.TeamStat) float64 { return float64(t.Reserved) }},
 		{"llmflow_fairshare_usage", "Decayed usage (cost units) used for the fair-share ranking.", func(t fairshare.TeamStat) float64 { return t.Usage }},
 		{"llmflow_fairshare_level", "Level fairshare LF = S/U (+Inf when the organisation has no usage).", func(t fairshare.TeamStat) float64 { return t.LevelFairshare }},
+		{"llmflow_inflight_phantoms", "Requests counted in flight without a grant (ha: a failover's safety margin, a silent replica's requests).", func(t fairshare.TeamStat) float64 { return float64(t.Phantoms) }},
+	}
+	if s.ha != nil {
+		writeHeader(w, "llmflow_ha_owner", "1 when this replica decides the pool's fair share (holds its lease).", "gauge")
+		writeHeader(w, "llmflow_ha_epoch", "The pool lease's epoch (fencing token) as this replica last saw it.", "gauge")
+		writeHeader(w, "llmflow_ha_local_grants", "This replica's requests in flight in the pool.", "gauge")
+		for _, p := range s.porder {
+			owner, epoch := s.ha.Status(p)
+			v := 0.0
+			if owner {
+				v = 1
+			}
+			writeSample(w, "llmflow_ha_owner", []string{"pool"}, []string{p}, v)
+			writeSample(w, "llmflow_ha_epoch", []string{"pool"}, []string{p}, float64(epoch))
+			writeSample(w, "llmflow_ha_local_grants", []string{"pool"}, []string{p}, float64(s.ha.Local(p)))
+		}
+		writeHeader(w, "llmflow_ha_unowned_total", "Requests admitted at the lowest priority (or refused) because no owner answered.", "counter")
+		writeSample(w, "llmflow_ha_unowned_total", nil, nil, float64(s.ha.Degraded()))
 	}
 	snaps := map[string][]fairshare.TeamStat{}
 	for _, p := range s.porder {
-		snaps[p] = s.pools[p].Snapshot()
+		snaps[p] = s.pools[p].snapshot()
 	}
 	for _, g := range gauges {
 		writeHeader(w, g.name, g.help, "gauge")

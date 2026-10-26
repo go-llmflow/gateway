@@ -187,7 +187,7 @@ func waitIdle(t *testing.T, e *env) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		busy := 0
-		for _, s := range e.srv.pools["b300"].Snapshot() {
+		for _, s := range e.srv.pools["b300"].snapshot() {
 			busy += s.InFlight + s.Borrowing
 		}
 		for _, u := range e.srv.groups["llama"].upstreams {
@@ -197,7 +197,7 @@ func waitIdle(t *testing.T, e *env) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("counters never returned to zero: %+v", e.srv.pools["b300"].Snapshot())
+			t.Fatalf("counters never returned to zero: %+v", e.srv.pools["b300"].snapshot())
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

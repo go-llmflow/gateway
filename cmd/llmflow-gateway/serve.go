@@ -15,6 +15,7 @@ import (
 	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/export"
 	"github.com/go-llmflow/gateway/gateway"
+	"github.com/go-llmflow/gateway/ha"
 	"github.com/go-llmflow/gateway/secret"
 	"github.com/go-llmflow/gateway/store"
 	"github.com/spf13/cobra"
@@ -91,6 +92,14 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 	if c.SCIM != nil {
 		if err := get("scim token_file", c.SCIM.TokenFile, &s.SCIMToken); err != nil {
 			return s, err
+		}
+	}
+	if c.HA != nil {
+		if err := get("ha secret_file", c.HA.SecretFile, &s.HASecret); err != nil {
+			return s, err
+		}
+		if len(s.HASecret) < ha.MinSecret {
+			return s, fmt.Errorf("ha secret_file: the shared secret must be at least %d bytes", ha.MinSecret)
 		}
 	}
 	if c.Alerts.SMTP != nil {

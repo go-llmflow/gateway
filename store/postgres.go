@@ -102,7 +102,7 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(schemaLock)); err != nil {
 			return err
 		}
-		for _, s := range []string{schema, usersSchema, modelsSchema, toolsSchema, budgetsSchema, allowSchema, rotationSchema, scimSchema, auditSchema} {
+		for _, s := range []string{schema, usersSchema, modelsSchema, toolsSchema, budgetsSchema, allowSchema, rotationSchema, scimSchema, auditSchema, haSchema} {
 			if _, err := tx.Exec(ctx, s); err != nil {
 				return err
 			}

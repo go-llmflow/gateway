@@ -263,7 +263,14 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			}
 		}
 		promptEst := int64(len(out) / 4)
-		grant := g.pool.Acquire(key.Org, g.class, promptEst+req.MaxTokens)
+		grant, aerr := g.pool.acquire(key.Org, g.class, promptEst+req.MaxTokens)
+		if aerr != nil {
+			// ha, on_owner_unreachable = "reject".
+			s.limiter.release(key.ID, 0)
+			s.met.denied.add(1, key.Team, "fairshare_owner")
+			apiError(w, http.StatusServiceUnavailable, "service_unavailable", errNoOwner.Error())
+			return
+		}
 		// Fallback on saturation (#58): vLLM queues rather than refusing, so
 		// the gateway decides. Only a BORROWING request moves, and only to a
 		// fallback whose pool has room right now (TryAcquire checks and takes
@@ -273,7 +280,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		if movesOnSaturation(g, grant) {
 			idx := 0
 			for next := s.nextFallback(g, &idx, key, scope); next != nil; next = s.nextFallback(g, &idx, key, scope) {
-				tg, ok := next.pool.TryAcquire(key.Org, next.class, promptEst+req.MaxTokens)
+				tg, ok := next.pool.tryAcquire(key.Org, next.class, promptEst+req.MaxTokens)
 				if !ok {
 					continue
 				}
@@ -433,7 +440,15 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			grant.Release(0)
 			g = next
 			scope.model, scope.unit = g.cfg.Name, g.cfg.Cost.Unit
-			grant = g.pool.Acquire(key.Org, g.class, promptEst+req.MaxTokens)
+			ng, aerr := g.pool.acquire(key.Org, g.class, promptEst+req.MaxTokens)
+			if aerr != nil {
+				// The released grant stays the one the deferred accounting
+				// releases again (a no-op).
+				status = http.StatusServiceUnavailable
+				apiError(w, status, "service_unavailable", errNoOwner.Error())
+				return
+			}
+			grant = ng
 			target := g.cfg.UpstreamModel
 			if out, _, err = openai.RewriteFor(ep, body, func(string) (string, error) { return target, nil }, s.isoFor(g, key)); err != nil {
 				status = http.StatusBadRequest

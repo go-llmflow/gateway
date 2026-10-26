@@ -19,7 +19,7 @@ func TestPropertyNoWithinShareRequestMoves(t *testing.T) {
 		r := rand.New(rand.NewPCG(seed, seed*7919))
 		c1, c2 := 1+r.IntN(6), 1+r.IntN(6)
 		primary := &group{cfg: config.ModelGroup{Name: "p", FallbackOn: []string{"unavailable", "saturated"}},
-			pool: fairshare.NewPool("p", c1, shares, time.Hour, nil)}
+			pool: localPool{fairshare.NewPool("p", c1, shares, time.Hour, nil)}}
 		target := fairshare.NewPool("t", c2, shares, time.Hour, nil)
 		var live []*fairshare.Grant
 		for step := 0; step < 300; step++ {
@@ -29,7 +29,7 @@ func TestPropertyNoWithinShareRequestMoves(t *testing.T) {
 				live = append(live[:i], live[i+1:]...)
 				continue
 			}
-			g := primary.pool.Acquire(orgs[r.IntN(len(orgs))], fairshare.Interactive, 10)
+			g, _ := primary.pool.acquire(orgs[r.IntN(len(orgs))], fairshare.Interactive, 10)
 			move := movesOnSaturation(primary, g)
 			if move && !g.Borrowing {
 				t.Fatalf("seed %d step %d: a within-share request would move", seed, step)

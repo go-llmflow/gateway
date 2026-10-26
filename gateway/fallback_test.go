@@ -146,7 +146,7 @@ func idleAll(t *testing.T, e *env) {
 	for {
 		busy := 0
 		for _, p := range e.srv.pools {
-			for _, s := range p.Snapshot() {
+			for _, s := range p.snapshot() {
 				busy += s.InFlight + s.Borrowing
 			}
 		}
