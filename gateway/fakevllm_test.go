@@ -148,6 +148,10 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 	case "/detokenize":
 		fmt.Fprint(w, `{"prompt":"abc"}`)
 		return
+	case "/v1/messages/count_tokens":
+		// vLLM v0.32.0 AnthropicCountTokensResponse.
+		fmt.Fprint(w, `{"input_tokens":17,"context_management":{"original_input_tokens":17}}`)
+		return
 	}
 	if stream, _ := body["stream"].(bool); stream {
 		w.Header().Set("Content-Type", "text/event-stream")

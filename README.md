@@ -812,7 +812,7 @@ entries, and checkpoints sign a self-describing message
 | `POST /admin/audit/verify` | recomputes the chain and checks the signed checkpoints with the gateway's own key, and the newest anchored checkpoint when an anchor export is configured: `{"ok","first","last","entries","checkpoints","unsigned","anchored","anchor_seq","signed","problems"}`. One verification at a time (429 otherwise); proxy admins and viewers only. For an independent check use `llmflow-gateway audit verify` with a public key kept elsewhere |
 
 Client routes: `POST /v1/chat/completions`, `/v1/completions`,
-`/v1/embeddings`, `/v1/responses`, `/v1/messages`, `/v1/rerank`, `/v2/rerank`,
+`/v1/embeddings`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/rerank`, `/v2/rerank`,
 `/v1/audio/transcriptions`, `/tokenize`, `/detokenize`, `GET /v1/models`, and `POST /mcp` with `mcp_server` blocks. `GET /healthz` returns 503 when the budget
 state is stale and fail-closed is on.
 
@@ -942,7 +942,7 @@ Coding agents that speak the Messages API can therefore use local models. Point 
 
 In a stream, the input counts come from `message_start` and the output count from the final `message_delta`.
 
-`/v1/messages/count_tokens` is not routed.
+`/v1/messages/count_tokens` (since v0.12.1) goes to vLLM's own endpoint, which renders the chat template and counts the prompt's tokens, so the count is exact (`{"input_tokens": N}`). Claude Code calls it, and falls back to a character-based estimate without it. It is authenticated, allow-listed and rate limited like `/tokenize`, and it is not charged and not guarded. `cache_salt` and the engine fields are stripped; `chat_template_kwargs` is kept, so the count matches the `/v1/messages` request that carries the same fields.
 
 Errors carry both shapes: OpenAI's `{"error": {...}}` and Anthropic's top-level `"type": "error"`.
 
@@ -1026,7 +1026,7 @@ the gateway closes there with `cache_salt`; Anthropic accepts no salt.
 **Routes.**
 - `/v1/messages` (JSON and streaming) only. `/v1/chat/completions` and the other routes answer 400 for an Anthropic model, because Anthropic's OpenAI-compatibility layer "is not considered a long-term or production-ready solution" ([OpenAI SDK compatibility](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk)).
 - `/v1/models` lists the model to the allowed scopes only.
-- `/v1/messages/count_tokens` is not routed; Claude Code then estimates the counts.
+- `/v1/messages/count_tokens` (since v0.12.1) is sent to Anthropic's endpoint with the organisation's key and the same filtered headers. It is not charged: token counting "is free to use" ([Token counting](https://platform.claude.com/docs/en/build-with-claude/token-counting)). It is rate limited per key like every route. The pre-call `pii` and `hide_secrets` guardrails still mask the prompt, because a count also sends it off the site; the count is then that of the prompt `/v1/messages` actually sends. Anthropic rate-limits counting separately from message creation, so a 429 on a count is passed through without starting the organisation's messages back-off, and a messages back-off does not stop the counts. A shared workspace refuses both. An organisation not allowed gets 404.
 - A client may authenticate with `Authorization: Bearer llmf-…` or `x-api-key: llmf-…`, as Anthropic SDKs and Claude Code do.
 
 **What reaches Anthropic.** Headers are built from scratch:
