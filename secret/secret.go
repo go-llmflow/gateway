@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -233,6 +234,96 @@ func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
 		return "", fmt.Errorf("secret %s holds more than one line", p)
 	}
 	return s, nil
+}
+
+// PEM kinds ResolvePEM accepts.
+const (
+	// PEMCertificates is one or more CERTIFICATE blocks (a leaf and its
+	// chain, or a bundle of CAs).
+	PEMCertificates = "certificates"
+	// PEMPrivateKey is exactly one PRIVATE KEY block (PKCS #8, EC or RSA).
+	PEMPrivateKey = "private key"
+)
+
+// maxPEM bounds a PEM file or field (a CA bundle of a few hundred
+// certificates).
+const maxPEM = 1 << 20
+
+// ResolvePEM reads PEM material a reference names: a file, or an
+// OpenBao/Vault field, over several lines, unlike Resolve which reads one
+// line (tokens, passwords). The content must be PEM of the kind asked for
+// and nothing else. A private key in a file must not be readable by group
+// or others (chmod 600). Errors never contain the material.
+func (r *Resolver) ResolvePEM(ctx context.Context, ref, kind string) ([]byte, error) {
+	p, err := Parse(ref)
+	if err != nil {
+		return nil, err
+	}
+	var data []byte
+	if p.IsVault() {
+		var v string
+		if v, err = r.vaultField(ctx, p); err != nil {
+			return nil, err
+		}
+		if len(v) > maxPEM {
+			return nil, fmt.Errorf("secret %s is larger than %d bytes", p, maxPEM)
+		}
+		data = []byte(v)
+	} else {
+		if kind == PEMPrivateKey {
+			st, err := os.Stat(p.File)
+			if err != nil {
+				return nil, err
+			}
+			if st.Mode().Perm()&0o077 != 0 {
+				return nil, fmt.Errorf("secret %s: a private key must not be readable by group or others (mode %#o; chmod 600)", p, st.Mode().Perm())
+			}
+		}
+		if data, err = readBounded(p.File, maxPEM); err != nil {
+			return nil, err
+		}
+	}
+	if err := checkPEM(data, kind); err != nil {
+		return nil, fmt.Errorf("secret %s: %w", p, err)
+	}
+	return bytes.TrimSpace(data), nil
+}
+
+// checkPEM accepts PEM blocks of one kind, and blank space between them.
+func checkPEM(data []byte, kind string) error {
+	rest := bytes.TrimSpace(data)
+	n := 0
+	for len(rest) > 0 {
+		var b *pem.Block
+		b, rest = pem.Decode(rest)
+		if b == nil {
+			return errors.New("not PEM (or text outside the PEM blocks)")
+		}
+		rest = bytes.TrimSpace(rest)
+		n++
+		switch kind {
+		case PEMCertificates:
+			if b.Type != "CERTIFICATE" {
+				return fmt.Errorf("a %q block where certificates were expected", b.Type)
+			}
+			if _, err := x509.ParseCertificate(b.Bytes); err != nil {
+				return errors.New("a certificate does not parse")
+			}
+		case PEMPrivateKey:
+			if !strings.HasSuffix(b.Type, "PRIVATE KEY") {
+				return fmt.Errorf("a %q block where a private key was expected", b.Type)
+			}
+		default:
+			return fmt.Errorf("unknown PEM kind %q", kind)
+		}
+	}
+	switch {
+	case n == 0:
+		return errors.New("empty")
+	case kind == PEMPrivateKey && n != 1:
+		return fmt.Errorf("%d private keys, want one", n)
+	}
+	return nil
 }
 
 func (r *Resolver) vaultField(ctx context.Context, p Ref) (string, error) {

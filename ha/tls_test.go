@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-llmflow/gateway/fairshare"
+	"github.com/go-llmflow/gateway/internal/testpki"
 	"github.com/go-llmflow/gateway/store"
 )
 
@@ -112,5 +113,35 @@ func TestMutualTLS(t *testing.T) {
 	}
 	if _, _, err := MutualTLS(pki.cert, pki.key, []byte("not pem"), "llmflow-ha"); err == nil {
 		t.Fatal("a CA file without a certificate was accepted")
+	}
+
+	// An expired certificate: MutualTLS refuses it at start, and a peer
+	// presenting one anyway is not answered.
+	root := testpki.NewRoot("root")
+	expC, expK := root.Leaf("llmflow-ha", "ecdsa", time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
+	if _, _, err := MutualTLS(expC, expK, root.PEM(), "llmflow-ha"); err == nil {
+		t.Fatal("an expired certificate was accepted")
+	}
+	okC, okK := root.ValidLeaf("llmflow-ha", "ed25519")
+	srvTLS, _, err := MutualTLS(okC, okK, root.PEM(), "llmflow-ha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer ln.Close()
+	hs := &http.Server{Handler: m1.n.Handler(), ReadHeaderTimeout: time.Second}
+	go func() { _ = hs.Serve(tls.NewListener(ln, srvTLS)) }()
+	defer hs.Close()
+	pair, err := tls.X509KeyPair(expC, expK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(root.PEM())
+	cfg = testConfig("expired", "127.0.0.1:9")
+	cfg.ClientTLS = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{pair}, RootCAs: pool, ServerName: "llmflow-ha"}
+	e, _ := New(cfg, st)
+	if err := e.call(context.Background(), ln.Addr().String(), pathAcquire, req, &out); err == nil {
+		t.Fatal("a peer with an expired certificate was answered")
 	}
 }
