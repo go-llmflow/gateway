@@ -298,8 +298,14 @@ func (p *Postgres) CreateKey(ctx context.Context, k Key) error {
 	return nil
 }
 
-const keyCols = `k.id, k.hash, coalesce(t.org, ''), k.team, k.project, k.owner, k.tags, k.name, k.rpm, k.tpm, k.max_inflight, k.created_at, k.revoked, k.prev_hash, k.prev_expires, k.rotated_at, k.rotate_every, k.rotate_grace, k.rotate_target, k.policy, k.guardrails`
-const keyFrom = ` FROM llmflow_keys k LEFT JOIN llmflow_teams t ON t.name = k.team `
+// keyCols reads a key of a disabled team or project as revoked: disabling
+// revokes the keys in the same transaction, but a key inserted concurrently
+// escapes that UPDATE (security audit 2026-10-26, A4).
+const keyCols = `k.id, k.hash, coalesce(t.org, ''), k.team, k.project, k.owner, k.tags, k.name, k.rpm, k.tpm, k.max_inflight, k.created_at, ` +
+	`(k.revoked OR coalesce(t.disabled, false) OR coalesce(pr.disabled, false)), ` +
+	`k.prev_hash, k.prev_expires, k.rotated_at, k.rotate_every, k.rotate_grace, k.rotate_target, k.policy, k.guardrails`
+const keyFrom = ` FROM llmflow_keys k LEFT JOIN llmflow_teams t ON t.name = k.team ` +
+	`LEFT JOIN llmflow_projects pr ON pr.team = k.team AND pr.name = k.project AND k.project <> '' `
 
 func scanKey(r pgx.Row) (Key, error) {
 	var k Key
