@@ -1365,7 +1365,13 @@ model "llama" {
 - Every membership change re-apportions the organisations' integer reservations with the same Hamilton method (`fairshare.Pool.SetCapacity`).
 - Every change is audited: `slurm.member_added`, `slurm.member_drained` (with the reason), `slurm.member_removed`, and `pool.capacity` (before, after, reservations).
 - Requests in flight keep their within-share or borrowing status.
-- Not yet with an `ha` block: a shared pool's C is fixed by its owner replica, so the configuration refuses the combination.
+
+**With an `ha` block (since v0.16.0).**
+- Every replica runs its own discovery and its own health checks, for its own routing. Publishing the healthy set through PostgreSQL was the alternative; it was not chosen because it ties every replica's routing to the owner's liveness and to PostgreSQL, and because what is healthy depends on the replica's network path to the instance.
+- Only the pool's owner's view sets C. The owner decides with it, and publishes C and the integer reservations with the lease's epoch (`llmflow_pool_capacity` shows the decided C on every replica). Forwarded decisions therefore use the owner's membership, and a replica that sees fewer instances still routes only to those it sees.
+- A replica takes a pool only after its discovery has read the members once. Until then, as after a takeover before that, requests are admitted at the lowest priority (or refused with `on_owner_unreachable = "reject"`), as when no owner answers.
+- An owner whose slurmrestd stays unreadable past `stale_after` yields: a replica that still reads the jobs takes the lease (epoch + 1) and stays quiet for one `lease_ttl`, until the previous owner's validity has surely ended. If no replica reads slurmrestd, the owner keeps the pool with its last known members.
+- Chaos (real PostgreSQL): the owner killed while a job joins (the survivor owns with the new C, epoch + 1); slurmrestd lost by the owner only (handover after 1.2 s, never two owners in ~950 samples, the test fails without the quiet period); two replicas that disagree (each routes to what it sees, the fair share is the owner's). The sum of the reservations never exceeded C in any sample.
 
 **Safety.**
 - Only the configured accounts and partitions (and users) are trusted. Without this, anyone could submit a job named `llmflow:llama:8000` and capture prompts.

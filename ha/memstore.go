@@ -24,6 +24,9 @@ type memLease struct {
 	owner, addr string
 	epoch       int64
 	expires     time.Time
+	yield       bool
+	capacity    int
+	reserved    string
 }
 
 type memUsage struct {
@@ -41,22 +44,31 @@ func NewMemStore(now func() time.Time) *MemStore {
 	return &MemStore{now: now, leases: map[string]*memLease{}, usage: map[string]map[string]memUsage{}}
 }
 
-func (m *MemStore) ClaimLease(_ context.Context, pool, owner, addr string, held int64, ttl time.Duration) (store.Lease, error) {
+func (m *MemStore) ClaimLease(_ context.Context, c store.Claim) (store.Lease, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
-	l := m.leases[pool]
-	switch {
-	case l == nil:
-		l = &memLease{owner: owner, addr: addr, epoch: 1, expires: now.Add(ttl)}
-		m.leases[pool] = l
-	case !now.Before(l.expires) || (l.owner == owner && l.epoch == held):
-		if !(l.owner == owner && l.epoch == held && now.Before(l.expires)) {
-			l.epoch++
-		}
-		l.owner, l.addr, l.expires = owner, addr, now.Add(ttl)
+	l := m.leases[c.Pool]
+	if l == nil {
+		l = &memLease{capacity: -1}
+		m.leases[c.Pool] = l
 	}
-	return store.Lease{Pool: pool, Owner: l.owner, Addr: l.addr, Epoch: l.epoch, Live: now.Before(l.expires)}, nil
+	live := now.Before(l.expires)
+	next, quiet := int64(-1), false
+	switch {
+	case l.owner == c.Owner && l.epoch == c.Held && c.Held > 0 && live:
+		next = l.epoch
+	case !live && (c.MayTake || l.owner == c.Owner && l.epoch == c.Held && c.Held > 0):
+		next = l.epoch + 1
+	case live && l.yield && l.owner != c.Owner && c.MayTakeYielded:
+		next, quiet = l.epoch+1, true
+	}
+	if next >= 0 {
+		l.owner, l.addr, l.epoch, l.expires = c.Owner, c.Addr, next, now.Add(c.TTL)
+		l.yield, l.capacity, l.reserved = c.Yield, c.Capacity, c.Reserved
+	}
+	return store.Lease{Pool: c.Pool, Owner: l.owner, Addr: l.addr, Epoch: l.epoch, Live: now.Before(l.expires),
+		Yield: l.yield, Quiet: quiet, Capacity: l.capacity, Reserved: l.reserved}, nil
 }
 
 func (m *MemStore) ReleaseLease(_ context.Context, pool, owner string, epoch int64) error {
@@ -143,11 +155,11 @@ type partitionError struct{}
 
 func (*partitionError) Error() string { return "ha: partitioned from the database (test)" }
 
-func (v *View) ClaimLease(ctx context.Context, pool, owner, addr string, held int64, ttl time.Duration) (store.Lease, error) {
+func (v *View) ClaimLease(ctx context.Context, c store.Claim) (store.Lease, error) {
 	if err := v.err(); err != nil {
 		return store.Lease{}, err
 	}
-	return v.HAStore.ClaimLease(ctx, pool, owner, addr, held, ttl)
+	return v.HAStore.ClaimLease(ctx, c)
 }
 
 func (v *View) ReleaseLease(ctx context.Context, pool, owner string, epoch int64) error {

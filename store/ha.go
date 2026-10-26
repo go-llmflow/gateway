@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS llmflow_pool_leases (
 	epoch      bigint NOT NULL,
 	expires_at timestamptz NOT NULL
 );
+ALTER TABLE llmflow_pool_leases ADD COLUMN IF NOT EXISTS yield boolean NOT NULL DEFAULT false;
+ALTER TABLE llmflow_pool_leases ADD COLUMN IF NOT EXISTS capacity integer NOT NULL DEFAULT -1;
+ALTER TABLE llmflow_pool_leases ADD COLUMN IF NOT EXISTS reserved text NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS llmflow_pool_usage (
 	pool       text NOT NULL,
 	org        text NOT NULL,
@@ -45,6 +48,31 @@ type Lease struct {
 	Epoch int64
 	// Live: the lease has not expired (by PostgreSQL's clock).
 	Live bool
+	// Yield: the owner asks to be replaced (it cannot read the pool's
+	// membership any more, #75); Quiet: this claim took such a lease, so
+	// the new owner must not decide for one lease duration.
+	Yield, Quiet bool
+	// Capacity and Reserved are what the owner published: the pool's C
+	// and the integer reservations (JSON) it decides with at this epoch
+	// (-1 and "": not published).
+	Capacity int
+	Reserved string
+}
+
+// Claim is one claim of a pool's lease.
+type Claim struct {
+	Pool, Owner, Addr string
+	// Held is the epoch the claimant owns (0: none).
+	Held int64
+	TTL  time.Duration
+	// MayTake: the claimant may take an expired lease (it knows the
+	// pool's membership); MayTakeYielded: it may take a live lease whose
+	// owner yields (its own view of the membership is fresh).
+	MayTake, MayTakeYielded bool
+	// Yield, Capacity and Reserved are written with the claimant's lease.
+	Yield    bool
+	Capacity int
+	Reserved string
 }
 
 // PoolUsage is one organisation's fair-share state in a pool, as the
@@ -63,11 +91,12 @@ var ErrFenced = errors.New("store: fenced: the lease is held by a newer owner or
 
 // HAStore is what package ha needs from the store. Only PostgreSQL has it.
 type HAStore interface {
-	// ClaimLease renews the lease when owner holds it at epoch held and it
-	// has not expired, takes it (epoch + 1) when it has expired or does
-	// not exist, and otherwise changes nothing. It returns the lease as it
-	// stands afterwards.
-	ClaimLease(ctx context.Context, pool, owner, addr string, held int64, ttl time.Duration) (Lease, error)
+	// ClaimLease renews the lease when the claimant holds it at epoch Held
+	// and it has not expired; takes it (epoch + 1) when it has expired (or
+	// does not exist) and MayTake, or when it is live but its owner yields
+	// and MayTakeYielded (Quiet); otherwise changes nothing. It returns the
+	// lease as it stands afterwards.
+	ClaimLease(ctx context.Context, c Claim) (Lease, error)
 	// ReleaseLease ends owner's lease at epoch now (graceful shutdown).
 	ReleaseLease(ctx context.Context, pool, owner string, epoch int64) error
 	// SaveUsage writes the owner's state, fenced: ErrFenced unless owner
@@ -80,23 +109,46 @@ type HAStore interface {
 
 var _ HAStore = (*Postgres)(nil)
 
-func (p *Postgres) ClaimLease(ctx context.Context, pool, owner, addr string, held int64, ttl time.Duration) (Lease, error) {
-	ms := ttl.Milliseconds()
-	_, err := p.pool.Exec(ctx, `
-		INSERT INTO llmflow_pool_leases AS l (pool, owner, addr, epoch, expires_at)
-		VALUES ($1, $2, $3, 1, now() + $5 * interval '1 millisecond')
-		ON CONFLICT (pool) DO UPDATE
-		SET owner = EXCLUDED.owner, addr = EXCLUDED.addr, expires_at = EXCLUDED.expires_at,
-		    epoch = CASE WHEN l.owner = EXCLUDED.owner AND l.epoch = $4 AND l.expires_at > now()
-		                 THEN l.epoch ELSE l.epoch + 1 END
-		WHERE l.expires_at <= now() OR (l.owner = EXCLUDED.owner AND l.epoch = $4)`,
-		pool, owner, addr, held, ms)
-	if err != nil {
-		return Lease{}, err
-	}
-	l := Lease{Pool: pool}
-	err = p.pool.QueryRow(ctx, `SELECT owner, addr, epoch, expires_at > now() FROM llmflow_pool_leases WHERE pool = $1`, pool).
-		Scan(&l.Owner, &l.Addr, &l.Epoch, &l.Live)
+func (p *Postgres) ClaimLease(ctx context.Context, c Claim) (Lease, error) {
+	l := Lease{Pool: c.Pool}
+	err := pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		// The row exists (epoch 0, expired) before anyone locks it, so the
+		// decision below is always taken under the row lock: of several
+		// claimants exactly one sees the lease free.
+		if _, err := tx.Exec(ctx, `INSERT INTO llmflow_pool_leases (pool, owner, addr, epoch, expires_at)
+			VALUES ($1, '', '', 0, '-infinity') ON CONFLICT (pool) DO NOTHING`, c.Pool); err != nil {
+			return err
+		}
+		var owner string
+		var epoch int64
+		var live, yield bool
+		if err := tx.QueryRow(ctx, `SELECT owner, epoch, expires_at > now(), yield FROM llmflow_pool_leases WHERE pool = $1 FOR UPDATE`, c.Pool).
+			Scan(&owner, &epoch, &live, &yield); err != nil {
+			return err
+		}
+		next, quiet := int64(-1), false
+		switch {
+		case owner == c.Owner && epoch == c.Held && c.Held > 0 && live:
+			next = epoch // renewal
+		case !live && (c.MayTake || owner == c.Owner && epoch == c.Held && c.Held > 0):
+			next = epoch + 1 // an expired lease (or our own, lapsed)
+		case live && yield && owner != c.Owner && c.MayTakeYielded:
+			// A handover: the owner can no longer read its membership. It
+			// may still be deciding until its validity ends, so the new
+			// owner keeps quiet for a whole lease first.
+			next, quiet = epoch+1, true
+		}
+		if next >= 0 {
+			if _, err := tx.Exec(ctx, `UPDATE llmflow_pool_leases SET owner = $2, addr = $3, epoch = $4,
+				expires_at = now() + $5 * interval '1 millisecond', yield = $6, capacity = $7, reserved = $8 WHERE pool = $1`,
+				c.Pool, c.Owner, c.Addr, next, c.TTL.Milliseconds(), c.Yield, c.Capacity, c.Reserved); err != nil {
+				return err
+			}
+		}
+		l.Quiet = quiet
+		return tx.QueryRow(ctx, `SELECT owner, addr, epoch, expires_at > now(), yield, capacity, reserved FROM llmflow_pool_leases WHERE pool = $1`, c.Pool).
+			Scan(&l.Owner, &l.Addr, &l.Epoch, &l.Live, &l.Yield, &l.Capacity, &l.Reserved)
+	})
 	return l, err
 }
 
