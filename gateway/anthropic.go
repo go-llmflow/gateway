@@ -71,10 +71,10 @@ type extRuntime struct {
 	defaultKey string
 	isolated   bool // cache_isolation is not "none"
 
-	mu      sync.Mutex
-	until   map[string]time.Time // org → provider back-off end
-	ws      map[string]string    // org → anthropic-workspace-id seen
-	wsOrg   map[string]string    // workspace → org
+	mu     sync.Mutex
+	until  map[string]time.Time // org → provider back-off end
+	ws     map[string]string    // org → anthropic-workspace-id seen
+	wsOrg  map[string]string    // workspace → org
 	poison map[string]bool      // orgs refused: shared workspace
 }
 
