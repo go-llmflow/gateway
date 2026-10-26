@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-llmflow/gateway/config"
+	"github.com/go-llmflow/gateway/fairshare"
 	"github.com/go-llmflow/gateway/openai"
 	"github.com/go-llmflow/gateway/store"
 	"go.opentelemetry.io/otel/attribute"
@@ -40,6 +41,14 @@ func (s *Server) nextFallback(primary *group, idx *int, key store.Key, scope req
 		return g
 	}
 	return nil
+}
+
+// movesOnSaturation decides whether a request just admitted in g's pool
+// looks for a fallback because the pool is saturated (#58): only a
+// borrowing request, only when the group falls back on "saturated", and
+// only when the pool was full at admission or vLLM reports its queue.
+func movesOnSaturation(g *group, grant *fairshare.Grant) bool {
+	return grant.Borrowing && g.cfg.FallsBackOn("saturated") && (grant.Saturated || g.queueSaturated())
 }
 
 // guardRID returns the request id: the one the guardrails already used
@@ -213,6 +222,33 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		}
 		promptEst := int64(len(out) / 4)
 		grant := g.pool.Acquire(key.Org, g.class, promptEst+req.MaxTokens)
+		// Fallback on saturation (#58): vLLM queues rather than refusing, so
+		// the gateway decides. Only a BORROWING request moves, and only to a
+		// fallback whose pool has room right now (TryAcquire checks and takes
+		// the slot atomically); a within-share request keeps its reservation.
+		// One move at most: a request is never moved again from the target,
+		// and with no room anywhere it simply queues where it is.
+		if movesOnSaturation(g, grant) {
+			idx := 0
+			for next := s.nextFallback(g, &idx, key, scope); next != nil; next = s.nextFallback(g, &idx, key, scope) {
+				tg, ok := next.pool.TryAcquire(key.Org, next.class, promptEst+req.MaxTokens)
+				if !ok {
+					continue
+				}
+				target := next.cfg.UpstreamModel
+				moved, _, rerr := openai.RewriteFor(ep, body, func(string) (string, error) { return target, nil }, s.isolation(key))
+				if rerr != nil {
+					tg.Release(0)
+					break
+				}
+				grant.Release(0)
+				s.met.fallbacks.add(1, g.cfg.Name, next.cfg.Name, "saturated")
+				g, grant, out = next, tg, moved
+				scope.model = g.cfg.Name
+				w.Header().Set("X-Llmflow-Model", g.cfg.Name)
+				break
+			}
+		}
 
 		// Everything below ends in finish, which charges what vLLM did.
 		// The usage vLLM reports is used when it arrives. When it does not
@@ -312,8 +348,8 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			}
 			return nil
 		}
-		// Fallbacks: when no upstream of the group took the request (all
-		// down or cooling down) or vLLM answered 429/503 (saturated), and
+		// Fallbacks on "unavailable": when no upstream of the group took the
+		// request (all down or cooling down) or vLLM answered 429/503, and
 		// nothing has reached the client, the request moves to the next
 		// fallback group its team may use and afford. It leaves the first
 		// pool and acquires in the target pool, so it gets its org's
@@ -328,7 +364,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				return
 			}
 			saturated := err == nil && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable)
-			if err == nil && !saturated || r.Context().Err() != nil {
+			if err == nil && !saturated || r.Context().Err() != nil || !primary.cfg.FallsBackOn("unavailable") {
 				break
 			}
 			next := s.nextFallback(primary, &fallbackIdx, key, scope)
@@ -341,7 +377,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				u.inflight.Add(-1)
 				resp, u = nil, nil
 			}
-			s.met.fallbacks.add(1, g.cfg.Name, next.cfg.Name)
+			s.met.fallbacks.add(1, g.cfg.Name, next.cfg.Name, "unavailable")
 			upSpan.AddEvent("fallback", trace.WithAttributes(attribute.String("from", g.cfg.Name), attribute.String("to", next.cfg.Name)))
 			grant.Release(0)
 			g = next

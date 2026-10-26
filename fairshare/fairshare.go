@@ -173,21 +173,50 @@ type Grant struct {
 	tokens    int64
 	Priority  int
 	Borrowing bool
+	// Saturated: when this request arrived, the pool already had C or more
+	// requests in flight (the gateway's own view of saturation, #58).
+	Saturated bool
 	released  bool
+}
+
+// inflightLocked is the pool's requests in flight.
+func (p *Pool) inflightLocked() int {
+	n := 0
+	for _, t := range p.order {
+		n += t.inflight
+	}
+	return n
+}
+
+// TryAcquire is Acquire only when the pool has room (fewer than C requests
+// in flight), decided and recorded atomically: a fallback that moves a
+// request here never pushes this pool past C, so two saturated pools
+// cannot hand requests to each other (#58).
+func (p *Pool) TryAcquire(teamName string, class Class, estTokens int64) (*Grant, bool) {
+	return p.acquire(teamName, class, estTokens, true)
 }
 
 // Acquire records a new in-flight request of a team and returns its
 // priority. A team unknown to the pool has a share of 0: it can only
 // borrow.
 func (p *Pool) Acquire(teamName string, class Class, estTokens int64) *Grant {
+	g, _ := p.acquire(teamName, class, estTokens, false)
+	return g
+}
+
+func (p *Pool) acquire(teamName string, class Class, estTokens int64, needRoom bool) (*Grant, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	busy := p.inflightLocked()
+	if needRoom && busy >= p.capacity {
+		return nil, false
+	}
 	p.advance()
 	t := p.teams[teamName]
 	if t == nil {
 		t = p.addTeam(teamName, 0, 0)
 	}
-	g := &Grant{pool: p, team: t, tokens: estTokens}
+	g := &Grant{pool: p, team: t, tokens: estTokens, Saturated: busy >= p.capacity}
 	// The test is on the number of within-share requests in flight, not
 	// on the total: a team that keeps more requests in flight than its
 	// reservation (any closed-loop client pool larger than share × C)
@@ -209,7 +238,7 @@ func (p *Pool) Acquire(teamName string, class Class, estTokens int64) *Grant {
 	}
 	t.inflight++
 	t.inflightTokens += estTokens
-	return g
+	return g, true
 }
 
 // Release ends the request and charges the resources it actually

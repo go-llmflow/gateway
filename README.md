@@ -798,22 +798,28 @@ A model group can name fallback groups, tried in order:
 
 ```hcl
 model "llama-70b" {
-  pool      = "b300"
-  fallbacks = ["llama-8b"]     # at most 4; not a guard model, not itself
+  pool        = "b300"
+  fallbacks   = ["llama-8b"]                  # at most 4; not a guard model, not itself
+  fallback_on = ["unavailable", "saturated"]  # default ["unavailable"]
+  saturation_waiting = 4                      # optional: also read vLLM's own queue
   # …
 }
 ```
 
-**When.** Before anything has reached the client, in either of two cases:
+**When: `"unavailable"` (the default).** A fallback is taken before anything has reached the client, in either of two cases:
 
 - no upstream of the group took the request (all down, failing or cooling down, after the usual retries);
 - vLLM answered `429` or `503`.
 
-vLLM does not answer `429` or `503` when it is saturated: it queues the request
-(observed in the real-vLLM run of go-llmflow/bench v0.2.0). So in practice a
-fallback is taken on an **outage**, not on saturation. Falling back on
-saturation (from the pool's in-flight count against its capacity) is planned
-in #58.
+**When: `"saturated"` (since v0.11.0, #58).** vLLM never answers `429`/`503` when it is saturated: it queues the request, as the real-vLLM run of go-llmflow/bench showed. So the gateway decides saturation itself.
+
+- **The pool is saturated** when it already had `capacity` (C) or more requests in flight when this request arrived. With `saturation_waiting = N`, it is also saturated when the group's upstreams report N or more requests waiting in `vllm:num_requests_waiting`.
+  - That metric is scraped from each upstream's `/metrics` at the health interval, with the health timeout, and cached.
+  - An upstream that cannot be read counts as unknown, never as saturated.
+  - vLLM serves `/metrics` without authentication: keep its ports internal.
+- **Only a borrowing request moves.** A request within its organisation's share keeps its reservation and queues in its own pool.
+- **Only into room.** The request moves to the first fallback whose pool has room, meaning fewer than C in flight. The check and the admission there happen in one step.
+- **Once at most.** A moved request is never moved again. If no fallback has room, it simply queues where it is, so two saturated groups that name each other cannot ping-pong.
 
 The request then moves to the next fallback that its team is allowed to use and whose budgets it has not exceeded. Any other answer, a `400` for instance, is final.
 
@@ -823,7 +829,7 @@ The request then moves to the next fallback that its team is allowed to use and 
 - the body is rewritten for the target's upstream model;
 - the request is **charged, budgeted and recorded under the model that served it**, at that model's prices and in its pool.
 
-**Visibility.** The response carries `X-Llmflow-Model: <model used>`, and `llmflow_fallbacks_total{from,to}` counts the moves. Guardrails have already run on the prompt and run on the answer, whichever model produced it.
+**Visibility.** The response carries `X-Llmflow-Model: <model used>`, and `llmflow_fallbacks_total{from,to,reason}` counts the moves (`reason` is `unavailable` or `saturated`). Guardrails have already run on the prompt and run on the answer, whichever model produced it.
 
 ### Responses API
 
@@ -1250,8 +1256,7 @@ security audit of 2026-10-26):
     - A span still open after 64 KiB is released masked as far as it has reached. Its tail goes out in clear if that tail no longer matches on its own.
     - Audit entries of guardrail decisions are written asynchronously. When the queue is full they are dropped, counted (`llmflow_guardrail_audit_dropped_total`) and alerted.
 16. **Phone numbers have no checksum**: a PII guardrail that masks them also masks 10-digit references that start with 0. This was measured in go-llmflow/pii.
-17. **Fallbacks are taken on an outage, not on saturation**: vLLM queues
-    instead of answering `429`/`503` (see [Fallbacks](#fallbacks), #58).
+17. **Fallback on saturation is the gateway's estimate.** vLLM queues instead of answering `429`/`503`, so `fallback_on = ["saturated"]` (v0.11.0) decides from two signals: the pool's in-flight count against C, and, optionally, vLLM's `num_requests_waiting` scraped at the health interval. A burst shorter than that interval is judged on the first signal only.
 
 ## Security audit 2026-10-26
 

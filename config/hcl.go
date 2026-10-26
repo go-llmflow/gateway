@@ -426,6 +426,10 @@ type modelHCL struct {
 	KeyFile            *string       `hcl:"key_file,optional"`
 	Fallbacks          []string      `hcl:"fallbacks,optional"`
 	FallbacksRange     hcl.Range     `hcl:"fallbacks,attr_value_range"`
+	FallbackOn         []string      `hcl:"fallback_on,optional"`
+	FallbackOnRange    hcl.Range     `hcl:"fallback_on,attr_value_range"`
+	SatWaiting         *int          `hcl:"saturation_waiting,optional"`
+	SatWaitingRange    hcl.Range     `hcl:"saturation_waiting,attr_value_range"`
 	Cost               *costHCL      `hcl:"cost,block"`
 	Upstreams          []upstreamHCL `hcl:"upstream,block"`
 	DefRange           hcl.Range     `hcl:",def_range"`
@@ -777,10 +781,36 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	}
 	// Fallbacks name other model groups, checked once all are known.
 	for i, m := range raw.Models {
-		if len(m.Fallbacks) == 0 || i >= len(c.ModelGroups) {
+		if i >= len(c.ModelGroups) {
 			continue
 		}
 		where := "model " + strconv.Quote(m.Name)
+		seenOn := map[string]bool{}
+		for _, r := range m.FallbackOn {
+			if r != "unavailable" && r != "saturated" || seenOn[r] {
+				v.errf(m.FallbackOnRange, "Invalid fallback_on", "%s: fallback_on %q: want \"unavailable\" and/or \"saturated\", each once", where, r)
+			}
+			seenOn[r] = true
+		}
+		if m.FallbackOnRange.Filename != "" && len(m.FallbackOn) == 0 {
+			v.errf(m.FallbackOnRange, "Invalid fallback_on", "%s: an empty fallback_on would never fall back; remove fallbacks instead", where)
+		}
+		c.ModelGroups[i].FallbackOn = m.FallbackOn
+		if m.SatWaiting != nil {
+			if *m.SatWaiting < 0 || *m.SatWaiting > 1_000_000 {
+				v.errf(m.SatWaitingRange, "Invalid saturation_waiting", "%s: saturation_waiting %d: want 0..1000000", where, *m.SatWaiting)
+			}
+			if !seenOn["saturated"] {
+				v.errf(m.SatWaitingRange, "Invalid saturation_waiting", "%s: saturation_waiting needs fallback_on to include \"saturated\"", where)
+			}
+			c.ModelGroups[i].SaturationWaiting = *m.SatWaiting
+		}
+		if len(m.FallbackOn) > 0 && len(m.Fallbacks) == 0 {
+			v.errf(m.FallbackOnRange, "fallback_on without fallbacks", "%s: fallback_on names when to fall back, but the model has no fallbacks", where)
+		}
+		if len(m.Fallbacks) == 0 {
+			continue
+		}
 		if c.ModelGroups[i].Class == Guard {
 			v.errf(m.FallbacksRange, "Fallback on a guard model", "%s: a guard model has no fallbacks", where)
 		}

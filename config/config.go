@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
@@ -459,6 +460,24 @@ type ModelGroup struct {
 	// the request (all down, or vLLM answers 429/503) before anything was
 	// sent to the client.
 	Fallbacks []string
+	// FallbackOn says when a fallback is taken: "unavailable" (the above,
+	// the default) and/or "saturated": a BORROWING request that arrives
+	// while this group's pool is full (C or more in flight), or while vLLM
+	// reports SaturationWaiting or more requests waiting, moves to the first
+	// fallback whose pool has room (#58).
+	FallbackOn []string
+	// SaturationWaiting, when > 0, also reads vLLM's vllm:num_requests_waiting
+	// on each upstream's /metrics (at the health interval, with its timeout)
+	// and calls the group saturated when their sum reaches it.
+	SaturationWaiting int
+}
+
+// FallsBackOn reports whether the group takes its fallbacks on reason.
+func (g ModelGroup) FallsBackOn(reason string) bool {
+	if len(g.FallbackOn) == 0 {
+		return reason == "unavailable"
+	}
+	return slices.Contains(g.FallbackOn, reason)
 }
 
 // Defaults.
