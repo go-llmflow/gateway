@@ -14,8 +14,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/go-authn/oidc v0.4.3 h1:H2L1YtpwGQCMoc65vhH5wLPM+09Wygh/32hjtYI052k=
 github.com/go-authn/oidc v0.4.3/go.mod h1:H/Hodeu9kh/Xz3y51XfYu6MZdMJaNfXClyVH0GTUebE=
-github.com/go-authn/rp v0.1.3 h1:cWmCh/qyHVdz1yLmtHA5BExBDAUke81q1K7WX+wfRd0=
-github.com/go-authn/rp v0.1.3/go.mod h1:bTku1Ufwg5hoWlNHJnwxh9IATKYivxwly1qH+s5Ww+M=
+github.com/go-authn/rp v0.2.0 h1:ZoEqikwX9SOi+fODnIxO76sFLKYl0g7mgEmjUg3m1Gw=
+github.com/go-authn/rp v0.2.0/go.mod h1:bTku1Ufwg5hoWlNHJnwxh9IATKYivxwly1qH+s5Ww+M=
 github.com/go-authn/scim v0.1.1 h1:8KDNxAFKeRIIHf/UmJMOUp0Vr92ELAwYWDSig5Zjjn8=
 github.com/go-authn/scim v0.1.1/go.mod h1:wWUCIIKdegRh4Y16bT/Dy0NiOZugMnSGxoGeupyPmrg=
 github.com/go-gitsafe/gitsafe v0.17.1 h1:WrrjuRiPGqYSGwry2S9M5uoPN+4kVJNWC6sBloShJT0=

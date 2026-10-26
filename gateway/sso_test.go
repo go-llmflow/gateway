@@ -24,7 +24,7 @@ type ssoEnv struct {
 	clock time.Time
 }
 
-func newSSOEnv(t testing.TB, clientSecret string) *ssoEnv {
+func newSSOEnv(t testing.TB, clientSecret string, tweak ...func(*config.SSO)) *ssoEnv {
 	t.Helper()
 	idp := newFakeIdP(t)
 	idp.secret = clientSecret
@@ -37,6 +37,9 @@ func newSSOEnv(t testing.TB, clientSecret string) *ssoEnv {
 			{Claim: "groups", Value: "llm-admins", Role: "proxy_admin"},
 			{Claim: "groups", Value: "lab-a-leads", Role: "team_admin", Team: "etabA"},
 		},
+	}
+	for _, f := range tweak {
+		f(cfg.SSO)
 	}
 	e := &ssoEnv{idp: idp, clock: time.Now()}
 	st := store.NewMemory()
@@ -145,6 +148,37 @@ func (e *ssoEnv) login(claims map[string]any) (string, string) {
 		e.t.Fatalf("session: %d %v", resp.StatusCode, err)
 	}
 	return sess, info.CSRF
+}
+
+// #60: the sso block's min_refresh reaches the ID-token key set. A login
+// signed with a kid the key set lacks (the provider just rotated) makes the
+// gateway fetch the key set again only once min_refresh has passed since
+// the last fetch: with 5 s it does after 5 s, with the default (1 min) not.
+func TestSSOMinRefresh(t *testing.T) {
+	for _, tc := range []struct {
+		min       time.Duration
+		refetched bool
+	}{{0, false}, {config.MinKeySetRefresh, true}} {
+		e := newSSOEnv(t, "", func(s *config.SSO) { s.MinRefresh = tc.min })
+		e.idp.mu.Lock()
+		e.idp.idKid = "k2" // a kid the published key set lacks
+		e.idp.mu.Unlock()
+		before := e.idp.fetches.Load()
+		time.Sleep(tc.min + 300*time.Millisecond)
+		if tc.min == 0 {
+			time.Sleep(config.MinKeySetRefresh) // as long as the other case
+		}
+		authURL, ck := e.start()
+		state, code := e.idp.issue(t, authURL, e.claims("alice", "llm-admins"))
+		resp := e.callback(state, code, ck)
+		readAll(t, resp)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("a login signed with an unknown kid: %d", resp.StatusCode)
+		}
+		if got := e.idp.fetches.Load() > before; got != tc.refetched {
+			t.Fatalf("min_refresh %v: key set fetched again: %v, want %v", tc.min, got, tc.refetched)
+		}
+	}
 }
 
 func TestSSOLoginSessionAndCSRF(t *testing.T) {

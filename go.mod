@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/go-authn/oidc v0.4.3
-	github.com/go-authn/rp v0.1.3
+	github.com/go-authn/rp v0.2.0
 	github.com/go-authn/scim v0.1.1
 	github.com/go-gitsafe/gitsafe v0.17.1
 	github.com/go-llmflow/pii v0.2.1

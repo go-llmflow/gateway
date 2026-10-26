@@ -261,6 +261,11 @@ type SSO struct {
 	RedirectURL string
 	Scopes      []string
 	SessionTTL  time.Duration
+	// MinRefresh is how long the ID-token key set waits before it is
+	// fetched again for an unknown kid (default 1m, at least
+	// MinKeySetRefresh). A provider that rotates its keys more often than
+	// that needs it shorter, or logins right after a rotation are refused.
+	MinRefresh time.Duration
 	// Roles map ID token claims to role bindings, added to the bindings
 	// the user has in the store.
 	Roles []SSORole
@@ -366,6 +371,12 @@ type Store struct {
 	// SpoolMaxBytes bounds the spool of one process (default 256 MiB).
 	SpoolMaxBytes int64
 }
+
+// MinKeySetRefresh is the shortest min_refresh of the jwt and sso blocks:
+// each unknown kid may make the gateway fetch the key set at most once per
+// min_refresh, so the bound keeps a flood of forged kids from turning the
+// gateway into a load on the provider.
+const MinKeySetRefresh = 5 * time.Second
 
 // DefaultSpoolMaxBytes bounds a process's accounting spool.
 const DefaultSpoolMaxBytes = 256 << 20

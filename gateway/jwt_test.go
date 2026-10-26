@@ -38,6 +38,10 @@ type fakeIdP struct {
 	mu     sync.Mutex
 	grants map[string]grant
 	secret string // client secret expected with client_secret_basic
+	// idKid is the kid of the ID tokens the token endpoint signs (default
+	// k1, the published key's); another one is a kid the key set lacks, as
+	// right after a provider rotated its keys.
+	idKid string
 }
 
 type grant struct {
@@ -80,7 +84,11 @@ func (p *fakeIdP) token(t testing.TB, w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
 	g, ok := p.grants[code]
 	delete(p.grants, code)
+	kid := p.idKid
 	p.mu.Unlock()
+	if kid == "" {
+		kid = "k1"
+	}
 	sum := sha256.Sum256([]byte(r.PostFormValue("code_verifier")))
 	if !ok || r.PostFormValue("grant_type") != "authorization_code" || b64u(sum[:]) != g.challenge {
 		w.WriteHeader(http.StatusBadRequest)
@@ -89,7 +97,7 @@ func (p *fakeIdP) token(t testing.TB, w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewEncoder(w).Encode(map[string]any{
 		"access_token": "at-" + code, "token_type": "Bearer", "expires_in": 300,
-		"id_token": p.sign(t, map[string]any{"alg": "RS256", "kid": "k1"}, g.claims),
+		"id_token": p.sign(t, map[string]any{"alg": "RS256", "kid": kid}, g.claims),
 	})
 }
 

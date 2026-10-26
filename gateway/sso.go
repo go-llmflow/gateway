@@ -90,7 +90,8 @@ func (s *Server) startSSO(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("gateway: sso: %w", err)
 	}
-	cl, err := rp.NewClient(ctx, p, rp.Config{ClientID: c.ClientID, Secret: s.secrets.SSOClientSecret, RedirectURI: c.RedirectURL, Scopes: c.Scopes})
+	cl, err := rp.NewClient(ctx, p, rp.Config{ClientID: c.ClientID, Secret: s.secrets.SSOClientSecret, RedirectURI: c.RedirectURL,
+		Scopes: c.Scopes, MinRefresh: c.MinRefresh})
 	if err != nil {
 		return fmt.Errorf("gateway: sso: %w", err)
 	}
