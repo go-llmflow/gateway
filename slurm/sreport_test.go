@@ -85,9 +85,9 @@ func TestParseRefusals(t *testing.T) {
 	}
 }
 
-// FuzzParse: no panic; whatever is accepted is finite, non-negative and
+// FuzzSreport: no panic; whatever is accepted is finite, non-negative and
 // within the bounds.
-func FuzzParse(f *testing.F) {
+func FuzzSreport(f *testing.F) {
 	f.Add(parsable2)
 	f.Add(fixed)
 	f.Add("Account|Used\na|1\n")

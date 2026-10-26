@@ -745,7 +745,7 @@ printed is shown next to the table, so a mismatch is visible. The input is
 untrusted: at most 1 MiB, 50 000 lines of 4 KiB, 32 columns, finite
 non-negative usage, UTF-8; every refusal is an error (400 for an upload,
 a generic 500 and a log line for a configured file that cannot be read,
-whose path is never shown). It is fuzzed (`FuzzParse` in `./slurm`). An
+whose path is never shown). It is fuzzed (`FuzzSreport` in `./slurm`). An
 organisation's batch usage is shown to whoever may view that
 organisation (org viewers and administrators, proxy roles); team-level
 roles see none.

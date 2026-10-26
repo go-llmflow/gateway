@@ -79,7 +79,7 @@ jobs:
           - { target: FuzzProjectHeader, pkg: ./gateway }
           - { target: FuzzReportsQuery, pkg: ./gateway }
           - { target: FuzzExportWriters, pkg: ./gateway }
-          - { target: FuzzParse, pkg: ./slurm }
+          - { target: FuzzSreport, pkg: ./slurm }
           - { target: FuzzMessagesStream, pkg: ./openai }
           - { target: FuzzAnthropicStreamFilter, pkg: ./guard }
           - { target: FuzzReadAudioForm, pkg: ./gateway }
