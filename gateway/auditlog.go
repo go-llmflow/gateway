@@ -136,7 +136,9 @@ func auditTarget(r *http.Request) string {
 func (s *Server) audited(pattern string, f adminHandler) adminHandler {
 	return func(w http.ResponseWriter, r *http.Request, p *principal) {
 		id := adminRequestID(w, r)
-		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		// An export audits itself (kind "export"), and its POST body is a
+		// Slurm report this wrapper must not truncate.
+		if r.Method == http.MethodGet || r.Method == http.MethodHead || pattern == "/admin/export" {
 			f(w, r, p)
 			return
 		}

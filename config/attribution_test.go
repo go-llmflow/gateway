@@ -39,3 +39,22 @@ attribution {
 		}
 	}
 }
+
+// #68 part 4: the slurm block.
+func TestSlurmBlock(t *testing.T) {
+	c, err := Parse([]byte(valid+"slurm {\n  sreport_file = \"/var/lib/llmflow/sreport.txt\"\n  accounts = { \"phys-a\" = \"etabA\" }\n}\n"), "t.hcl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Slurm.SreportFile != "/var/lib/llmflow/sreport.txt" || c.Slurm.OrgOfAccount("phys-a") != "etabA" || c.Slurm.OrgOfAccount("etabB") != "etabB" {
+		t.Fatalf("%+v", c.Slurm)
+	}
+	for name, s := range map[string]struct{ src, want string }{
+		"relative": {valid + "slurm {\n  sreport_file = \"sreport.txt\"\n}\n", "Invalid sreport_file"},
+		"bad org":  {valid + "slurm {\n  accounts = { \"a\" = \"../x\" }\n}\n", "Invalid accounts"},
+	} {
+		if _, err := Parse([]byte(s.src), "t.hcl"); err == nil || !strings.Contains(err.Error(), s.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

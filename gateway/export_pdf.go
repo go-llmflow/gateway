@@ -343,30 +343,24 @@ func writePDF(w io.Writer, b *reportBundle) error {
 	}
 
 	d.heading("Reconciliation: inference and Slurm batch GPU-hours", 13)
-	orgs := map[string]float64{}
-	for _, r := range b.By["org"] {
-		if r.Unit == "" {
-			orgs[r.Org] += r.Cost
-		}
-	}
-	for org := range b.Batch {
-		if _, ok := orgs[org]; !ok {
-			orgs[org] = 0
-		}
-	}
 	rows = nil
-	for _, org := range sortedKeys(orgs) {
+	for _, r := range reconcile(b.inferenceByOrg(), b.Batch) {
 		batch, share := "not provided", ""
 		if b.Batch != nil {
-			batch = fmtNum(b.Batch[org])
-			if t := orgs[org] + b.Batch[org]; t > 0 {
-				share = fmt.Sprintf("%.1f %%", 100*orgs[org]/t)
+			batch = fmtNum(r.Batch)
+			if t := r.Inference + r.Batch; t > 0 {
+				share = fmt.Sprintf("%.1f %%", 100*r.Inference/t)
 			}
 		}
-		rows = append(rows, []string{cleanLabel(org, 40), fmtNum(orgs[org]), batch, share})
+		rows = append(rows, []string{cleanLabel(r.Org, 40), fmtNum(r.Inference), batch, share})
 	}
-	if b.Batch == nil {
+	switch {
+	case b.Batch == nil:
 		d.line("No Slurm accounting input was given: only inference is shown.")
+	case b.Batch.Period != "":
+		d.line("Slurm report period: " + cleanLabel(b.Batch.Period, 60) + " (sreport AccountUtilizationByUser, gres/gpu).")
+	default:
+		d.line("The Slurm report printed no period: check it covers the period above.")
 	}
 	d.table([]string{"org", "Inference GPU-hours", "Batch GPU-hours", "Inference share"}, []float64{170, 110, 110, 109}, rows)
 	return d.doc.Write(w)

@@ -58,6 +58,8 @@ type Config struct {
 	Alerts Alerts
 	// Attribution names the project header and the default project.
 	Attribution Attribution
+	// Slurm is the batch accounting input of the reconciliation reports.
+	Slurm Slurm
 	// AuthFailuresPerMinute is the number of failed authentications a
 	// client network (IPv4 address, IPv6 /64) may make per minute before it
 	// gets 429; 0 disables the limit.
@@ -436,6 +438,25 @@ type Attribution struct {
 	// DefaultProject applies when neither the header nor the key names a
 	// project, if the key's team has a project of that name.
 	DefaultProject string
+}
+
+// Slurm is the optional batch accounting input of the reconciliation
+// reports.
+type Slurm struct {
+	// SreportFile is the output of `sreport cluster AccountUtilizationByUser
+	// -T gres/gpu -P`, read when a report is built ("" for none).
+	SreportFile string
+	// Accounts maps a Slurm account to a gateway organisation; an account
+	// absent from the map counts for the organisation of the same name.
+	Accounts map[string]string
+}
+
+// OrgOfAccount returns the organisation a Slurm account counts for.
+func (s Slurm) OrgOfAccount(acct string) string {
+	if o, ok := s.Accounts[acct]; ok {
+		return o
+	}
+	return acct
 }
 
 // DefaultProjectHeader is the default attribution header.

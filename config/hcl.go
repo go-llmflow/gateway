@@ -53,6 +53,7 @@ type fileHCL struct {
 	Orgs                 []orgHCL        `hcl:"org,block"`
 	Tags                 *tagsHCL        `hcl:"tags,block"`
 	Attribution          *attributionHCL `hcl:"attribution,block"`
+	Slurm                *slurmHCL       `hcl:"slurm,block"`
 	Alerts               *alertsHCL      `hcl:"alerts,block"`
 	Pools                []poolHCL       `hcl:"pool,block"`
 	Models               []modelHCL      `hcl:"model,block"`
@@ -399,6 +400,13 @@ type attributionHCL struct {
 	HeaderRange    hcl.Range `hcl:"project_header,attr_value_range"`
 	DefaultProject *string   `hcl:"default_project,optional"`
 	DefaultRange   hcl.Range `hcl:"default_project,attr_value_range"`
+}
+
+type slurmHCL struct {
+	SreportFile   *string           `hcl:"sreport_file,optional"`
+	FileRange     hcl.Range         `hcl:"sreport_file,attr_value_range"`
+	Accounts      map[string]string `hcl:"accounts,optional"`
+	AccountsRange hcl.Range         `hcl:"accounts,attr_value_range"`
 }
 
 type poolHCL struct {
@@ -907,6 +915,20 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 				v.errf(a.DefaultRange, "Invalid default_project", "default_project %q: want [A-Za-z0-9_.-]{1,64}", *a.DefaultProject)
 			}
 		}
+	}
+	if sl := raw.Slurm; sl != nil {
+		if sl.SreportFile != nil {
+			c.Slurm.SreportFile = *sl.SreportFile
+			if !filepath.IsAbs(*sl.SreportFile) {
+				v.errf(sl.FileRange, "Invalid sreport_file", "sreport_file %q: want an absolute path", *sl.SreportFile)
+			}
+		}
+		for acct, org := range sl.Accounts {
+			if acct == "" || len(acct) > 64 || !ValidName(org) {
+				v.errf(sl.AccountsRange, "Invalid accounts", "accounts: %q = %q: want a Slurm account and an organisation name", acct, org)
+			}
+		}
+		c.Slurm.Accounts = sl.Accounts
 	}
 	if t := raw.Tags; t != nil {
 		if !validHeaderName(t.Header) {

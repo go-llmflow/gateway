@@ -694,7 +694,7 @@ GET /admin/export?from=2026-10-01&to=2026-11-01&format=csv|xlsx|pdf[&group_by=or
 | format | content |
 |---|---|
 | `csv` | the spend report (default grouping `org,lab,team,project,user,model,pool`), with `cost` and `unit` columns |
-| `xlsx` | a **Summary** sheet (period dates, totals per unit against the previous period, Slurm batch GPU-hours when given), then one sheet per grouping (`org`, `lab`, `team`, `project`, `user`, `model`, `pool`, `tag`, `day`); numbers are typed, each cost column names its unit (`Cost (GPU-hours)`, `Cost (USD)`) and a unit has its own column |
+| `xlsx` | a **Summary** sheet (period dates, totals per unit against the previous period), a **Reconciliation** sheet (inference and Slurm batch GPU-hours per organisation), then one sheet per grouping (`org`, `lab`, `team`, `project`, `user`, `model`, `pool`, `tag`, `day`); numbers are typed, each cost column names its unit (`Cost (GPU-hours)`, `Cost (USD)`) and a unit has its own column |
 | `pdf` | a management summary: period, totals per unit, totals per level (org, lab, team, project; ten largest) with pie charts, the daily trend, and a reconciliation table of inference against Slurm batch GPU-hours per organisation |
 
 What an export shows is what the spend report shows the same person (an
@@ -713,6 +713,42 @@ characters (bidi overrides included) and are clipped. The file name is
 built from the dates only. The writers are fuzzed (`FuzzExportWriters`).
 go-pdfkit/html2pdf was considered and set aside: it puts an HTML and CSS
 engine (go-webengine) in front of the same writer, and has no release.
+
+**Slurm reconciliation** (since v0.13.0, optional): batch GPU-hours per
+organisation next to inference GPU-hours, on the Reports page and in the
+XLSX and PDF exports. The input is the output of
+
+```
+sreport -P cluster AccountUtilizationByUser -T gres/gpu -t Hours start=2026-10-01 end=2026-11-01
+```
+
+either a file the gateway reads when a report is built, or a file uploaded
+with an export (`POST /admin/export?…&format=xlsx|pdf` with the report as a
+`text/plain` body, or the form on the Reports page):
+
+```hcl
+slurm {
+  sreport_file = "/var/lib/llmflow/sreport.txt"   # optional; absolute path
+  accounts     = { "phys-a" = "etabA" }            # optional; Slurm account -> organisation
+}
+```
+
+The parser (package `slurm`) reads the delimited layouts (`-P`, `-p`, or a
+comma-separated file with the same header) and sreport's default
+fixed-width table (cut at its dashed rule; prefer `-P`, the fixed width
+truncates long names with `+`). Only account totals count (rows without a
+login), for the organisation `accounts` names or, failing that, the
+organisation of the same name. The unit comes from sreport's "Usage
+reported in …" line (minutes by default, hours, seconds); a report in
+percent is refused, rows of another TRES are skipped. The period sreport
+printed is shown next to the table, so a mismatch is visible. The input is
+untrusted: at most 1 MiB, 50 000 lines of 4 KiB, 32 columns, finite
+non-negative usage, UTF-8; every refusal is an error (400 for an upload,
+a generic 500 and a log line for a configured file that cannot be read,
+whose path is never shown). It is fuzzed (`FuzzSreport` in `./slurm`). An
+organisation's batch usage is shown to whoever may view that
+organisation (org viewers and administrators, proxy roles); team-level
+roles see none.
 
 The UI holds no privilege of its own: every page calls the admin API's
 handlers in-process with the signed-in person, so it sees and changes exactly

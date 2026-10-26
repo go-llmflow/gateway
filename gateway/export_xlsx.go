@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"io"
-	"sort"
 
 	"github.com/go-llmflow/gateway/store"
 	"github.com/go-ooxml/ooxml/xlsx"
@@ -44,13 +43,32 @@ func writeXLSX(w io.Writer, b *reportBundle) error {
 			[]xlsx.Cell{xlsx.String("Requests (" + u + ")"), xlsx.Number(float64(t.Requests))},
 			[]xlsx.Cell{xlsx.String("Estimated requests (" + u + ")"), xlsx.Number(float64(t.Estimated))})
 	}
-	if b.Batch != nil {
-		for _, org := range sortedKeys(b.Batch) {
-			rows = append(rows, []xlsx.Cell{xlsx.String("Slurm batch (GPU-hours), " + org), xlsx.Number(b.Batch[org]).Format(xlsx.Decimal(3))})
-		}
+	if b.Batch != nil && b.Batch.Period != "" {
+		rows = append(rows, []xlsx.Cell{xlsx.String("Slurm report period"), xlsx.String(b.Batch.Period)})
 	}
 	for _, r := range rows {
 		if err := sum.AppendRow(r...); err != nil {
+			return err
+		}
+	}
+	// Reconciliation: inference against batch GPU-hours per org.
+	rec, err := wb.AddSheet("Reconciliation")
+	if err != nil {
+		return err
+	}
+	if err := rec.SetHeader("org", "Inference (GPU-hours)", "Slurm batch (GPU-hours)", "Inference share"); err != nil {
+		return err
+	}
+	_ = rec.SetColumnWidth(0, 28)
+	for _, r := range reconcile(b.inferenceByOrg(), b.Batch) {
+		cells := []xlsx.Cell{xlsx.String(r.Org), xlsx.Number(r.Inference).Format(xlsx.Decimal(3))}
+		if b.Batch != nil {
+			cells = append(cells, xlsx.Number(r.Batch).Format(xlsx.Decimal(3)))
+			if t := r.Inference + r.Batch; t > 0 {
+				cells = append(cells, xlsx.Number(r.Inference/t).Format(xlsx.Percent(1)))
+			}
+		}
+		if err := rec.AppendRow(cells...); err != nil {
 			return err
 		}
 	}
@@ -132,13 +150,4 @@ func xlsxSheet(wb *xlsx.Workbook, dim string, rows []store.ReportRow) error {
 		}
 	}
 	return nil
-}
-
-func sortedKeys(m map[string]float64) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
