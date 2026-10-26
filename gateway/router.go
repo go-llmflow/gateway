@@ -1,9 +1,13 @@
 package gateway
 
 import (
+	"bufio"
 	"context"
+	"io"
+	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -19,6 +23,10 @@ type upstream struct {
 	inflight atomic.Int64
 	cooldown atomic.Int64 // unix nanoseconds until which it is skipped
 	healthy  atomic.Bool
+	// waiting is vLLM's vllm:num_requests_waiting as last scraped, -1 when
+	// unknown (not scraped, or the scrape failed): an unknown queue never
+	// counts as saturated.
+	waiting atomic.Int64
 }
 
 func (u *upstream) available(now time.Time) bool {
@@ -31,6 +39,23 @@ type group struct {
 	upstreams []*upstream
 	pool      *fairshare.Pool
 	class     fairshare.Class
+}
+
+// queueSaturated reports whether vLLM's own queues, as last scraped, reach
+// the group's saturation_waiting (#58, signal 2). Off when it is 0.
+func (g *group) queueSaturated() bool {
+	if g.cfg.SaturationWaiting <= 0 {
+		return false
+	}
+	var sum int64
+	known := false
+	for _, u := range g.upstreams {
+		if w := u.waiting.Load(); w >= 0 {
+			sum += w
+			known = true
+		}
+	}
+	return known && sum >= int64(g.cfg.SaturationWaiting)
 }
 
 // pick returns the available upstream with the fewest requests in flight,
@@ -59,6 +84,7 @@ func (g *group) pick(tried map[*upstream]bool, now time.Time) *upstream {
 func newUpstream(raw, apiKey string) *upstream {
 	u := &upstream{base: strings.TrimRight(raw, "/"), apiKey: apiKey}
 	u.healthy.Store(true)
+	u.waiting.Store(-1)
 	return u
 }
 
@@ -82,6 +108,14 @@ func (s *Server) healthLoop(ctx context.Context) {
 }
 
 func (s *Server) probeAll(ctx context.Context) {
+	scrape := map[*upstream]bool{}
+	for _, g := range s.groups {
+		if g.cfg.SaturationWaiting > 0 {
+			for _, u := range g.upstreams {
+				scrape[u] = true
+			}
+		}
+	}
 	seen := map[*upstream]bool{}
 	for _, g := range s.groups {
 		for _, u := range g.upstreams {
@@ -90,6 +124,9 @@ func (s *Server) probeAll(ctx context.Context) {
 			}
 			seen[u] = true
 			u.healthy.Store(s.probe(ctx, u))
+			if scrape[u] {
+				u.waiting.Store(s.scrapeWaiting(ctx, u))
+			}
 		}
 	}
 }
@@ -107,6 +144,68 @@ func (s *Server) probe(ctx context.Context, u *upstream) bool {
 	}
 	resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
+}
+
+// maxMetricsBody bounds an upstream's /metrics answer.
+const maxMetricsBody = 4 << 20
+
+// scrapeWaiting reads vllm:num_requests_waiting (summed over its label sets)
+// from an upstream's /metrics, at the health interval and within its
+// timeout; -1 when it cannot be read. vLLM serves /metrics without
+// authentication: one more reason its ports stay on the internal network.
+func (s *Server) scrapeWaiting(ctx context.Context, u *upstream) int64 {
+	ctx, cancel := context.WithTimeout(ctx, s.cfg.Health.Timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.joinURL("/metrics"), nil)
+	if err != nil {
+		return -1
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return -1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return -1
+	}
+	return parseWaiting(io.LimitReader(resp.Body, maxMetricsBody))
+}
+
+// parseWaiting sums the samples of vllm:num_requests_waiting in a Prometheus
+// text exposition; -1 when there is none.
+func parseWaiting(r io.Reader) int64 {
+	const name = "vllm:num_requests_waiting"
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	var sum float64
+	found := false
+	for sc.Scan() {
+		rest, ok := strings.CutPrefix(sc.Text(), name)
+		if !ok || rest == "" || rest[0] != ' ' && rest[0] != '{' {
+			continue // another metric, or a longer name with this prefix
+		}
+		if rest[0] == '{' {
+			end := strings.LastIndexByte(rest, '}')
+			if end < 0 {
+				continue
+			}
+			rest = rest[end+1:]
+		}
+		fields := strings.Fields(rest)
+		if len(fields) == 0 {
+			continue
+		}
+		v, err := strconv.ParseFloat(fields[0], 64)
+		if err != nil || v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+			continue
+		}
+		sum += v
+		found = true
+	}
+	if !found || sc.Err() != nil {
+		return -1
+	}
+	return int64(sum)
 }
 
 // redactURL keeps scheme and host only, for logs and metric labels.
