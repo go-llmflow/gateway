@@ -202,7 +202,11 @@ func TestSlurmDiscovery(t *testing.T) {
 	if a.vllm.count()+b.vllm.count() != 4 || fake.vllm.count() != 0 || wrong.vllm.count() != 0 {
 		t.Fatalf("requests: a %d b %d wrong %d fake %d", a.vllm.count(), b.vllm.count(), wrong.vllm.count(), fake.vllm.count())
 	}
-	if got := a.vllm.last().Header.Get("Authorization"); got != "Bearer "+internalKey {
+	served := a // pick takes the least loaded, first in URL order: either may have them all
+	if a.vllm.count() == 0 {
+		served = b
+	}
+	if got := served.vllm.last().Header.Get("Authorization"); got != "Bearer "+internalKey {
 		t.Errorf("the instance got %q, not the model's key", got)
 	}
 	metrics := readAll(t, e.do("GET", "/metrics", "", ""))

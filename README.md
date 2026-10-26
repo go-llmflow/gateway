@@ -1384,10 +1384,14 @@ model "llama" {
 #SBATCH --account=svc_llm --qos=service --partition=gpu
 #SBATCH --nodes=1 --gres=gpu:4 --exclusive --time=7-00:00:00
 #SBATCH --signal=B:TERM@120
+# The key goes in VLLM_API_KEY, not --api-key: the node's process list
+# shows every command line to every user.
+VLLM_API_KEY=$(cat /etc/llmflow/vllm.key); export VLLM_API_KEY
 exec vllm serve meta/llama-3.3-70b --served-model-name meta/llama-3.3-70b \
-  --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 \
-  --api-key "$(cat /etc/llmflow/vllm.key)"
+  --host 0.0.0.0 --port 8000 --tensor-parallel-size 4
 ```
+
+The node's vLLM port must be reachable by the gateway only (firewall), as for static upstreams: `/metrics` is unauthenticated, and the key protects `/v1` only.
 
 **Day/night with scrontab** (needs `ScronParameters=enable`; [scrontab](https://slurm.schedmd.com/scrontab.html)):
 
