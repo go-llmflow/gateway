@@ -358,7 +358,17 @@ type Store struct {
 	QueueSize int
 	// BatchSize is the number of usage records written per batch.
 	BatchSize int
+	// SpoolDir holds the durable accounting spool: every batch of usage
+	// records is appended there (fsync'd) before it is written to the store,
+	// and replayed when the store is back or the gateway restarts. Required
+	// with kind "postgres".
+	SpoolDir string
+	// SpoolMaxBytes bounds the spool of one process (default 256 MiB).
+	SpoolMaxBytes int64
 }
+
+// DefaultSpoolMaxBytes bounds a process's accounting spool.
+const DefaultSpoolMaxBytes = 256 << 20
 
 // Limits are the HTTP hardening limits.
 type Limits struct {

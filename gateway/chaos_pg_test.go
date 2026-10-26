@@ -74,6 +74,11 @@ func freshDB(t *testing.T, via string) (direct, proxied string) {
 // pgEnv runs a gateway on PostgreSQL at dsn.
 func pgEnv(t *testing.T, cfg *config.Config, dsn string, opts ...Option) (*env, *store.Postgres) {
 	t.Helper()
+	if cfg.Store.SpoolDir == "" {
+		c := *cfg
+		c.Store.SpoolDir = t.TempDir()
+		cfg = &c
+	}
 	st, err := store.OpenPostgres(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -237,9 +242,9 @@ func TestChaosPostgresRestart(t *testing.T) {
 	t.Logf("admin calls answered 503 after the restart before the pool recovered: %d", failed)
 }
 
-// Usage records of requests served while PostgreSQL is down: the recorder
-// tries a batch twice, then counts it failed (README open defect 6). This
-// measures what an outage loses.
+// Usage records of requests served while PostgreSQL is down are kept in the
+// durable spool and stored when it is back: every one, once (v0.10.0; on
+// v0.9.0 this run lost 21 of 21).
 func TestChaosAccountingOutage(t *testing.T) {
 	up := newFakeVLLM(t)
 	cfg := testConfig(up.URL())
@@ -257,21 +262,38 @@ func TestChaosAccountingOutage(t *testing.T) {
 			served++
 		}
 	}
-	time.Sleep(1500 * time.Millisecond) // the recorder's flush, twice
+	time.Sleep(1500 * time.Millisecond) // the recorder's flushes fail
+	if e.srv.rec.spooled.Load() == 0 {
+		t.Errorf("nothing spooled during the outage")
+	}
 	proxy.set("")
-	time.Sleep(1500 * time.Millisecond)
-	rows, err := st.Report(context.Background(), time.Now().Add(-time.Hour), time.Now().Add(time.Hour), []string{"team"})
+	want := int64(served + 1)
+	var stored, distinct int64
+	eventually(t, 15*time.Second, "every record stored after the outage", func() bool {
+		stored, distinct = usageCounts(t, st)
+		return stored >= want
+	})
+	time.Sleep(1500 * time.Millisecond) // a late duplicate would show now
+	stored, distinct = usageCounts(t, st)
+	t.Logf("served during the outage: %d; records stored: %d of %d (distinct ids %d); failed: %d",
+		served, stored, want, distinct, e.srv.rec.failed.Load())
+	if stored != want || distinct != want || e.srv.rec.failed.Load() != 0 {
+		t.Errorf("stored %d, distinct %d, failed %d, want %d stored once each", stored, distinct, e.srv.rec.failed.Load(), want)
+	}
+}
+
+// usageCounts returns the usage rows and their distinct record ids.
+func usageCounts(t *testing.T, st *store.Postgres) (rows, distinct int64) {
+	t.Helper()
+	recs, err := st.UsageRecordIDs(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	var stored int64
-	for _, r := range rows {
-		stored += r.Requests
+	seen := map[string]bool{}
+	for _, id := range recs {
+		seen[id] = true
 	}
-	t.Logf("served during the outage: %d; records stored: %d of %d; failed: %d", served, stored, served+1, e.srv.rec.failed.Load())
-	if stored+e.srv.rec.failed.Load() != int64(served+1) {
-		t.Errorf("records neither stored nor counted as failed: stored %d, failed %d, served %d", stored, e.srv.rec.failed.Load(), served+1)
-	}
+	return int64(len(recs)), int64(len(seen))
 }
 
 // Two gateways on one database (the README says one replica per pool):

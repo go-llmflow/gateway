@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -76,6 +77,8 @@ CREATE INDEX IF NOT EXISTS llmflow_usage_ts_team ON llmflow_usage (ts, team);
 ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS estimated boolean NOT NULL DEFAULT false;
 ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS org text NOT NULL DEFAULT '';
 ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS project text NOT NULL DEFAULT '';
+ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS record_id text;
+CREATE UNIQUE INDEX IF NOT EXISTS llmflow_usage_record_id ON llmflow_usage (record_id);
 `
 
 // OpenPostgres connects and creates or upgrades the schema. The error
@@ -381,10 +384,12 @@ func (p *Postgres) KeyByHash(ctx context.Context, h [32]byte) (Key, error) {
 	return k, err
 }
 
-var usageCols = []string{"ts", "org", "team", "project", "key_id", "model", "pool", "upstream", "prompt_tokens",
+var usageCols = []string{"record_id", "ts", "org", "team", "project", "key_id", "model", "pool", "upstream", "prompt_tokens",
 	"completion_tokens", "cached_tokens", "cost", "latency_ms", "status", "priority", "borrowing", "stream", "estimated", "tags"}
 
-// InsertRecords writes a batch with COPY.
+// InsertRecords writes a batch: COPY into a temporary table, then one
+// INSERT that skips the records whose ID is already stored, so a batch
+// replayed from the accounting spool is never billed twice.
 func (p *Postgres) InsertRecords(ctx context.Context, recs []Record) error {
 	rows := make([][]any, len(recs))
 	for i, r := range recs {
@@ -392,11 +397,34 @@ func (p *Postgres) InsertRecords(ctx context.Context, recs []Record) error {
 		if tags == nil {
 			tags = []string{}
 		}
-		rows[i] = []any{r.Time, r.Org, r.Team, r.Project, r.KeyID, r.Model, r.Pool, r.Upstream, r.PromptTokens,
+		var id any
+		if r.ID != "" {
+			id = r.ID
+		}
+		rows[i] = []any{id, r.Time, r.Org, r.Team, r.Project, r.KeyID, r.Model, r.Pool, r.Upstream, r.PromptTokens,
 			r.CompletionTokens, r.CachedTokens, r.Cost, r.LatencyMS, r.Status, r.Priority, r.Borrowing, r.Stream, r.Estimated, tags}
 	}
-	_, err := p.pool.CopyFrom(ctx, pgx.Identifier{"llmflow_usage"}, usageCols, pgx.CopyFromRows(rows))
-	return err
+	cols := strings.Join(usageCols, ", ")
+	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `CREATE TEMP TABLE llmflow_usage_in ON COMMIT DROP AS SELECT `+cols+` FROM llmflow_usage WITH NO DATA`); err != nil {
+			return err
+		}
+		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"llmflow_usage_in"}, usageCols, pgx.CopyFromRows(rows)); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO llmflow_usage (`+cols+`) SELECT `+cols+` FROM llmflow_usage_in ON CONFLICT (record_id) DO NOTHING`)
+		return err
+	})
+}
+
+// UsageRecordIDs lists the record id of every usage row (empty for rows
+// written before ids), for verifying that nothing was billed twice.
+func (p *Postgres) UsageRecordIDs(ctx context.Context) ([]string, error) {
+	rows, err := p.pool.Query(ctx, `SELECT coalesce(record_id, '') FROM llmflow_usage`)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
 func (p *Postgres) Close() { p.pool.Close() }

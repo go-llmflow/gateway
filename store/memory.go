@@ -18,6 +18,7 @@ type Memory struct {
 	byHash     map[[32]byte]string
 	budgets    map[BudgetKey]*memBudget
 	records    []Record
+	recordIDs  map[string]bool // IDs stored, for idempotent inserts
 	u          memUsers
 	teamModels map[string][]string
 	teamTools  map[string][]string
@@ -363,8 +364,22 @@ func (m *Memory) InsertRecords(_ context.Context, recs []Record) error {
 	if m.Fail != nil {
 		return m.Fail
 	}
-	m.records = append(m.records, recs...)
+	if m.recordIDs == nil {
+		m.recordIDs = map[string]bool{}
+	}
+	for _, r := range recs {
+		if r.ID != "" {
+			if m.recordIDs[r.ID] {
+				continue // already stored: a replay does not bill twice
+			}
+			m.recordIDs[r.ID] = true
+		}
+		m.records = append(m.records, r)
+	}
 	if over := len(m.records) - m.MaxRecords; m.MaxRecords > 0 && over > 0 {
+		for _, r := range m.records[:over] {
+			delete(m.recordIDs, r.ID)
+		}
 		m.records = append(m.records[:0:0], m.records[over:]...)
 	}
 	return nil

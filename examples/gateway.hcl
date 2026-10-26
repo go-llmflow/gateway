@@ -46,6 +46,11 @@ store {
   fail_closed = true                  # 503 when the budget state cannot be refreshed
   queue_size  = 10000                 # bounded accounting queue
   batch_size  = 256
+  # Durable accounting spool (required with postgres): every batch of usage
+  # records is fsync'd here before it is written, replayed after an outage
+  # or a crash; files are 0600, the directory 0700 and owned by the gateway.
+  spool_dir       = "/var/lib/llmflow/spool"
+  spool_max_bytes = 268435456 # 256 MiB; beyond it records are dropped, counted and alerted
 }
 
 limits {

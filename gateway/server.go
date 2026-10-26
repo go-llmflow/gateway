@@ -23,6 +23,7 @@ import (
 	"github.com/go-llmflow/gateway/export"
 	"github.com/go-llmflow/gateway/fairshare"
 	"github.com/go-llmflow/gateway/openai"
+	"github.com/go-llmflow/gateway/spool"
 	"github.com/go-llmflow/gateway/store"
 )
 
@@ -237,6 +238,16 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 		s.log.Error("accounting write failed", "err", err)
 	})
 	s.rec.done = s.budget.persisted
+	if cfg.Store.SpoolDir != "" {
+		sp, err := spool.Open(cfg.Store.SpoolDir, cfg.Store.SpoolMaxBytes)
+		if err != nil {
+			return nil, fmt.Errorf("gateway: accounting spool: %w", err)
+		}
+		s.rec.withSpool(sp, cfg.Store.SpoolDir, cfg.Store.SpoolMaxBytes)
+		s.rec.onLost = func(n int, err error) {
+			s.raise(context.Background(), "accounting_records_lost", map[string]any{"records": n, "err": err.Error()})
+		}
+	}
 	s.keys = newKeyCache(cfg.KeyCacheTTL, s.now)
 	s.authFails = newFailLimiter(cfg.AuthFailuresPerMinute, s.now)
 	s.jwtCache = newKeyCache(cfg.KeyCacheTTL, s.now)
@@ -609,8 +620,12 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 	s.met.upstreamT.write(w)
 	writeHeader(w, "llmflow_accounting_dropped_total", "Usage records dropped because the queue was full.", "counter")
 	writeSample(w, "llmflow_accounting_dropped_total", nil, nil, float64(s.rec.dropped.Load()))
-	writeHeader(w, "llmflow_accounting_failed_total", "Usage records whose write to the store failed.", "counter")
+	writeHeader(w, "llmflow_accounting_failed_total", "Usage records lost: neither stored nor spooled (spool full or unwritable, or no spool).", "counter")
 	writeSample(w, "llmflow_accounting_failed_total", nil, nil, float64(s.rec.failed.Load()))
+	writeHeader(w, "llmflow_accounting_spooled", "Usage records in the durable spool, waiting for the store.", "gauge")
+	writeSample(w, "llmflow_accounting_spooled", nil, nil, float64(s.rec.spooled.Load()))
+	writeHeader(w, "llmflow_accounting_replayed_total", "Usage records adopted from the spool of a process that died, and stored.", "counter")
+	writeSample(w, "llmflow_accounting_replayed_total", nil, nil, float64(s.rec.replayed.Load()))
 	writeHeader(w, "llmflow_accounting_written_total", "Usage records written to the store.", "counter")
 	writeSample(w, "llmflow_accounting_written_total", nil, nil, float64(s.rec.written.Load()))
 	writeHeader(w, "llmflow_accounting_queue_length", "Usage records waiting to be written.", "gauge")

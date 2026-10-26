@@ -122,6 +122,11 @@ func (p Period) Start(now time.Time) time.Time {
 
 // Record is one finished request.
 type Record struct {
+	// ID identifies the record: inserting a record whose ID is already
+	// stored does nothing, so the accounting spool can replay a batch that
+	// may have been written before a crash without billing it twice. Empty
+	// for records written before v0.10.0.
+	ID               string
 	Time             time.Time
 	Org              string
 	Team             string

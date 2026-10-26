@@ -302,6 +302,9 @@ type storeHCL struct {
 	QueueRange hcl.Range `hcl:"queue_size,attr_value_range"`
 	BatchSize  *int      `hcl:"batch_size,optional"`
 	BatchRange hcl.Range `hcl:"batch_size,attr_value_range"`
+	SpoolDir   *string   `hcl:"spool_dir,optional"`
+	SpoolMax   *int64    `hcl:"spool_max_bytes,optional"`
+	SpoolRange hcl.Range `hcl:"spool_max_bytes,attr_value_range"`
 	DefRange   hcl.Range `hcl:",def_range"`
 }
 
@@ -564,10 +567,17 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 
 	// store
 	t := true
-	c.Store = Store{Kind: "memory", FailClosed: &t, QueueSize: DefaultQueueSize, BatchSize: DefaultBatchSize}
+	c.Store = Store{Kind: "memory", FailClosed: &t, QueueSize: DefaultQueueSize, BatchSize: DefaultBatchSize, SpoolMaxBytes: DefaultSpoolMaxBytes}
 	if s := raw.Store; s != nil {
 		c.Store.Kind = strOr(s.Kind, "memory")
 		c.Store.DSNFile = strOr(s.DSNFile, "")
+		c.Store.SpoolDir = strOr(s.SpoolDir, "")
+		if s.SpoolMax != nil {
+			c.Store.SpoolMaxBytes = *s.SpoolMax
+			if c.Store.SpoolMaxBytes < 1<<20 || c.Store.SpoolMaxBytes > 64<<30 {
+				v.errf(s.SpoolRange, "Invalid spool size", "spool_max_bytes = %d: want 1 MiB..64 GiB", c.Store.SpoolMaxBytes)
+			}
+		}
 		if s.FailClosed != nil {
 			fc := *s.FailClosed
 			c.Store.FailClosed = &fc
@@ -589,6 +599,11 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		case "postgres":
 			if c.Store.DSNFile == "" {
 				v.errf(s.DefRange, "Missing DSN file", "store kind \"postgres\" needs dsn_file")
+			}
+			// Usage is billed between institutions: it must survive a store
+			// outage and a crash (README, accounting spool).
+			if c.Store.SpoolDir == "" {
+				v.errf(s.DefRange, "Missing spool directory", "store kind \"postgres\" needs spool_dir (the durable accounting spool)")
 			}
 		default:
 			v.errf(s.KindRange, "Invalid store kind", "kind = %q: want \"memory\" or \"postgres\"", c.Store.Kind)
