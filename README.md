@@ -35,6 +35,13 @@ llmflow-gateway export -c examples/gateway.hcl --from 2026-10-01 --to 2026-11-01
   --group-by org,team,project --format parsable2   # side by side with sreport --parsable2
 ```
 
+`export` has the API's bounds (since v0.13.1): at most 366 days, 100 000
+rows and 60 s in the store. An operator raises them explicitly
+(`--max-days`, `--max-rows`, `--timeout`). Every run is written to the
+audit log (kind `export`, actor `cli:<login>`) before the store is read. A
+run with a raised bound does not start when that entry cannot be written;
+a run within the defaults prints a warning instead.
+
 ## Architecture
 
 ```

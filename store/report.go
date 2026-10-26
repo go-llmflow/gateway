@@ -179,9 +179,13 @@ func Regroup(rows []ReportRow, dims []string) []ReportRow {
 	return out
 }
 
-func (m *Memory) Report(_ context.Context, from, to time.Time, dims []string) ([]ReportRow, error) {
+func (m *Memory) Report(ctx context.Context, from, to time.Time, dims []string) ([]ReportRow, error) {
 	dims, err := ValidateDims(dims)
 	if err != nil {
+		return nil, err
+	}
+	// A deadline already passed ends the report, as PostgreSQL's does.
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	m.mu.RLock()

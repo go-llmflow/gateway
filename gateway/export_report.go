@@ -19,15 +19,16 @@ import (
 // Report exports (#68): GET /admin/export?from=&to=&format=csv|xlsx|pdf.
 // Every download is audited (kind "export"), whether it succeeds or not.
 // A period is at most store.MaxReportSpan, a report runs under
-// ReportTimeout, and an export holds at most maxExportRows rows.
+// ReportTimeout, and an export holds at most MaxExportRows rows.
 
 const (
 	FormatXLSX = "xlsx"
 	FormatPDF  = "pdf"
 )
 
-// maxExportRows bounds the finest grouping an export reads.
-const maxExportRows = 100_000
+// MaxExportRows bounds the finest grouping an export reads (the CLI's
+// default too).
+const MaxExportRows = 100_000
 
 // exportDims are the groupings an XLSX export gives a sheet each, and the
 // default grouping of a CSV export (tag excepted: a record counts under
@@ -73,7 +74,7 @@ func (s *Server) buildBundle(r *http.Request, p *principal, from, to time.Time) 
 	if err != nil {
 		return nil, err
 	}
-	if len(base) > maxExportRows {
+	if len(base) > MaxExportRows {
 		return nil, errTooManyRows
 	}
 	for _, d := range exportDims {
@@ -186,7 +187,7 @@ func (s *Server) exportReport(w http.ResponseWriter, r *http.Request, p *princip
 			storeError(w, err)
 			return
 		}
-		if len(data) > maxExportRows {
+		if len(data) > MaxExportRows {
 			fail(http.StatusRequestEntityTooLarge, errTooManyRows.Error())
 			return
 		}

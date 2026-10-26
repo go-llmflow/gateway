@@ -3,11 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-llmflow/gateway/config"
+	"github.com/go-llmflow/gateway/store"
 )
 
 type syncBuf struct {
@@ -116,3 +121,64 @@ func TestExport(t *testing.T) {
 		t.Fatal("missing config accepted")
 	}
 }
+
+// The CLI export has the API's bounds (366 days, 100 000 rows, 60 s),
+// raised only by a flag, and every run is audited; a raised bound fails
+// closed when its entry cannot be written.
+func TestExportBounds(t *testing.T) {
+	cfg := gatewayConfig(t, "")
+	mem := store.NewMemory()
+	old := exportStore
+	exportStore = func(context.Context, *config.Config) (store.Store, error) { return nopClose{mem}, nil }
+	defer func() { exportStore = old }()
+	day := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	var recs []store.Record
+	for i := 0; i < 3; i++ {
+		recs = append(recs, store.Record{Org: "o", Team: "a", User: fmt.Sprint("u", i), Model: "m", Pool: "p", Cost: 1, Time: day})
+	}
+	if err := mem.InsertRecords(context.Background(), recs); err != nil {
+		t.Fatal(err)
+	}
+	long := []string{"export", "-c", cfg, "--from", "2024-01-01", "--to", "2026-01-01"}
+	if _, err := run(t, long...); err == nil || !strings.Contains(err.Error(), "--max-days") {
+		t.Fatalf("two years accepted: %v", err)
+	}
+	if _, err := run(t, append(long, "--max-days", "800")...); err != nil {
+		t.Fatalf("raised: %v", err)
+	}
+	byUser := []string{"export", "-c", cfg, "--from", "2026-10-01", "--to", "2026-11-01", "--group-by", "user"}
+	if _, err := run(t, append(byUser, "--max-rows", "2")...); err == nil || !strings.Contains(err.Error(), "3 rows") {
+		t.Fatalf("rows bound: %v", err)
+	}
+	for _, bad := range [][]string{{"--max-rows", "0"}, {"--max-days", "-1"}, {"--timeout", "0s"}} {
+		if _, err := run(t, append(byUser, bad...)...); err == nil {
+			t.Errorf("accepted %v", bad)
+		}
+	}
+	if _, err := run(t, append(byUser, "--timeout", "1ns")...); err == nil {
+		t.Error("a 1 ns deadline did not stop the report")
+	}
+	es, _ := mem.AuditRange(context.Background(), 1, 100)
+	raised := 0
+	for _, e := range es {
+		if e.Kind != "export" || !strings.HasPrefix(e.Actor, "cli") {
+			t.Fatalf("entry %+v", e)
+		}
+		if strings.Contains(e.After, `"raised":true`) {
+			raised++
+		}
+	}
+	if len(es) != 3 || raised != 1 {
+		t.Fatalf("audited %d runs, %d raised: %+v", len(es), raised, es)
+	}
+	// The audit log fails: a default run warns, a raised one refuses.
+	mem.SetFail(errors.New("store down"))
+	if _, err := run(t, append(long, "--max-days", "800")...); err == nil || !strings.Contains(err.Error(), "audit entry") {
+		t.Fatalf("raised without audit: %v", err)
+	}
+}
+
+// nopClose keeps the shared test store open across runs.
+type nopClose struct{ store.Store }
+
+func (nopClose) Close() {}

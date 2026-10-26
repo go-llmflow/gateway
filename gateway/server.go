@@ -73,6 +73,10 @@ type Server struct {
 	now     func() time.Time
 
 	groups map[string]*group
+	// probed is closed when the health loop's first round has stored every
+	// upstream's health and queue: a value set after it is not overwritten
+	// before the next interval.
+	probed chan struct{}
 	gorder []string
 	pools  map[string]admitter
 	porder []string
@@ -174,7 +178,7 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 		cfg: cfg, st: st, secrets: secrets, now: time.Now,
 		log:    slog.New(slog.DiscardHandler),
 		groups: map[string]*group{}, pools: map[string]admitter{},
-		met: newMetrics(),
+		met: newMetrics(), probed: make(chan struct{}),
 	}
 	for _, o := range opts {
 		o(s)

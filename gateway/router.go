@@ -102,8 +102,11 @@ func (u *upstream) joinURL(path string) string {
 func (s *Server) healthLoop(ctx context.Context) {
 	t := time.NewTicker(s.cfg.Health.Interval)
 	defer t.Stop()
-	for {
+	for first := true; ; first = false {
 		s.probeAll(ctx)
+		if first {
+			close(s.probed)
+		}
 		select {
 		case <-ctx.Done():
 			return
