@@ -367,6 +367,14 @@ func contract(t *testing.T, s Store) {
 	if len(us) != 3 || us[0].Org != "orgA" || us[2].Project != "x" || us[2].GPUHours != 7 {
 		t.Fatalf("by org and project %+v", us)
 	}
+	// By UTC day, with tags (the day survives the tag expansion; rows are
+	// ordered by tag, then day).
+	us, err = s.Report(ctx, t0, t0.Add(72*time.Hour), []string{"day", "tag"})
+	must(err)
+	if len(us) != 4 || us[0].Day != "2026-10-01" || us[0].Tag != "" || us[1].Day != "2026-10-03" || us[1].GPUHours != 7 ||
+		us[2].Tag != "eval" || us[2].Day != "2026-10-01" || us[2].GPUHours != 2 {
+		t.Fatalf("by day %+v", us)
+	}
 	if us, err := s.Report(ctx, t0.AddDate(1, 0, 0), t0.AddDate(1, 0, 1), nil); err != nil || len(us) != 0 {
 		t.Fatalf("empty period %+v %v", us, err)
 	}

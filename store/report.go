@@ -17,11 +17,18 @@ import (
 var reportDims = map[string]string{
 	"org": "org", "lab": "lab", "team": "team", "project": "project", "user": "user_name", "key": "key_id",
 	"model": "model", "pool": "pool", "tag": "tag",
+	// The UTC day of the request, for time series.
+	"day": "to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD')",
 }
 
 // ReportDims lists the accepted dimensions, in canonical order: the
-// hierarchy org → lab → team → project, then user, key, model, pool, tag.
-var ReportDims = []string{"org", "lab", "team", "project", "user", "key", "model", "pool", "tag"}
+// hierarchy org → lab → team → project, then user, key, model, pool, tag,
+// and day.
+var ReportDims = []string{"org", "lab", "team", "project", "user", "key", "model", "pool", "tag", "day"}
+
+// MaxReportSpan bounds the period of one report: a report reads every
+// record of its period.
+const MaxReportSpan = 366 * 24 * time.Hour
 
 // ValidateDims checks and orders report dimensions.
 func ValidateDims(dims []string) ([]string, error) {
@@ -57,6 +64,7 @@ type ReportRow struct {
 	Model             string  `json:"model,omitempty"`
 	Pool              string  `json:"pool,omitempty"`
 	Tag               string  `json:"tag,omitempty"`
+	Day               string  `json:"day,omitempty"`
 	Unit              string  `json:"-"`
 	Requests          int64   `json:"requests"`
 	PromptTokens      int64   `json:"prompt_tokens"`
@@ -97,6 +105,8 @@ func (r ReportRow) Dim(d string) string {
 		return r.Pool
 	case "tag":
 		return r.Tag
+	case "day":
+		return r.Day
 	}
 	return ""
 }
@@ -121,6 +131,8 @@ func (r *ReportRow) setDim(d, v string) {
 		r.Pool = v
 	case "tag":
 		r.Tag = v
+	case "day":
+		r.Day = v
 	}
 }
 
@@ -183,6 +195,7 @@ func (m *Memory) Report(_ context.Context, from, to time.Time, dims []string) ([
 			continue
 		}
 		base := ReportRow{Org: r.Org, Lab: r.Lab, Team: r.Team, Project: r.Project, User: r.User, Key: r.KeyID, Model: r.Model, Pool: r.Pool,
+			Day:      r.Time.UTC().Format("2006-01-02"),
 			Requests: 1, PromptTokens: r.PromptTokens, CompletionTokens: r.CompletionTokens, CachedTokens: r.CachedTokens,
 			Cost: r.Cost, Unit: r.Unit}
 		if r.Estimated {

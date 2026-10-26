@@ -17,6 +17,8 @@ button{font:inherit;padding:.2rem .6rem;cursor:pointer}
 .msg{background:#e7f6ea;padding:.4rem .6rem}.err{background:#fde8e8;padding:.4rem .6rem}
 .secret{font:16px monospace;background:#fff6d6;padding:.6rem;word-break:break-all}
 .bad{color:#a00;font-weight:600}.good{color:#060;font-weight:600}
+.charts{display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-start}.charts svg{max-width:100%;height:auto}
+.chips a{margin-right:.6rem}td.num{text-align:right;font-variant-numeric:tabular-nums}
 `
 
 const uiHTML = `
@@ -25,7 +27,7 @@ const uiHTML = `
 <title>{{.Title}} · llmflow</title><link rel="stylesheet" href="/ui/style.css"></head><body>
 <header><strong>llmflow</strong>
 <a href="/ui/">Home</a><a href="/ui/keys">Keys</a><a href="/ui/budgets">Budgets</a><a href="/ui/spend">Spend</a>
-<a href="/ui/fairshare">Fair share</a><a href="/ui/audit">Audit</a>
+<a href="/ui/reports">Reports</a><a href="/ui/fairshare">Fair share</a><a href="/ui/audit">Audit</a>
 {{if .User}}<span class="who">{{.User}}
 <form class="inline" method="post" action="/ui/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Sign out</button></form></span>{{end}}
 </header><main><h1>{{.Title}}</h1>
@@ -88,6 +90,28 @@ organisation administrator sees their organisation only.</p>
 <label>Group by <select name="group_by">{{$g := .Data.Group}}{{range .Data.Groups}}<option{{if eq . $g}} selected{{end}}>{{.}}</option>{{end}}</select></label>
 <button>Show</button></form>
 {{template "table" .Data.Table}}
+{{template "foot" .}}{{end}}
+
+{{define "reports"}}{{template "head" .}}
+<form method="get" action="/ui/reports"><label>From <input type="date" name="from" value="{{.Data.From}}"></label>
+<label>To (exclusive) <input type="date" name="to" value="{{.Data.To}}"></label>
+<label>Group by <select name="group">{{$g := .Data.Group}}{{range .Data.Dims}}<option{{if eq . $g}} selected{{end}}>{{.}}</option>{{end}}</select></label>
+{{range .Data.Filters}}<input type="hidden" name="{{.Dim}}" value="{{.Raw}}">{{end}}
+<button>Show</button></form>
+<p class="chips">Periods: {{range .Data.Presets}}<a href="{{.Remove}}">{{.Dim}}</a>{{end}}</p>
+{{if .Data.Filters}}<p class="chips">Filters: {{range .Data.Filters}}<a href="{{.Remove}}" title="remove">{{.Dim}} = {{.Value}} ✕</a>{{end}}</p>{{end}}
+<p>Period <strong>{{.Data.From}}</strong> to <strong>{{.Data.To}}</strong> (UTC, end exclusive), compared with
+<strong>{{.Data.PrevFrom}}</strong> to <strong>{{.Data.PrevTo}}</strong>.</p>
+{{if not .Data.Sections}}{{if not .Error}}<p>No usage in this period.</p>{{end}}{{end}}
+{{$group := .Data.Group}}
+{{range .Data.Sections}}<h2>{{.Unit}}</h2>
+<p>Total <strong>{{.Total}} {{.Unit}}</strong> over {{.Requests}} requests; previous period {{.Prev}} {{.Unit}} ({{.Delta}}).</p>
+<div class="charts">{{.Pie}}{{.Bars}}{{.Series}}</div>
+<table><tr><th>{{$group}}</th><th>requests</th><th>{{.Unit}}</th><th>share</th><th>previous ({{.Unit}})</th><th>change</th></tr>
+{{range .Lines}}<tr><td>{{if .Link}}<a href="{{.Link}}">{{.Label}}</a>{{else}}{{.Label}}{{end}}</td><td class="num">{{.Requests}}</td>
+<td class="num">{{.Cost}}</td><td class="num">{{.Shared}}</td><td class="num">{{.Prev}}</td><td class="num">{{.Delta}}</td></tr>{{end}}</table>
+{{if .Truncated}}<p>{{.Truncated}} more rows not shown: export the report for all of them.</p>{{end}}
+{{end}}
 {{template "foot" .}}{{end}}
 
 {{define "fairshare"}}{{template "head" .}}

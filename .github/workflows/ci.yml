@@ -77,6 +77,7 @@ jobs:
           - { target: FuzzScopeEveryRoute, pkg: ./openai }
           - { target: FuzzRead, pkg: ./spool }
           - { target: FuzzProjectHeader, pkg: ./gateway }
+          - { target: FuzzReportsQuery, pkg: ./gateway }
           - { target: FuzzMessagesStream, pkg: ./openai }
           - { target: FuzzAnthropicStreamFilter, pkg: ./guard }
           - { target: FuzzReadAudioForm, pkg: ./gateway }

@@ -58,6 +58,7 @@ func (s *Server) uiRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /ui/budgets", page(s.uiSetBudget))
 	mux.Handle("POST /ui/budgets/delete", page(s.uiDeleteBudget))
 	mux.Handle("GET /ui/spend", page(s.uiSpend))
+	mux.Handle("GET /ui/reports", page(s.uiReports))
 	mux.Handle("GET /ui/fairshare", page(s.uiFairshare))
 	mux.Handle("GET /ui/audit", page(s.uiAudit))
 	mux.Handle("POST /ui/audit/verify", page(s.uiVerify))
