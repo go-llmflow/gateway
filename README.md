@@ -965,6 +965,88 @@ Blocks the guardrails cannot read are refused, an Anthropic `document` among the
 
 A tool call's input is held until its block ends, so that every JSON layer can be decoded and masked (bounded at 1 MiB). It then arrives as one delta.
 
+### Anthropic as an upstream (opt-in, since v0.12.0)
+
+Several institutions can share **one Anthropic organisation's API usage**
+through the gateway, with the gateway's keys, budgets, fair share, audit and
+guardrails. The only path is an **Anthropic API key under the Commercial
+Terms**:
+- pooling Claude Pro/Max subscriptions is forbidden by the Consumer Terms (no credential sharing; no scripts except through API keys; no resale);
+- Claude Code's documentation forbids routing requests through Free/Pro/Max credentials on behalf of users ([legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)).
+
+The gateway therefore never relays a subscription. It drops the OAuth
+`anthropic-beta` capability and never forwards a client's `Authorization`
+or `x-api-key`. This is not legal advice: check your institution's
+contracts with your DPO.
+
+```hcl
+model "claude-sonnet" {
+  provider       = "anthropic"
+  upstream_model = "claude-sonnet-5-5"
+  pool           = "anthropic"          # a pool of its own; capacity = concurrency allowed at Anthropic
+  allow_external = true                 # required: prompts leave the site
+  orgs           = ["etabA", "etabB"]   # explicit allow-list (orgs and/or teams); others get 404
+  anthropic_betas = ["context-management-2025-06-27"]   # forwarded betas; "*" = any (never an OAuth one)
+  # anthropic_versions = ["2023-06-01", "2026-10-21"]   # default; the first is sent otherwise
+  cost {                                # USD per MTok, from the price list, with its date
+    unit                    = "USD"
+    price_date              = "2026-10-26"
+    input_per_mtok          = 2
+    output_per_mtok         = 10
+    cached_per_mtok         = 0.1        # cache reads
+    cache_write_5m_per_mtok = 2.5
+    cache_write_1h_per_mtok = 4
+    # long_context { above_input_tokens = 100000, input_per_mtok = …, … }   # e.g. Claude Haiku 5.5
+  }
+  upstream "api" { base_url = "https://api.anthropic.com" }
+  org_key "etabA" { key_file = "vault:secret/llmflow/anthropic#etabA" }   # one workspace per institution
+  org_key "etabB" { key_file = "vault:secret/llmflow/anthropic#etabB" }
+  fallbacks   = ["llama-3.3-70b"]       # optional: a LOCAL model on 429/529/outage
+  fallback_on = ["unavailable"]
+}
+guardrail "pii"     { type = "pii",          orgs = ["etabA", "etabB"] }   # required by default
+guardrail "secrets" { type = "hide_secrets", orgs = ["etabA", "etabB"] }
+```
+
+**Cross-institution isolation.** Anthropic's prompt cache is isolated per
+**workspace** on the Claude API: "Caches are isolated by workspace, ensuring
+data separation between workspaces within the same organization"
+([prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)).
+This is the timing side channel CVE-2025-46570 describes for vLLM, which
+the gateway closes there with `cache_salt`; Anthropic accepts no salt.
+- `check-config` requires an `org_key` of its own (a workspace and API key) for every organisation that may use the model, when more than one may and `cache_isolation` is not `"none"`. Two organisations naming the same key file are refused.
+- At run time the gateway reads `anthropic-workspace-id` on every answer. If two organisations ever resolve to the same workspace, both are refused with 503 until the configuration is fixed. One request may have shared the cache before that detection.
+- With `cache_isolation = "none"`, one key may serve everybody. The residual risk is then a shared cache between institutions: a prompt-cache hit is observable as a shorter time to the first token.
+
+**What is checked before a prompt leaves.**
+- `allow_external = true`, an explicit `orgs`/`teams` allow-list, and https (http only to a loopback address, for tests).
+- An external model is never a fallback target: prompts do not leave because a local model was busy. It never shares a pool with vLLM models.
+- `external_requires_guardrails` (top level, default `true`): every allowed organisation or team needs pre-call `pii` and `hide_secrets` guardrails, masking or blocking and fail-closed. They are checked at configuration time and again on every request, which answers 503 when they are missing.
+
+**Routes.**
+- `/v1/messages` (JSON and streaming) only. `/v1/chat/completions` and the other routes answer 400 for an Anthropic model, because Anthropic's OpenAI-compatibility layer "is not considered a long-term or production-ready solution" ([OpenAI SDK compatibility](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk)).
+- `/v1/models` lists the model to the allowed scopes only.
+- `/v1/messages/count_tokens` is not routed; Claude Code then estimates the counts.
+- A client may authenticate with `Authorization: Bearer llmf-…` or `x-api-key: llmf-…`, as Anthropic SDKs and Claude Code do.
+
+**What reaches Anthropic.** Headers are built from scratch:
+- `x-api-key` is the organisation's key;
+- `anthropic-version` is the client's if allow-listed, the first allowed one otherwise;
+- `anthropic-beta` carries the allow-listed values only (one comma-separated header, which [beta headers](https://platform.claude.com/docs/en/api/beta-headers) accepts);
+- no priority, request id or trace context is sent.
+
+The body goes through the same rewrite as for vLLM, so `priority`, `cache_salt`, `vllm_xargs` and the other engine fields are removed, and no salt is added. Back to the client go the provider's `request-id` and `retry-after`, but not its `anthropic-ratelimit-*` headers, which describe the shared organisation's usage. Claude Code's gateway guide asks gateways to forward `anthropic-beta` verbatim ([gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol)). The allow-list is stricter on purpose: add the betas your users need, or `"*"`.
+
+**Limits and back-off.** The pool's `capacity` is the concurrency the institutions share at Anthropic, apportioned by their shares as for GPUs. A 429 or 529 ([errors](https://platform.claude.com/docs/en/api/errors), [rate limits](https://platform.claude.com/docs/en/api/rate-limits)) starts a back-off **for that organisation**, for `retry-after` seconds (at most 10 minutes; 5 seconds when the header is absent, as on the spend-cap 429). During it, requests are not sent: they go to the model's `fallbacks` (a local vLLM group) when `fallback_on` includes `"unavailable"`, or get 429 with `Retry-After`. Other organisations are not affected, and the upstream is never cooled down for an HTTP status.
+
+**Accounting.** Cost uses Anthropic's usage fields: `input_tokens` (after the last cache breakpoint), `cache_read_input_tokens`, `cache_creation_input_tokens` split by lifetime (`cache_creation.ephemeral_5m/1h_input_tokens`), and `output_tokens`. Each is priced at its own rate, in the model's currency, which a [cost unit](#cost-units-since-v0120) keeps apart from GPU-hours. A stream is charged from `message_start` and the last `message_delta`. Set USD budgets (`"unit":"USD"`) per organisation, team or key.
+
+**Data retention.** Under Anthropic's standard commercial policy, prompts and outputs are retained for a period. Zero data retention is an arrangement per Anthropic organisation, requested from Anthropic's sales team ("ZDR is enabled per organization"). Prompt caching is ZDR-eligible: KV cache representations are "held in memory for the cache TTL and promptly deleted after expiry" ([API and data retention](https://platform.claude.com/docs/en/manage-claude/api-and-data-retention)). Features such as code execution are not covered. Decide with your DPO whether the pre-call masking above is enough for your data.
+
+References opened on 2026-10-26:
+- platform.claude.com/docs: api/messages, api/versioning, api/beta-headers, api/errors, api/rate-limits, api/models/list, build-with-claude/streaming, build-with-claude/prompt-caching, about-claude/pricing, cli-sdks-libraries/libraries/openai-sdk, manage-claude/api-and-data-retention;
+- code.claude.com/docs: llm-gateway, llm-gateway-protocol.
+
 ## MCP tools
 
 `POST /mcp` is an [MCP](https://modelcontextprotocol.io/specification/2026-07-28) server in front of the tool servers of the configuration. It speaks the Streamable HTTP binding of revision **2026-07-28** (per-request `_meta`, mirrored headers, `server/discover`). For older clients it also speaks the initialize handshake of **2025-11-25**, 2025-06-18 and 2025-03-26. A client authenticates with its virtual key, like any other request.

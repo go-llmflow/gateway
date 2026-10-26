@@ -260,9 +260,12 @@ func TestAnthropicEgress(t *testing.T) {
 		t.Errorf("PII or secret left the site: %s", text)
 	}
 
-	// Another organisation: its own key. An unknown version falls back to
-	// the first allowed one.
-	readAll(t, e.do("POST", "/v1/messages", keyB, anthMsg(false), "Anthropic-Version", "1999-01-01"))
+	// Another organisation, authenticated the Anthropic way (x-api-key, as
+	// Claude Code does): its own key upstream. An unknown version falls
+	// back to the first allowed one.
+	if resp := e.do("POST", "/v1/messages", "", anthMsg(false), "X-Api-Key", keyB, "Anthropic-Version", "1999-01-01"); readAll(t, resp) == "" || resp.StatusCode != 200 {
+		t.Fatalf("x-api-key credential: %d", resp.StatusCode)
+	}
 	if got := up.last(t).Header; got.Get("X-Api-Key") != keyBeta || got.Get("Anthropic-Version") != "2023-06-01" || got.Get("Anthropic-Beta") != "" {
 		t.Errorf("etabB: key %q version %q beta %q", got.Get("X-Api-Key"), got.Get("Anthropic-Version"), got.Get("Anthropic-Beta"))
 	}

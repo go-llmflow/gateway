@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -246,6 +247,12 @@ func (s *Server) lookup(ctx context.Context, secret string) (store.Key, bool, er
 // looked up, unless the key is a valid one already in the cache.
 func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (store.Key, bool) {
 	secret := bearer(r)
+	if secret == "" {
+		// Anthropic SDKs and Claude Code send their credential as
+		// x-api-key (code.claude.com/docs/en/llm-gateway-protocol: "in one
+		// or both headers"). It is the gateway key here, never forwarded.
+		secret = strings.TrimSpace(r.Header.Get("X-Api-Key"))
+	}
 	cn, haveNet := clientNet(r)
 	fail := func(status int, typ, msg string) (store.Key, bool) {
 		if haveNet && status == http.StatusUnauthorized {
