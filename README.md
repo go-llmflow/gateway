@@ -1355,7 +1355,7 @@ fleet module in the gateway's build graph now declares `go 1.27.3`, and the
 gateway requires those releases:
 
 - go-authn/oidc v0.4.3 (#18), go-authn/rp v0.1.3 (#7; v0.2.0 since, for `min_refresh`), go-authn/scim v0.1.1 (#4);
-- go-volumes/interface #8 and go-volumes/pool #14 (untagged), go-volumes/s3 v0.2.1 (#17);
+- go-volumes/interface v0.1.0 (#8) and go-volumes/pool v0.1.0 (#14, #15), their first tags, and go-volumes/s3 v0.2.2 (#17, #18). Since gateway v0.10.1 no fleet module in the graph is pinned at a pseudo-version;
 - go-llmflow/pii v0.2.1 (#3);
 - go-gitsafe/gitsafe v0.17.1, which already declared it.
 
