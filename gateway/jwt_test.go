@@ -264,6 +264,19 @@ func TestJWTInference(t *testing.T) {
 
 // A resource server configured for access tokens refuses an ID token
 // (RFC 9068 §4).
+// Security audit 2026-10-26, A4: disabling the team a JWT maps to cuts
+// the person off at once, even with their token already verified and
+// cached (the cache of virtual keys was cleared, the JWT cache was not).
+func TestJWTDisabledTeamCutsCachedToken(t *testing.T) {
+	idp := newFakeIdP(t)
+	now := time.Now()
+	e := jwtEnv(t, idp, func() time.Time { return now }, "")
+	tok := idp.sign(t, map[string]any{"alg": "RS256", "kid": "k1", "typ": "JWT"}, idp.claims(now, nil))
+	expect(t, "valid token", e.chatWith(tok, chat), 200)
+	e.check(nil, []call{{"master", "DELETE", "/admin/teams/etabA", "", 204}})
+	expect(t, "team disabled", e.chatWith(tok, chat), 401)
+}
+
 func TestJWTType(t *testing.T) {
 	idp := newFakeIdP(t)
 	now := time.Now()

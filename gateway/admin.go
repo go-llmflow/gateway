@@ -195,8 +195,16 @@ func (s *Server) disableOrg(w http.ResponseWriter, r *http.Request, p *principal
 		storeError(w, err)
 		return
 	}
-	s.keys.forget(func(k store.Key) bool { return k.Org == name })
+	s.forgetKeys(func(k store.Key) bool { return k.Org == name })
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// forgetKeys drops matching identities from both caches: virtual keys, and
+// the synthetic keys of verified JWTs (whose team is disabled the same way;
+// security audit 2026-10-26, A4).
+func (s *Server) forgetKeys(match func(store.Key) bool) {
+	s.keys.forget(match)
+	s.jwtCache.forget(match)
 }
 
 // ---- teams and projects ----
@@ -256,7 +264,7 @@ func (s *Server) disableTeam(w http.ResponseWriter, r *http.Request, p *principa
 		storeError(w, err)
 		return
 	}
-	s.keys.forget(func(k store.Key) bool { return k.Team == t.Name })
+	s.forgetKeys(func(k store.Key) bool { return k.Team == t.Name })
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -317,7 +325,7 @@ func (s *Server) disableProject(w http.ResponseWriter, r *http.Request, p *princ
 		storeError(w, err)
 		return
 	}
-	s.keys.forget(func(k store.Key) bool { return k.Team == t.Name && k.Project == name })
+	s.forgetKeys(func(k store.Key) bool { return k.Team == t.Name && k.Project == name })
 	w.WriteHeader(http.StatusNoContent)
 }
 

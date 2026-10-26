@@ -282,11 +282,21 @@ func (m *Memory) CreateKey(_ context.Context, k Key) error {
 	return nil
 }
 
-// withOrg returns a copy of k with its team's organisation.
+// withOrg returns a copy of k with its team's organisation. A key of a
+// disabled team or project reads as revoked (security audit 2026-10-26,
+// A4: the state a concurrent create and disable can leave behind).
 func (m *Memory) withOrg(k *Key) Key {
 	out := *k
 	if t, ok := m.teams[k.Team]; ok {
 		out.Org = t.Org
+		if t.Disabled {
+			out.Revoked = true
+		}
+	}
+	if k.Project != "" {
+		if p, ok := m.projects[[2]string{k.Team, k.Project}]; ok && p.Disabled {
+			out.Revoked = true
+		}
 	}
 	return out
 }
