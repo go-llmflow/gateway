@@ -146,7 +146,8 @@ preemption of the largest `(priority, arrival)`) with closed-loop clients:
 
 Without an `ha` block nothing changes: one replica, the fair-share state in
 its memory. With one, several replicas share the pools, and PostgreSQL stays
-the only shared component (no etcd, no Redis). Design and discussion:
+the only shared component (no etcd, no Redis). First released in v0.14.0;
+v0.13.1, tagged afterwards on a later commit, contains it too. Design and discussion:
 [#74](https://github.com/go-llmflow/gateway/issues/74).
 
 ```hcl
@@ -540,7 +541,7 @@ They do **not** go through the fair-share pool. A guard call is the gateway chec
 
 All guard answers are parsed defensively and fuzzed (`FuzzParseGuardAnswers`), as are the hold-back (`FuzzHoldback`: streamed in any pieces equals masked whole), the SSE rewriter (`FuzzStreamFilter`: no secret in any released string) and the request mapping (`FuzzMapRequest`).
 
-## Project attribution, labs and users (v0.13.0)
+## Project attribution, labs and users (v0.12.1)
 
 Coding clients do not say which project a request belongs to:
 
@@ -781,7 +782,7 @@ third-party asset is loaded.
 | Keys | list per team; create (the secret is shown **once**, on a page not cached), rotate with a grace period, revoke |
 | Budgets | budgets with spent and limit; set and delete |
 | Spend | GPU-hours (or a provider's currency), requests and tokens over a period, grouped by org, team, project, key, model, pool or tag |
-| Reports (since v0.13.0) | see below |
+| Reports (since v0.12.1) | see below |
 | Fair share | live state per pool: reservation, in flight, borrowing, LF and rank |
 | Audit | entries page by page, and a button that verifies the chain (status of the checkpoints and the anchor) |
 
@@ -806,7 +807,7 @@ its own; the two are never added together. The page reads
 sees their organisation only. The charts are inline SVG with presentation
 attributes only (no `style` attribute, no script), so the policy above is
 unchanged; every label is escaped. Every chart is drawn by
-[go-plot/plot](https://github.com/go-plot/plot) v0.3.0 (since v0.14.2) with
+[go-plot/plot](https://github.com/go-plot/plot) v0.3.0 (since v0.15.1; v0.13.0 to v0.15.0 used go-plot v0.2.0) with
 `ParseMath(false)` on the figure and `PlainText()` on every call that
 draws a name (tick labels, axis labels, titles). An org called
 `$\input{/etc/passwd}$`, `$5 and $6` or `<script>` therefore stays a
