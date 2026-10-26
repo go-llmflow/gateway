@@ -632,6 +632,19 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request, p *principal
 		apiError(w, http.StatusBadRequest, "invalid_request_error", "user name: want [A-Za-z0-9_.@+-]{1,128}")
 		return
 	}
+	// Creating a disabled user re-enables it, with every role binding it
+	// kept. Disabling is a proxy administrator's decision, so only a proxy
+	// administrator may undo it (security audit 2026-10-26, A3).
+	if !p.proxyAdmin() {
+		switch u, err := s.st.GetUser(r.Context(), in.Name); {
+		case err == nil && u.Disabled:
+			forbidden(w)
+			return
+		case err != nil && !errors.Is(err, store.ErrNotFound):
+			storeError(w, err)
+			return
+		}
+	}
 	if err := s.st.CreateUser(r.Context(), in.Name); err != nil {
 		storeError(w, err)
 		return
