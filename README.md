@@ -1318,6 +1318,105 @@ References opened on 2026-10-26:
 - platform.claude.com/docs: api/messages, api/versioning, api/beta-headers, api/errors, api/rate-limits, api/models/list, build-with-claude/streaming, build-with-claude/prompt-caching, about-claude/pricing, cli-sdks-libraries/libraries/openai-sdk, manage-claude/api-and-data-retention;
 - code.claude.com/docs: llm-gateway, llm-gateway-protocol.
 
+### vLLM instances as Slurm jobs: elastic pools (#75)
+
+A model can take its upstreams from **Slurm**, instead of (or on top of) static `upstream` blocks. This is the `slurm` block *inside a `model` block*. The top-level `slurm` block is a different thing: the accounting input of the reconciliation reports. The vLLM instances run as long jobs of a service account, for example account `svc_llm` with QOS `service`. They can be stopped at night so that the GPUs can be lent to a borrowing QOS. The gateway **follows** the running jobs; it never starts or stops one. Slurm (scrontab) or the operator does that.
+
+```hcl
+pool "gpu" { capacity = 0 }   # 0: C is the sum of the instances' capacities
+
+model "llama" {
+  upstream_model = "meta/llama-3.3-70b"
+  pool           = "gpu"
+  key_file       = "/etc/llmflow/vllm.key"     # the instances' --api-key
+  slurm {
+    url         = "https://slurmrestd.cluster:6820"   # from here only
+    api_version = "v0.0.44"                      # slurmrestd -d list
+    token_file  = "/etc/llmflow/slurm.jwt"       # any secret reference
+    user_name   = "svc_llm"                      # X-SLURM-USER-NAME (optional)
+    accounts    = ["svc_llm"]                    # required
+    partitions  = ["gpu"]                        # required
+    users       = ["svc_llm"]                    # optional allow-list
+    interval    = "15s"
+    stale_after = "5m"
+    instance_capacity     = 8                    # when the job does not say
+    max_instance_capacity = 64
+  }
+}
+```
+
+**Convention.** A job serves model `M` on port `P` when its name (or else its comment) is `llmflow:M:P` or `llmflow:M:P:C`. `C` is the instance's contribution to the pool's capacity; when it is absent, `instance_capacity` applies.
+
+**Discovery.**
+- Every `interval`, the gateway reads `GET <url>/slurm/<api_version>/jobs/` with `X-SLURM-USER-TOKEN`.
+- It keeps the jobs that are `RUNNING`, with none of the `COMPLETING`, `CONFIGURING`, `STOPPED`, `SIGNALING`, `RESIZING` or `REQUEUED` flags.
+- The job must be in an allowed account and partition, and, when `users` is set, belong to an allowed user.
+- The instance is `scheme://<batch_host>:P`. It is added only after `GET /health` answers 200 and `GET /v1/models` (with the model's key) lists `upstream_model`.
+
+**Removal.**
+- When the job leaves the list, or fails health 3 polls in a row, the instance is **drained**: it takes no new request, not even as a last resort.
+- It is removed once its requests in flight have finished, or after `limits.max_request_duration`.
+- It is admitted again, after the same checks, if its job comes back.
+
+**Capacity.**
+- The pool's C is its configured `capacity` plus the capacities of its non-draining instances.
+- Every membership change re-apportions the organisations' integer reservations with the same Hamilton method (`fairshare.Pool.SetCapacity`).
+- Every change is audited: `slurm.member_added`, `slurm.member_drained` (with the reason), `slurm.member_removed`, and `pool.capacity` (before, after, reservations).
+- Requests in flight keep their within-share or borrowing status.
+- Not yet with an `ha` block: a shared pool's C is fixed by its owner replica, so the configuration refuses the combination.
+
+**Safety.**
+- Only the configured accounts and partitions (and users) are trusted. Without this, anyone could submit a job named `llmflow:llama:8000` and capture prompts.
+- An untrusted job claiming a model is logged once and counted in `llmflow_slurm_rejected_jobs_total{reason}`.
+- `batch_host` must be a plain host name, and the URL built from it is validated. A fuzz test checks that nothing in a job's name or host can steer the URL elsewhere.
+- slurmrestd's URL comes from the configuration only.
+- The JWT is a secret reference, never an environment variable or an argument. It is never sent across a redirect: redirects are refused.
+- The answer is bounded to 32 MiB and 100 000 jobs.
+- **Fail-closed**: while slurmrestd cannot be read, the last known members are kept. Each member is still health-checked and drained on failure. Past `stale_after`, the gateway logs an error, and no instance is admitted until a poll succeeds. Healthy members are never dropped because of an outage.
+- Metrics: `llmflow_slurm_polls_total{outcome}`, `llmflow_slurm_last_success_timestamp_seconds`, `llmflow_pool_capacity`.
+
+**slurmrestd.** Use `AuthAltTypes=auth/jwt` with `AuthAltParameters=jwt_key=…` ([JWT authentication](https://slurm.schedmd.com/jwt.html)). Issue the gateway's token with `scontrol token username=svc_llm lifespan=…` and store it in the secret source. The token is read when the gateway starts, so pick a lifespan longer than your restart cycle: the default is only 1800 s. Once it has expired, polls fail, and the fail-closed rule above applies.
+
+**sbatch template** (one instance per job):
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=llmflow:llama:8000:8
+#SBATCH --account=svc_llm --qos=service --partition=gpu
+#SBATCH --nodes=1 --gres=gpu:4 --exclusive --time=7-00:00:00
+#SBATCH --signal=B:TERM@120
+# The key goes in VLLM_API_KEY, not --api-key: the node's process list
+# shows every command line to every user.
+VLLM_API_KEY=$(cat /etc/llmflow/vllm.key); export VLLM_API_KEY
+exec vllm serve meta/llama-3.3-70b --served-model-name meta/llama-3.3-70b \
+  --host 0.0.0.0 --port 8000 --tensor-parallel-size 4
+```
+
+The node's vLLM port must be reachable by the gateway only (firewall), as for static upstreams: `/metrics` is unauthenticated, and the key protects `/v1` only.
+
+**Day/night with scrontab** (needs `ScronParameters=enable`; [scrontab](https://slurm.schedmd.com/scrontab.html)):
+
+```
+#SCRON --account=svc_llm --qos=service --partition=service -t 0:05:00
+0 7 * * 1-5 sbatch /opt/llmflow/vllm-llama.sbatch
+#SCRON --account=svc_llm --qos=service --partition=service -t 0:05:00
+0 20 * * 1-5 scancel --account=svc_llm --name=llmflow:llama:8000:8
+```
+
+At 20:00 the jobs end. The gateway drains them, its pool shrinks, and the reservations follow. At 07:00 the new jobs are admitted as soon as vLLM answers.
+
+**Tested against a real Slurm** (go-llmflow/bench `TestSlurmDiscoveryE2E`, 2026-10-26). The setup was Slurm 24.11.5 with slurmrestd data_parser v0.0.42, auth/jwt, arm64. Results:
+- A vLLM CPU job was admitted 18 s after `sbatch`, served a chat request, and was removed 2 s after `scancel`.
+- Another account's job claiming the model was rejected and never contacted.
+- A vLLM job whose engine failed to start stayed `RUNNING`, and it was never admitted.
+
+References opened on 2026-10-26:
+- Slurm `master` source: `src/slurmrestd/plugins/openapi/slurmctld/api.c` (`GET /slurm/{data_parser}/jobs/`); `src/plugins/data_parser/v0.0.43`–`v0.0.46` `parsers.c` (`PARSER_ARRAY(JOB_INFO)`: `job_id`, `name`, `comment`, `admin_comment`, `account`, `partition`, `user_name`, `batch_host`, and `job_state` as a flag array); `src/slurmrestd/plugins/auth/jwt/jwt.c` (`X-SLURM-USER-TOKEN`, `X-SLURM-USER-NAME`).
+- slurm.schedmd.com: `rest_api.html`, `rest_quickstart.html`, `jwt.html`, `scrontab.html`.
+- vLLM v0.32.0: `entrypoints/serve/instrumentator/health.py` (`/health`: 200, or 503 when the engine is dead) and `entrypoints/openai/models/api_router.py` (`/v1/models`).
+
+The job environment is not readable through `job_info`: it exists only in the submit description. So the convention uses the name or the comment. `squeue` and `scontrol` are not used, because slurmrestd is the only interface that needs no Slurm client on the gateway host.
+
 ## MCP tools
 
 `POST /mcp` is an [MCP](https://modelcontextprotocol.io/specification/2026-07-28) server in front of the tool servers of the configuration. It speaks the Streamable HTTP binding of revision **2026-07-28** (per-request `_meta`, mirrored headers, `server/discover`). For older clients it also speaks the initialize handshake of **2025-11-25**, 2025-06-18 and 2025-03-26. A client authenticates with its virtual key, like any other request.

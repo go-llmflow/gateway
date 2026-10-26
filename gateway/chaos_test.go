@@ -190,7 +190,7 @@ func waitIdle(t *testing.T, e *env) {
 		for _, s := range e.srv.pools["b300"].snapshot() {
 			busy += s.InFlight + s.Borrowing
 		}
-		for _, u := range e.srv.groups["llama"].upstreams {
+		for _, u := range e.srv.groups["llama"].members() {
 			busy += int(u.inflight.Load())
 		}
 		if busy == 0 {

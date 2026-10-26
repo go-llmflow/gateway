@@ -565,6 +565,8 @@ type modelHCL struct {
 	SatWaitingRange    hcl.Range     `hcl:"saturation_waiting,attr_value_range"`
 	Cost               *costHCL      `hcl:"cost,block"`
 	Upstreams          []upstreamHCL `hcl:"upstream,block"`
+	// Upstreams discovered from Slurm jobs (slurm.go).
+	Slurm *slurmJobsHCL `hcl:"slurm,block"`
 	// An external provider (external.go).
 	Provider          *string     `hcl:"provider,optional"`
 	ProviderRange     hcl.Range   `hcl:"provider,attr_value_range"`
@@ -872,7 +874,8 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			v.errf(p.DefRange, "Duplicate pool", "pool %q is declared twice", p.Name)
 		}
 		pools[p.Name] = true
-		if p.Capacity <= 0 || p.Capacity > 1<<20 {
+		// 0 only for a pool fed by Slurm jobs, checked below.
+		if p.Capacity < 0 || p.Capacity > 1<<20 {
 			v.errf(p.CapacityRange, "Invalid capacity", "pool %q capacity = %d: want 1..1048576", p.Name, p.Capacity)
 		}
 		c.Pools = append(c.Pools, Pool{Name: p.Name, Capacity: p.Capacity})
@@ -882,6 +885,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	models := map[string]bool{}
 	modelClass := map[string]Class{}
 	poolUnit := map[string]string{}
+	slurmPools := map[string]bool{}
 	for _, m := range raw.Models {
 		g := ModelGroup{Name: m.Name, UpstreamModel: strOr(m.UpstreamModel, m.Name), Pool: strOr(m.Pool, m.Name), Class: Class(strOr(m.Class, string(Interactive)))}
 		if m.Name == "" || len(m.Name) > 256 || strings.ContainsAny(m.Name, "\x00\r\n") {
@@ -932,8 +936,15 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 				g.Pool, m.Name, unitName(g.Cost.Unit), unitName(prev))
 		}
 		poolUnit[g.Pool] = g.Cost.Unit
-		if len(m.Upstreams) == 0 {
-			v.errf(m.DefRange, "No upstream", "model %q needs at least one upstream block", m.Name)
+		if m.Slurm != nil {
+			if m.Provider != nil {
+				v.errf(m.Slurm.DefRange, "Slurm and provider", "model %q: an external provider's model cannot be discovered from Slurm", m.Name)
+			}
+			g.Slurm = v.slurmJobs(m.Slurm, m.Name, strOr(m.KeyFile, ""))
+			slurmPools[g.Pool] = true
+		}
+		if len(m.Upstreams) == 0 && m.Slurm == nil {
+			v.errf(m.DefRange, "No upstream", "model %q needs at least one upstream block (or a slurm block)", m.Name)
 		}
 		names := map[string]bool{}
 		for _, u := range m.Upstreams {
@@ -951,6 +962,11 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			g.Upstreams = append(g.Upstreams, Upstream{Name: u.Name, BaseURL: u.BaseURL, KeyFile: key})
 		}
 		c.ModelGroups = append(c.ModelGroups, g)
+	}
+	for _, p := range raw.Pools {
+		if p.Capacity == 0 && !slurmPools[p.Name] {
+			v.errf(p.CapacityRange, "Invalid capacity", "pool %q capacity = 0: want 1..1048576 (0 only for a pool whose models are discovered from Slurm, where C is the sum of the instances')", p.Name)
+		}
 	}
 	// Fallbacks name other model groups, checked once all are known.
 	for i, m := range raw.Models {
@@ -1205,6 +1221,13 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	}
 	if raw.HA != nil {
 		c.HA = v.buildHA(raw.HA, c)
+		// A shared pool's C is its owner's, fixed at start (package ha):
+		// an elastic pool would drift between replicas.
+		for i, m := range raw.Models {
+			if m.Slurm != nil && i < len(c.ModelGroups) {
+				v.errf(m.Slurm.DefRange, "Slurm discovery with ha", "model %q: slurm discovery (elastic pools) is not supported with an ha block yet: a shared pool's capacity is fixed by its owner", m.Name)
+			}
+		}
 	}
 	if kr := raw.KeyRotation; kr != nil {
 		ck := &KeyRotation{VaultPrefix: strings.Trim(kr.VaultPrefix, "/"),

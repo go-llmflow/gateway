@@ -181,8 +181,12 @@ type metrics struct {
 	guardSeconds   *histogram
 	// toolCalls counts MCP tool calls by team, server and outcome.
 	toolCalls *counterVec // team, server, status
-	overhead  *histogram
-	upstreamT *histogram
+	// Slurm discovery (slurm.go): polls by outcome, untrusted jobs that
+	// claimed a model by reason.
+	slurmPolls    *counterVec // model, outcome
+	slurmRejected *counterVec // model, reason
+	overhead      *histogram
+	upstreamT     *histogram
 }
 
 // charge counts a cost in its unit's counter: GPU-hours and currencies are
@@ -219,6 +223,9 @@ func newMetrics() *metrics {
 		toolCalls: newCounterVec("llmflow_tool_calls_total",
 			"MCP tool calls by team, tool server and outcome (ok, tool_error, input_required, server_error, unavailable, malformed, denied, audit_failed, list_failed).",
 			"team", "server", "status"),
+		slurmPolls: newCounterVec("llmflow_slurm_polls_total", "slurmrestd polls per Slurm-discovered model, by outcome (ok, error).", "model", "outcome"),
+		slurmRejected: newCounterVec("llmflow_slurm_rejected_jobs_total",
+			"Jobs that claimed a model by the convention but were not trusted, by reason (account, partition, user, host, convention, capacity); each job counted once.", "model", "reason"),
 		estimated: newCounterVec("llmflow_usage_estimated_total",
 			"Requests charged with estimated tokens because vLLM's usage never reached the gateway (client gone first).", "team", "model"),
 		overhead: newHistogram("llmflow_overhead_seconds", "Time spent in the gateway itself (request handling before the upstream call plus response handling after it).",

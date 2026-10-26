@@ -758,14 +758,15 @@ func TestHealthChecks(t *testing.T) {
 	e := newEnv(t, testConfig(down.URL, up.URL()))
 	e.srv.probeAll(context.Background())
 	g := e.srv.groups["llama"]
-	if g.upstreams[0].healthy.Load() || !g.upstreams[1].healthy.Load() {
+	ms := g.members()
+	if ms[0].healthy.Load() || !ms[1].healthy.Load() {
 		t.Fatal("health verdicts wrong")
 	}
-	if u := g.pick(map[*upstream]bool{}, time.Now()); u != g.upstreams[1] {
+	if u := g.pick(map[*upstream]bool{}, time.Now()); u != ms[1] {
 		t.Fatal("picked the unhealthy upstream")
 	}
 	// All unavailable: fall back rather than fail.
-	g.upstreams[1].healthy.Store(false)
+	ms[1].healthy.Store(false)
 	if u := g.pick(map[*upstream]bool{}, time.Now()); u == nil {
 		t.Fatal("no fallback")
 	}

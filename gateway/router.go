@@ -30,21 +30,38 @@ type upstream struct {
 	// external: a provider's API, not probed (it has no /health, and its
 	// keys are per organisation); a failed connection still cools it down.
 	external bool
+	// draining: a discovered instance on its way out (its Slurm job ended
+	// or it failed health, slurm.go): it takes no new request, not even as
+	// the last resort of pick, and is removed once idle.
+	draining atomic.Bool
 }
 
 func (u *upstream) available(now time.Time) bool {
-	return u.healthy.Load() && now.UnixNano() >= u.cooldown.Load()
+	return u.healthy.Load() && !u.draining.Load() && now.UnixNano() >= u.cooldown.Load()
 }
 
 // group is a client-facing model.
 type group struct {
-	cfg       config.ModelGroup
-	upstreams []*upstream
-	pool      admitter
-	class     fairshare.Class
+	cfg   config.ModelGroup
+	ups   atomic.Pointer[[]*upstream]
+	pool  admitter
+	class fairshare.Class
 	// ext is set for a model of an external provider (anthropic.go).
 	ext *extRuntime
+	// disc is set when Slurm jobs provide upstreams (slurm.go).
+	disc *slurmDiscovery
 }
+
+// members is the group's current upstream set: static for a configured
+// group, replaced as a whole (never modified in place) by discovery.
+func (g *group) members() []*upstream {
+	if p := g.ups.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+func (g *group) setMembers(us []*upstream) { g.ups.Store(&us) }
 
 // queueSaturated reports whether vLLM's own queues, as last scraped, reach
 // the group's saturation_waiting (#58, signal 2). Off when it is 0.
@@ -54,7 +71,7 @@ func (g *group) queueSaturated() bool {
 	}
 	var sum int64
 	known := false
-	for _, u := range g.upstreams {
+	for _, u := range g.members() {
 		if w := u.waiting.Load(); w >= 0 {
 			sum += w
 			known = true
@@ -69,8 +86,8 @@ func (g *group) queueSaturated() bool {
 // health verdict must not turn into a full outage.
 func (g *group) pick(tried map[*upstream]bool, now time.Time) *upstream {
 	var best, fallback *upstream
-	for _, u := range g.upstreams {
-		if tried[u] {
+	for _, u := range g.members() {
+		if tried[u] || u.draining.Load() {
 			continue
 		}
 		if fallback == nil || u.inflight.Load() < fallback.inflight.Load() {
@@ -119,14 +136,14 @@ func (s *Server) probeAll(ctx context.Context) {
 	scrape := map[*upstream]bool{}
 	for _, g := range s.groups {
 		if g.cfg.SaturationWaiting > 0 {
-			for _, u := range g.upstreams {
+			for _, u := range g.members() {
 				scrape[u] = true
 			}
 		}
 	}
 	seen := map[*upstream]bool{}
 	for _, g := range s.groups {
-		for _, u := range g.upstreams {
+		for _, u := range g.members() {
 			if seen[u] || u.external {
 				continue
 			}
