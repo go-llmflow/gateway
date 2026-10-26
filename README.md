@@ -679,7 +679,15 @@ its own; the two are never added together. The page reads
 `GET /admin/spend` like every other page, so an organisation administrator
 sees their organisation only. The charts are inline SVG with presentation
 attributes only (no `style` attribute, no script), so the policy above is
-unchanged; every label is escaped. The page's queries are fuzzed
+unchanged; every label is escaped. The pie is drawn by
+[go-plot/plot](https://github.com/go-plot/plot) v0.2.0, which receives no
+name from the data at all (only the sizes and the percentages, as plain
+text): the legend is the gateway's own escaped SVG text, so an org called
+`$\input{/etc/passwd}$` or `<script>` stays a string and never reaches
+go-plot's TeX typesetter. Bars and the daily series use the gateway's
+renderer, since go-plot's tick labels have no plain-text option. Two pies
+on one page were checked in Chrome under the policy above: no violation
+(a control page with a planted inline style is refused). The page's queries are fuzzed
 (`FuzzReportsQuery`). `GET /admin/spend` also accepts `group_by=day` (and
 `lab`, `user`), and every report now runs under a 60-second deadline in the
 store.
