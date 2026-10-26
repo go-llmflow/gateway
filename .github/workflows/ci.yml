@@ -73,6 +73,7 @@ jobs:
           - { target: FuzzParseGuardAnswers, pkg: ./guard }
           - { target: FuzzMapResponse, pkg: ./guard }
           - { target: FuzzRewriteResponses, pkg: ./openai }
+          - { target: FuzzScopeEveryRoute, pkg: ./openai }
           - { target: FuzzMessagesStream, pkg: ./openai }
           - { target: FuzzAnthropicStreamFilter, pkg: ./guard }
           - { target: FuzzReadAudioForm, pkg: ./gateway }
