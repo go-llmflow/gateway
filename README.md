@@ -760,7 +760,13 @@ model "llama-70b" {
 **When.** Before anything has reached the client, in either of two cases:
 
 - no upstream of the group took the request (all down, failing or cooling down, after the usual retries);
-- vLLM answered `429` or `503` (saturated).
+- vLLM answered `429` or `503`.
+
+vLLM does not answer `429` or `503` when it is saturated: it queues the request
+(observed in the real-vLLM run of go-llmflow/bench v0.2.0). So in practice a
+fallback is taken on an **outage**, not on saturation. Falling back on
+saturation (from the pool's in-flight count against its capacity) is planned
+in #58.
 
 The request then moves to the next fallback that its team is allowed to use and whose budgets it has not exceeded. Any other answer, a `400` for instance, is final.
 
@@ -785,7 +791,7 @@ The request then moves to the next fallback that its team is allowed to use and 
 
 `priority`, `request_id`, `cache_salt` and the other engine fields are stripped, as they are for chat.
 
-**Stateless only.** vLLM keeps every response in the memory of the instance that produced it (`store` defaults to true there). Anyone holding the id can then read it back, continue it (`previous_response_id`) or cancel it. Behind a gateway, that state would be shared by every tenant and would live on one upstream among several. So the gateway works as follows:
+**Stateless only.** Storing responses is opt-in in vLLM: it stores nothing unless the server runs with `VLLM_ENABLE_RESPONSES_API_STORE=1` (vLLM `entrypoints/openai/responses/serving.py`, and observed in the real-vLLM run of go-llmflow/bench). With the store enabled, vLLM keeps every response in the memory of the instance that produced it. Anyone holding its id can then read it back, continue it (`previous_response_id`) or cancel it. Behind a gateway, that state would be shared by every tenant and would live on one upstream among several. So the gateway works as follows, and a deployment that enables the store stays safe:
 
 - it forces `"store": false`;
 - it refuses `previous_response_id`, `background`, `conversation` and stored `prompt` with a 400 that says so;
@@ -1048,7 +1054,10 @@ Enforced:
   stripped**, as the vLLM guide recommends: each becomes
   `llmf-` + an HMAC of (scope, uuid), so a client keeps referring to media it
   sent earlier, while the same uuid presented by two tenants names two
-  different cache entries.
+  different cache entries. This holds on every route whose content parts
+  vLLM parses: chat and completions messages, embeddings (messages, batched
+  messages, chat messages in `input`), the Responses `input`, rerank `query`
+  and `documents`, and tokenize messages (`FuzzScopeEveryRoute`).
 - **Client addresses and network restrictions.** The client is the
   connection's address, unless the connection comes from one of
   `trusted_proxies`: then `X-Forwarded-For` is read **from the right**,
@@ -1100,7 +1109,12 @@ Enforced:
   reaches a redirect target); environment proxies are ignored.
 - Limits: request body, header size, read-header / read / idle timeouts, maximum
   request duration, maximum upstream response size; admin JSON bodies ≤ 64 KiB
-  with unknown fields rejected; bounded accounting queue.
+  with unknown fields rejected; bounded accounting queue. Every response has a
+  write deadline at `max_request_duration` + 5 s, so a client that stops
+  reading cannot hold its answer, slot and grant forever. Store reads on the
+  request path give up after 5 s (503), a budget refresh after 30 s, an admin,
+  UI or SCIM request after 60 s. Export queues hold at most 256 MiB as well as
+  `queue_size` objects.
 - Key cache: valid keys and misses live in two separate bounded maps, never
   cleared in bulk, so a spray of random keys cannot evict valid keys and push
   legitimate traffic to PostgreSQL (test: 200 000 random keys, the valid key is
@@ -1115,7 +1129,8 @@ Enforced:
   service container, fuzz smoke, `govulncheck`, `CGO_ENABLED=0` cross-builds
   for linux/amd64 and linux/arm64.
 
-Open defects (v0.2.0):
+Open defects (v0.9.0; each entry re-checked against the code during the
+security audit of 2026-10-26):
 
 1. **State is per process.** In-flight counts, rate limits and the key cache
    live in memory: run one gateway replica per pool. Several replicas would each
@@ -1143,14 +1158,16 @@ Open defects (v0.2.0):
    isolation need their own vLLM instance.
 6. **Accounting can drop records** when the queue is full or a batch write fails
    twice; both are counted in metrics; budgets count the cost until the next
-   refresh only.
+   refresh only. Measured (`TestChaosAccountingOutage`): a PostgreSQL outage
+   of 3 s lost every record of the requests served meanwhile (21 of 21,
+   counted as failed); fail-closed bounds such an outage to 3 refresh periods.
 7. No TLS termination in the gateway (put it behind a TLS proxy); the admin API
    shares the client listener; `/v1/responses` is served statelessly only
    (see [Responses API](#responses-api)).
 8. `C` is static configuration; the gateway does not measure or adapt it.
 9. **Admin principals are read from the store on every admin request** (no
-   cache): fine for admin traffic, but the admin API fails with the store.
-   Role changes therefore apply at once.
+   cache): fine for admin traffic, but the admin API fails with the store
+   (503, within 60 s at most). Role changes therefore apply at once.
 10. **Soft-budget alert retries live in memory**: each channel (webhook,
     SMTP) is retried on its own, up to 6 attempts with exponential backoff
     (2 s doubling, 2 min cap, 25 % jitter), a 4xx other than 408/429 is not
@@ -1163,8 +1180,10 @@ Open defects (v0.2.0):
 11. **SSO sessions live in one replica's memory**: behind several replicas,
     use sticky sessions.
 12. **A person holding a JWT cannot be revoked individually**: disable the
-    team, change the `map` blocks, or revoke at the identity provider; a token
-    already verified stays cached until its `exp` or `key_cache_ttl`.
+    team (this cuts their cached tokens at once on the replica that serves
+    the request), change the `map` blocks, or revoke at the identity
+    provider; otherwise a token already verified stays cached until its `exp`
+    or `key_cache_ttl`.
 13. **SCIM does not expand nested groups**, and a provisioned role on a team
     that does not exist is logged, not created.
 14. **The audit log's guarantees end at its newest anchor**: without an
@@ -1180,6 +1199,129 @@ Open defects (v0.2.0):
     - A span still open after 64 KiB is released masked as far as it has reached. Its tail goes out in clear if that tail no longer matches on its own.
     - Audit entries of guardrail decisions are written asynchronously. When the queue is full they are dropped, counted (`llmflow_guardrail_audit_dropped_total`) and alerted.
 16. **Phone numbers have no checksum**: a PII guardrail that masks them also masks 10-digit references that start with 0. This was measured in go-llmflow/pii.
+17. **Fallbacks are taken on an outage, not on saturation**: vLLM queues
+    instead of answering `429`/`503` (see [Fallbacks](#fallbacks), #58).
+
+## Security audit 2026-10-26
+
+An independent, adversarial review of v0.8.0 (commit `b23064a`) by an agent
+that did not write the code, with chaos tests on the parts that keep state.
+
+**Scope.** Every package of the module (`gateway`, `openai`, `guard`, `mcp`,
+`store`, `audit`, `export`, `secret`, `config`, the CLI) and the modules it
+pulls for authentication and storage: go-authn/oidc v0.4.2, go-authn/rp
+v0.1.2, go-authn/scim v0.1.0, go-volumes/s3 v0.2.0. The fixes of earlier
+reviews were rechecked and hold, with their tests: client priority override,
+reservation rounding, aborted-stream billing, key-cache wipe, audit
+truncation and rollback (anchors), the hold-back UTF-8 leak, the `\u`-escape
+guardrail bypass, Responses statefulness (`store` forced false), the
+go-authn/oidc `nbf` overflow.
+
+**Method.**
+
+- Read the threat model and the code, then attacked it. The vLLM sources
+  were opened where the gateway relies on how vLLM parses a request
+  (vllm-project/vllm `main` at `256d8b4`: `entrypoints/pooling/scoring`,
+  `entrypoints/pooling/embed/protocol.py`, `entrypoints/pooling/base/protocol.py`,
+  `entrypoints/anthropic/protocol.py`).
+- `TestAuthzMatrix`: every admin route of the router (a route without a row
+  fails the test) called by 12 principals on one organisation's objects:
+  master key, `proxy_admin`, `proxy_viewer`, `org_admin` of the organisation
+  and of another one (the cross-organisation attacker), `team_admin`,
+  `member`, team and organisation viewers, a user without roles, an
+  inference key, a JWT-shaped bearer. Listings are checked for leaks to
+  outsiders. The matrix was checked against planted mistakes.
+- Chaos: PostgreSQL behind a fault-injecting proxy (down, restarted,
+  partitioned), two replicas on one database, an upstream killed and
+  restarted mid-stream, a key rotated with requests in flight, the clock
+  stepped back, the export target down, clients that stop reading.
+- Fuzzing: the 29 existing targets for 10 minutes each, and a new target,
+  `FuzzScopeEveryRoute`. `govulncheck` on the module and on the four
+  modules above.
+
+**Findings.**
+
+| ID | Severity | Finding | Status |
+|---|---|---|---|
+| A1 | medium | Multimodal `uuid`s were scoped only on chat and Responses. On rerank, tokenize and embeddings (batched messages, chat `input`) the client's uuid reached vLLM unchanged: one tenant could probe or poison another tenant's cached media. | fixed, #48, #55 |
+| A2 | medium | A client that never read its answer blocked its handler forever, holding up to 64 MiB of buffered answer, its key's in-flight slot and its fair-share grant. A few connections exhausted the gateway's memory. | fixed, #49 |
+| A3 | high | Any organisation admin could re-enable a user that a proxy admin had disabled, with every role the user kept, `proxy_admin` included (`POST /admin/users` on an existing name). | fixed, #50 |
+| A4 | low | A key created while its team was being disabled stayed valid (READ COMMITTED race, and the team's flag was not read on the request path). Disabling a team did not clear the cache of verified JWTs. | fixed, #51 |
+| A5 | medium | Export queues were bounded in objects only: with S3 down and content logging on, up to 8 GiB of request logs could pile up in memory. | fixed, #52 |
+| A6 | medium | Store calls were unbounded: during a network partition with PostgreSQL, requests with an uncached key hung until their client gave up (no answer after 20 s in the test), and a stuck budget refresh stopped every later one. | fixed, #54 |
+| A7 | low | Two replicas started together on an empty database raced on the schema, and one failed to start. | fixed, #54 |
+| A8 | low | The admin API, SSO and SCIM answers had no `nosniff`, CSP or frame denial (the UI had them). | fixed, #56 |
+| A9 | high | go-llmflow/pii v0.1.0, used by the `pii` guardrail, is quadratic on long runs of digits (1 MiB took 5 to 20 minutes of one core): any key holder of a guarded team could pin a core per request. Found by the performance review. | fixed in pii v0.2.0 (go-llmflow/pii#2), bumped here in #57 |
+
+Verified without finding: no cross-organisation IDOR on the 39 admin routes;
+CSRF (synchronizer token, `Origin` and `Sec-Fetch-Site`) on every state change
+of the UI and of cookie-authenticated API calls; a fresh session at login,
+the login cookie bound to the state, `__Host-` cookies (Secure, HttpOnly,
+SameSite=Lax), no open redirect; every outbound URL comes from the
+configuration and no client redirects are followed (upstreams, guardrails,
+MCP servers, alert webhooks; go-authn refuses redirects to cleartext);
+virtual keys, admin tokens, the master key and the SCIM token are compared in
+constant time over hashes and are never logged; a fallback keeps the original
+organisation's cache salt, uuids and priority (`TestFallbackKeepsTenantIsolation`);
+scheduled-rotation targets stay under `vault_prefix/<team>/` with validated
+path segments; export keys are validated against traversal; request bodies are
+read only after authentication and are bounded. Against a real vLLM, the
+end-to-end run of go-llmflow/bench v0.2.0 (same day) confirmed the following:
+
+- a client's `priority`, `vllm_xargs`, `extra_body` and `cache_salt` change
+  neither the scheduling order nor the cache isolation;
+- prefix-cache isolation per organisation holds. vLLM's own counters showed
+  768 of 814 prefix tokens hit within one organisation, and 0 of 814 from
+  another.
+
+**Chaos results.**
+
+| Fault | Behaviour |
+|---|---|
+| PostgreSQL down | An unknown key gets 503, not 401, and is not cached as invalid; a cached key is served until the budgets are 3 refresh periods old, then everything fails closed; everything recovers. |
+| PostgreSQL partitioned | 503 within 5 s (A6); fail-closed on time; recovery when the partition heals. |
+| PostgreSQL restarted | A call that draws a dead pooled connection fails safe with 503 (one call in the test); the pool recovers by itself. |
+| Accounting during an outage | Every record of the requests served during the outage is lost and counted as failed (open defect 6). |
+| Two replicas, one database | A concurrent first start works (A7); keys are shared; a revocation reaches the other replica after `key_cache_ttl` (open defect 1); the audit chain stays one verifiable chain under two concurrent writers. |
+| Upstream killed mid-stream, restarted | The client gets the partial stream; counters return to zero; the next requests are served. |
+| Key rotated with 16 requests in flight | All 16 finish and are charged to the key; the old secret is refused at once and the new one is served. |
+| Clock stepped back 2 h | The audit chain still verifies. |
+| Export target down | The queue drops beyond 256 MiB and alerts (A5). |
+| Clients that stop reading | Released after `max_request_duration` + 5 s (A2). |
+
+**Fuzzing.** The 29 existing targets ran for 10 minutes each on v0.8.0, three
+at a time with two workers each. None failed, and no new crasher was found. The
+new `FuzzScopeEveryRoute` ran for 60 s with no failure. It caught a planted
+regression on its first seed, and it is part of the CI fuzz smoke.
+
+**Dependencies.** `govulncheck` (database of 2026-10-21) finds nothing in the
+gateway built with Go 1.27.3. go-authn/oidc v0.4.2, go-authn/rp v0.1.2 and
+go-volumes/s3 v0.2.0 declare `go 1.27.1`: built with that toolchain, nine
+standard-library vulnerabilities are reachable from them (net/http, crypto/tls,
+crypto/x509; fixed in 1.27.2 and 1.27.3). The gateway's binary is not affected
+because it is built with 1.27.3, but those modules should raise their `go`
+line. go-authn/scim v0.1.0 is clean.
+
+**Residual risks.**
+
+1. Usage served during a store outage is not recorded (open defect 6), so
+   budgets and reports undercount it. Fail-closed bounds the window to 3
+   refresh periods.
+2. SCIM adopts an existing gateway user with the same `userName`, and
+   re-enables it if a proxy admin had disabled it by hand. The identity
+   provider is already trusted for usernames through SSO.
+3. Roles that SSO maps from ID-token claims are fixed at login, for the
+   session's lifetime. Stored roles and the disabled flag are read on every
+   request.
+4. A member may point their own key's scheduled rotation at any field under
+   the team's vault prefix, overwriting a secret delivered there for another
+   key of the team. That is a denial of service inside the team; it gives no
+   read access.
+5. Secret files are read whatever their permissions (Kubernetes mounts
+   secrets 0644 by default). Keep them in a directory that only the
+   gateway's user can read.
+6. A tool server's error message (at most 4 KiB) is returned to the MCP
+   client: tool servers are configured, so they are trusted.
 
 ## References
 
