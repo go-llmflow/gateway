@@ -30,23 +30,25 @@ func (e *budgetError) Error() string {
 
 func (e *budgetError) Unwrap() error { return errBudgetExceeded }
 
-// reqScope is everything a request is charged to.
+// reqScope is everything a request is charged to. unit is the cost unit
+// of its model ("" for GPU-hours): only the budgets of that unit apply.
 type reqScope struct {
 	org, team, project, key, model string
 	tags                           []string
+	unit                           string
 }
 
 // keys lists the budget keys that may apply to a request: each scope it
-// belongs to, for every model and for its own model.
+// belongs to, for every model and for its own model, in its unit.
 func (r reqScope) keys() []store.BudgetKey {
 	names := make([]store.BudgetKey, 0, 4+len(r.tags))
-	names = append(names, store.BudgetKey{Kind: store.ScopeOrg, Name: r.org}, store.BudgetKey{Kind: store.ScopeTeam, Name: r.team},
-		store.BudgetKey{Kind: store.ScopeKey, Name: r.key})
+	names = append(names, store.BudgetKey{Kind: store.ScopeOrg, Name: r.org, Unit: r.unit}, store.BudgetKey{Kind: store.ScopeTeam, Name: r.team, Unit: r.unit},
+		store.BudgetKey{Kind: store.ScopeKey, Name: r.key, Unit: r.unit})
 	if r.project != "" {
-		names = append(names, store.BudgetKey{Kind: store.ScopeProject, Name: r.team + "/" + r.project})
+		names = append(names, store.BudgetKey{Kind: store.ScopeProject, Name: r.team + "/" + r.project, Unit: r.unit})
 	}
 	for _, t := range r.tags {
-		names = append(names, store.BudgetKey{Kind: store.ScopeTag, Name: t})
+		names = append(names, store.BudgetKey{Kind: store.ScopeTag, Name: t, Unit: r.unit})
 	}
 	out := make([]store.BudgetKey, 0, 2*len(names))
 	for _, k := range names {
@@ -59,7 +61,7 @@ func (r reqScope) keys() []store.BudgetKey {
 
 // rowMatches reports whether spend row belongs to budget key k.
 func rowMatches(k store.BudgetKey, r store.SpendRow) bool {
-	if k.Model != "" && k.Model != r.Model {
+	if k.Unit != r.Unit || k.Model != "" && k.Model != r.Model {
 		return false
 	}
 	switch k.Kind {
@@ -292,7 +294,7 @@ func (b *budgeter) persisted(recs []store.Record) {
 		if rec.Cost <= 0 {
 			continue
 		}
-		sc := reqScope{org: rec.Org, team: rec.Team, project: rec.Project, key: rec.KeyID, model: rec.Model, tags: rec.Tags}
+		sc := reqScope{org: rec.Org, team: rec.Team, project: rec.Project, key: rec.KeyID, model: rec.Model, tags: rec.Tags, unit: rec.Unit}
 		for _, k := range sc.keys() {
 			b.pending[k] -= rec.Cost
 			if v := b.pending[k]; v < 1e-12 && v > -1e-12 {

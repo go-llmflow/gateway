@@ -179,7 +179,7 @@ model "llama-3.3-70b" {
 |---|---|
 | `org "<name>" { share, team "<name>" {} … }` | an organisation (institution) with the fraction of every pool reserved for it (sum ≤ 1) and the teams (labs) declared under it; team names are global |
 | `pool "<name>" { capacity }` | C, sustainable concurrency of the pool (1..1048576) |
-| `model "<name>" { … }` | client model name → `upstream_model`, `pool`, `class` (`interactive` / `batch`), `key_file`, `cost { input_per_mtok, output_per_mtok, cached_per_mtok }` in GPU-hours per million tokens, and `upstream "<name>" { base_url, key_file }` blocks |
+| `model "<name>" { … }` | client model name → `upstream_model`, `pool`, `class` (`interactive` / `batch`), `key_file`, `cost { input_per_mtok, output_per_mtok, cached_per_mtok, unit, price_date }` per million tokens, in GPU-hours unless `unit` names a currency (see [Cost units](#cost-units-since-v0120)), and `upstream "<name>" { base_url, key_file }` blocks |
 | `store { … }` | `kind` (`memory` / `postgres`), `dsn_file`, `spool_dir` (required with postgres, see [Durable accounting](#durable-accounting)), `spool_max_bytes` (default 256 MiB), `fail_closed` (default true), `queue_size`, `batch_size` |
 | `fairshare { half_life }` | usage decay half-life (default `"168h"`) |
 | `limits { … }`, `health { … }` | body and header size, timeouts, maximum request duration and response size; health-check interval, timeout, cooldown, path |
@@ -493,6 +493,30 @@ until its expiry, whatever the period; setting the budget again keeps it.
 Spend is the stored records of the period plus what this gateway charged
 since: a request counts as pending until its record is stored, then as
 written until the next refresh query includes it.
+
+### Cost units (since v0.12.0)
+
+A cost has a **unit**. vLLM models cost GPU-hours by default (`unit`
+omitted or `"gpu_hours"`). A model can be priced in a currency instead, as
+an external provider is, with the date its prices were read:
+
+```hcl
+cost {
+  unit            = "USD"          # letters, digits, _; at most 16
+  price_date      = "2026-10-26"   # required with a currency
+  input_per_mtok  = 2
+  output_per_mtok = 10
+  cached_per_mtok = 0.1
+}
+```
+
+**GPU-hours and a currency are never added together.**
+- **Budgets.** A budget carries a `unit` (`"gpu_hours"` by default) and counts only the requests of models priced in that unit. A scope can hold one budget per unit, for example `{"kind":"org","name":"etabA","unit":"USD","period":"month","max_cost":500}` beside its GPU-hours budget. A request is checked against the budgets of its model's unit only. `PUT /admin/budgets` refuses a unit no model costs in, since such a budget could never fill. `DELETE /admin/budgets?…&unit=USD` and `/admin/budgets/increase` take the unit too.
+- **Reports.** A spend report is split by unit whatever the `group_by`. Each JSON row has `cost` and `unit`, and the top-level `unit` is the common one or `"per_row"`. `gpu_hours` keeps its v0.11 meaning and is 0 on a currency row. CSV and parsable2 gain two trailing columns, `cost` and `unit`, so the earlier columns keep their positions.
+- **Metrics.** Currency costs go to `llmflow_cost_total{team,pool,unit}`; `llmflow_gpu_hours_total` stays GPU-hours only.
+- **Fair share.** It ranks by the usage of a pool, so the models of a pool must share one unit: `check-config` refuses a pool that mixes them.
+
+Upgrade: PostgreSQL gains a `unit` column on `llmflow_usage` and on `llmflow_budgets_v2`, whose primary key becomes (kind, name, model, unit). Existing rows are GPU-hours (`''`). The migration runs at start-up, once.
 
 ## Admin API
 

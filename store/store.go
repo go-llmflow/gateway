@@ -138,12 +138,16 @@ type Record struct {
 	PromptTokens     int64
 	CompletionTokens int64
 	CachedTokens     int64
-	Cost             float64
-	LatencyMS        float64
-	Status           int
-	Priority         int
-	Borrowing        bool
-	Stream           bool
+	// Cost is in Unit: "" for GPU-hours (vLLM models), a currency code
+	// such as "USD" for an external provider. Costs of different units are
+	// never added together (budgets and reports split by unit).
+	Cost      float64
+	Unit      string
+	LatencyMS float64
+	Status    int
+	Priority  int
+	Borrowing bool
+	Stream    bool
 	// Tags are the key's tags and the allow-listed request tags.
 	Tags []string
 	// Estimated is true when vLLM's usage report never arrived (client

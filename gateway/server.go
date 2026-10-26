@@ -597,6 +597,7 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 	s.met.requests.write(w)
 	s.met.tokens.write(w)
 	s.met.gpuHours.write(w)
+	s.met.cost.write(w)
 	s.met.denied.write(w)
 	s.met.retries.write(w)
 	s.met.fallbacks.write(w)

@@ -162,6 +162,7 @@ type metrics struct {
 	requests   *counterVec // team, model, code
 	tokens     *counterVec // team, model, kind
 	gpuHours   *counterVec // team, pool
+	cost       *counterVec // team, pool, unit: costs in a currency (external providers)
 	denied     *counterVec // team, reason
 	retries    *counterVec // group
 	fallbacks  *counterVec // from, to
@@ -182,11 +183,22 @@ type metrics struct {
 	upstreamT *histogram
 }
 
+// charge counts a cost in its unit's counter: GPU-hours and currencies are
+// never one series.
+func (m *metrics) charge(cost float64, team, pool, unit string) {
+	if unit == "" {
+		m.gpuHours.add(cost, team, pool)
+		return
+	}
+	m.cost.add(cost, team, pool, unit)
+}
+
 func newMetrics() *metrics {
 	return &metrics{
 		requests: newCounterVec("llmflow_requests_total", "Requests handled, by team, model and HTTP status.", "team", "model", "code"),
 		tokens:   newCounterVec("llmflow_tokens_total", "Tokens reported by vLLM usage, by kind (prompt, completion, cached).", "team", "model", "kind"),
 		gpuHours: newCounterVec("llmflow_gpu_hours_total", "Internal cost charged, in GPU-hours.", "team", "pool"),
+		cost:     newCounterVec("llmflow_cost_total", "Cost charged in a currency (external providers), by unit; GPU-hours are in llmflow_gpu_hours_total.", "team", "pool", "unit"),
 		denied:   newCounterVec("llmflow_denied_total", "Requests refused before reaching vLLM, by reason.", "team", "reason"),
 		retries:  newCounterVec("llmflow_upstream_retries_total", "Retries to another upstream before the first byte.", "group"),
 		fallbacks: newCounterVec("llmflow_fallbacks_total",

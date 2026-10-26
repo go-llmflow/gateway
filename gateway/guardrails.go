@@ -528,17 +528,17 @@ func (s *Server) callGuardModel(ctx context.Context, rq *guardReq, model, path s
 	if ok {
 		cost = g.cost(usage)
 		sc := rq.scope
-		sc.model = g.cfg.Name
+		sc.model, sc.unit = g.cfg.Name, g.cfg.Cost.Unit
 		s.budget.add(sc, cost)
 		s.met.tokens.add(float64(usage.PromptTokens), rq.key.Team, g.cfg.Name, "prompt")
 		s.met.tokens.add(float64(usage.CompletionTokens), rq.key.Team, g.cfg.Name, "completion")
-		s.met.gpuHours.add(cost, rq.key.Team, g.cfg.Pool)
+		s.met.charge(cost, rq.key.Team, g.cfg.Pool, g.cfg.Cost.Unit)
 	}
 	end := time.Now()
 	s.rec.record(store.Record{
 		Time: end.UTC(), Org: rq.key.Org, Team: rq.key.Team, Project: rq.key.Project, KeyID: rq.key.ID, Model: g.cfg.Name, Pool: g.cfg.Pool,
 		Upstream: redactURL(u.base), PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
-		CachedTokens: usage.Cached(), Cost: cost, LatencyMS: float64(end.Sub(t0).Microseconds()) / 1000,
+		CachedTokens: usage.Cached(), Cost: cost, Unit: g.cfg.Cost.Unit, LatencyMS: float64(end.Sub(t0).Microseconds()) / 1000,
 		Status: resp.StatusCode, Estimated: !ok, Tags: rq.scope.tags,
 	})
 	return data, nil
