@@ -69,13 +69,26 @@ func requestID() string {
 	return "llmf-" + hex.EncodeToString(b[:])
 }
 
-// cost converts usage to GPU-hours with the group's internal prices.
-// Cached prompt tokens are a subset of prompt tokens and are priced
-// separately.
+// cost converts usage to the group's cost unit with its prices. Cached
+// prompt tokens (read from a cache) are a subset of prompt tokens and are
+// priced separately; so are the tokens written to a cache, when the model
+// has cache-write prices (an external provider; otherwise they are input).
+// Above LongContextAbove input tokens the long-context prices apply to the
+// whole request, as the provider bills it.
 func (g *group) cost(u openai.Usage) float64 {
 	c := g.cfg.Cost
-	uncached := u.PromptTokens - u.Cached()
+	if c.LongContext != nil && u.PromptTokens > c.LongContextAbove {
+		lc := *c.LongContext
+		lc.AudioPerHour = c.AudioPerHour
+		c = lc
+	}
+	var w5, w1h int64
+	if c.CacheWrite5mPerMTok > 0 || c.CacheWrite1hPerMTok > 0 {
+		w5, w1h = u.CacheWrite5m, u.CacheWrite1h
+	}
+	uncached := u.PromptTokens - u.Cached() - w5 - w1h
 	return (float64(uncached)*c.InputPerMTok+float64(u.Cached())*c.CachedPerMTok+
+		float64(w5)*c.CacheWrite5mPerMTok+float64(w1h)*c.CacheWrite1hPerMTok+
 		float64(u.CompletionTokens)*c.OutputPerMTok)/1e6 + u.AudioSeconds/3600*c.AudioPerHour
 }
 
@@ -138,12 +151,19 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			// A model hidden from the key's team, or a guard model (the
 			// gateway's own), answers exactly like an unknown one, so its
 			// existence is not revealed.
-			if g == nil || g.cfg.Class == config.Guard || !s.budget.modelAllowed(key.Team, m) {
+			if g == nil || g.cfg.Class == config.Guard || !s.budget.modelAllowed(key.Team, m) || !externalVisible(g, key) {
 				return "", errUnknownModel
+			}
+			if g.ext != nil && ep != openai.Messages {
+				return "", errExternalEndpoint
 			}
 			return g.cfg.UpstreamModel, nil
 		}
 		out, req, err := openai.RewriteFor(ep, body, resolve, s.isolation(key))
+		if err == nil && g.ext != nil {
+			// No cache_salt for an external provider (anthropic.go, isoFor).
+			out, req, err = openai.RewriteFor(ep, body, resolve, s.isoFor(g, key))
+		}
 		switch {
 		case errors.Is(err, errUnknownModel):
 			apiError(w, http.StatusNotFound, "model_not_found", "the model does not exist")
@@ -194,6 +214,15 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			apiError(w, http.StatusServiceUnavailable, "service_unavailable", err.Error())
 			return
 		}
+		if !s.externalGuarded(g, guards) {
+			// check-config requires them; this catches a scope the
+			// configuration could not see (a team created through the API).
+			s.limiter.release(key.ID, 0)
+			s.met.denied.add(1, key.Team, "guardrail")
+			apiError(w, http.StatusServiceUnavailable, "service_unavailable",
+				"this model sends prompts off the site and needs pre-call pii and hide_secrets guardrails for this key's organisation or team")
+			return
+		}
 		var rq *guardReq
 		if len(guards) > 0 {
 			rq = &guardReq{s: s, key: key, scope: scope, rid: requestID(), guards: guards}
@@ -213,7 +242,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			if !bytes.Equal(masked, body) {
 				// vLLM gets the masked prompt; so does the request log.
 				body = masked
-				if out, req, err = openai.RewriteFor(ep, body, resolve, s.isolation(key)); err != nil {
+				if out, req, err = openai.RewriteFor(ep, body, resolve, s.isoFor(g, key)); err != nil {
 					s.limiter.release(key.ID, 0)
 					apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 					return
@@ -236,7 +265,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 					continue
 				}
 				target := next.cfg.UpstreamModel
-				moved, _, rerr := openai.RewriteFor(ep, body, func(string) (string, error) { return target, nil }, s.isolation(key))
+				moved, _, rerr := openai.RewriteFor(ep, body, func(string) (string, error) { return target, nil }, s.isoFor(next, key))
 				if rerr != nil {
 					tg.Release(0)
 					break
@@ -334,6 +363,9 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		// The upstream span covers the call and the response (the stream,
 		// for a stream); its context is what vLLM receives as traceparent.
 		ctx, upSpan := s.trace.tracer.Start(ctx, "upstream", trace.WithSpanKind(trace.SpanKindClient))
+		// For an external provider: the organisation (its key) and the
+		// client's Anthropic headers, filtered when the request is built.
+		ctx = withEgress(ctx, clientEgress(r, key.Org))
 		defer upSpan.End()
 		var resp *http.Response
 		sendOnce := func() error {
@@ -363,7 +395,8 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				apiError(w, status, "invalid_request_error", ferr.Error())
 				return
 			}
-			saturated := err == nil && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable)
+			saturated := err == nil && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable ||
+				g.ext != nil && resp.StatusCode == statusOverloaded)
 			if err == nil && !saturated || r.Context().Err() != nil || !primary.cfg.FallsBackOn("unavailable") {
 				break
 			}
@@ -384,7 +417,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			scope.model, scope.unit = g.cfg.Name, g.cfg.Cost.Unit
 			grant = g.pool.Acquire(key.Org, g.class, promptEst+req.MaxTokens)
 			target := g.cfg.UpstreamModel
-			if out, _, err = openai.RewriteFor(ep, body, func(string) (string, error) { return target, nil }, s.isolation(key)); err != nil {
+			if out, _, err = openai.RewriteFor(ep, body, func(string) (string, error) { return target, nil }, s.isoFor(g, key)); err != nil {
 				status = http.StatusBadRequest
 				apiError(w, status, "invalid_request_error", err.Error())
 				return
@@ -400,6 +433,21 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				worked = errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 				return
 			}
+			switch {
+			case errors.Is(err, errBackoff) && g.ext != nil:
+				// The provider asked this organisation to wait: nothing is
+				// sent until then, and the client is told how long.
+				d, _ := g.ext.wait(key.Org, s.now())
+				w.Header().Set("Retry-After", strconv.Itoa(int((d+time.Second-1)/time.Second)))
+				status = http.StatusTooManyRequests
+				s.met.denied.add(1, key.Team, "provider_backoff")
+				apiError(w, status, "rate_limit_exceeded", "the provider asked to wait before the next request (retry-after)")
+				return
+			case errors.Is(err, errSharedWorkspace):
+				status = http.StatusServiceUnavailable
+				apiError(w, status, "service_unavailable", err.Error())
+				return
+			}
 			status = http.StatusBadGateway
 			apiError(w, status, "upstream_error", "no upstream could serve the request")
 			return
@@ -413,7 +461,14 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		if s.cfg.ExposeOverheadHdr {
 			h.Set("X-Llmflow-Overhead-Ms", strconv.FormatFloat(float64(pre.Microseconds())/1000, 'f', 3, 64))
 		}
-		for _, k := range []string{"Content-Type", "Cache-Control"} {
+		copied := []string{"Content-Type", "Cache-Control"}
+		if g.ext != nil {
+			// The provider's request id (for support) and its retry-after;
+			// not its rate-limit headers, which describe the whole shared
+			// organisation's usage.
+			copied = append(copied, "Retry-After", "Request-Id")
+		}
+		for _, k := range copied {
 			if v := resp.Header.Get(k); v != "" {
 				h.Set(k, v)
 			}
@@ -520,6 +575,14 @@ func (s *Server) sendTyped(ctx context.Context, g *group, path string, body []by
 	tried := map[*upstream]bool{}
 	tFirst := time.Time{}
 	lastErr := errors.New("no upstream")
+	eg := egressFrom(ctx)
+	if g.ext != nil {
+		// The provider asked this organisation to wait, or its workspace
+		// is shared: nothing leaves.
+		if _, err := g.ext.wait(eg.org, s.now()); err != nil {
+			return nil, nil, time.Now(), err
+		}
+	}
 	for attempt := 0; attempt <= s.cfg.Retries; attempt++ {
 		u := g.pick(tried, s.now())
 		if u == nil {
@@ -537,16 +600,23 @@ func (s *Server) sendTyped(ctx context.Context, g *group, path string, body []by
 		// forwarded, so client X-Vllm-Priority, x-pass-* or Authorization
 		// headers cannot reach vLLM.
 		req.Header = http.Header{}
-		req.Header.Set("Content-Type", ctype)
-		if accept == "text/event-stream" || accept == "application/json" {
-			req.Header.Set("Accept", accept)
+		if g.ext != nil {
+			// The provider gets its own headers only: the organisation's
+			// key, filtered Anthropic headers, no priority, request id or
+			// trace context (anthropic.go).
+			g.ext.headers(req.Header, eg, ctype, accept)
+		} else {
+			req.Header.Set("Content-Type", ctype)
+			if accept == "text/event-stream" || accept == "application/json" {
+				req.Header.Set("Accept", accept)
+			}
+			req.Header.Set("Authorization", "Bearer "+u.apiKey)
+			req.Header.Set("X-Vllm-Priority", strconv.Itoa(priority))
+			req.Header.Set("X-Request-Id", rid)
+			// W3C trace context (vLLM reads traceparent/tracestate): built by
+			// the gateway's tracer, never copied from the client.
+			s.trace.inject(ctx, req.Header)
 		}
-		req.Header.Set("Authorization", "Bearer "+u.apiKey)
-		req.Header.Set("X-Vllm-Priority", strconv.Itoa(priority))
-		req.Header.Set("X-Request-Id", rid)
-		// W3C trace context (vLLM reads traceparent/tracestate): built by
-		// the gateway's tracer, never copied from the client.
-		s.trace.inject(ctx, req.Header)
 		req.ContentLength = int64(len(body))
 		u.inflight.Add(1)
 		t := time.Now()
@@ -562,6 +632,17 @@ func (s *Server) sendTyped(ctx context.Context, g *group, path string, body []by
 			s.coolDown(u)
 			lastErr = err
 			continue
+		}
+		if g.ext != nil {
+			// The provider's answer: a back-off for this organisation on
+			// 429/529, never a cooldown of the upstream (its limits are per
+			// organisation and workspace, and the other institutions' keys
+			// are not affected).
+			if other := g.ext.observe(eg.org, resp, s.now()); other != "" {
+				s.log.Error("two organisations reached the same provider workspace: their prompt caches are shared; both are refused until each has its own key",
+					"model", g.cfg.Name, "org", eg.org, "other_org", other)
+			}
+			return resp, u, t, nil
 		}
 		if resp.StatusCode >= 500 && attempt < s.cfg.Retries && len(tried) < len(g.upstreams) {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
