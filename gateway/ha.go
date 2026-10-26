@@ -91,6 +91,9 @@ func (s *Server) buildHA(shares map[string]float64) error {
 		return err
 	}
 	s.ha = n
+	if s.shared, ok = s.st.(store.HAStateStore); !ok {
+		return errors.New("gateway: the ha block needs the postgres store")
+	}
 	for _, p := range s.cfg.Pools {
 		s.pools[p.Name] = haPool{n: n, name: p.Name}
 	}

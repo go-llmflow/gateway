@@ -207,6 +207,30 @@ ha {
   (per pool), `llmflow_ha_unowned_total`, and `llmflow_inflight_phantoms`
   (per pool and organisation). The fair-share gauges are published by the
   owner only.
+- **SSO logins and sessions** live in PostgreSQL: a login started on one
+  replica finishes on another, and a session outlives the replica that
+  created it. The row key is the SHA-256 of the cookie (or of the login
+  state), the content is sealed with AES-256-GCM under a key derived from
+  `secret_file` (a fresh nonce per seal, the kind and hashed id as
+  associated data, so a sealed value moved to another row does not open),
+  and expiry is PostgreSQL's clock. Logout or a disabled user ends the
+  session on every replica.
+- **Soft-budget alerts** go through an outbox table, one row per alert and
+  channel (unique on the `Idempotency-Key` and the channel, so two replicas
+  queue an alert once). Every replica delivers due rows, claimed with
+  `FOR UPDATE SKIP LOCKED` and hidden for 2 minutes while one sends them; a
+  failure is retried with the same backoff as before (6 attempts), by
+  whichever replica claims it next, across restarts. Delivery is at least
+  once: a replica that dies after sending and before recording it leaves the
+  alert to be sent again after the 2 minutes, with the same
+  `Idempotency-Key`.
+- **Key revocations** (a key revoked or rotated, a team, project or
+  organisation disabled) are broadcast with `NOTIFY llmflow_keys`; every
+  replica `LISTEN`s and drops the cached identities at once (measured: 3 ms).
+  PostgreSQL does not keep notifications for a listener that is not
+  connected, so a replica whose listener reconnects drops its whole key
+  cache; `key_cache_ttl` stays the bound for anything else. A silent
+  connection is found by a ping every 5 s.
 - `check-config` validates the block: the postgres store, an advertised IP
   literal inside `peer_networks`, `heartbeat` at most a third of `lease_ttl`,
   `forward_timeout` at most a heartbeat, and a secret of at least 32 bytes.
@@ -219,6 +243,9 @@ Chaos tests (real PostgreSQL 18, 2026-10-26):
 | Owner partitioned from PostgreSQL (blackhole, `TestChaosHAPartitionedOwner`) | stops deciding 804 ms after the cut (`lease_ttl` 900 ms), the other replica owns from 904 ms, epoch + 1; 0 of 805 samples with two owners; after the heal it forwards to the new owner and does not take the lease back |
 | Two replicas racing for a lease (8 claimants × 20 rounds on PostgreSQL; two replicas started together) | exactly one owner each time, epoch + 1 |
 | Clock skew ± 2 min on one replica | ownership does not move, forwarding works (0 admissions without owner), the skewed replica takes over normally |
+| A key revoked, then a team disabled, on one replica while cached on the other (`key_cache_ttl` 1 h, `TestChaosHARevocationNotify`) | refused on the other replica after 3 ms; a revocation made while that replica was cut from PostgreSQL is applied when its listener reconnects (the test fails when the reconnect flush is removed) |
+| SSO login started on replica A, callback on B, B killed, session used on a new replica C (`TestChaosHASSOSessionSurvives`) | the session is served by C; the state cannot be replayed on A; the row holds neither the cookie nor the user name, and does not open under another id |
+| The same soft-budget alert queued by two replicas, the webhook failing once (`TestChaosHAAlertOutbox`) | one delivery, after one failed attempt |
 | Property: random partitions, kills and restarts of 4 replicas under traffic, 8 s (`TestPGPropertyOneOwnerPerEpoch`) | 14 000 to 27 000 decisions over 5 to 7 epochs per run: never two owners at one epoch, and the decisions of an epoch always end before the next epoch's first one; the checker fails on planted violations |
 
 Added latency of a forwarded admission: not measured yet (the machine's load
@@ -722,8 +749,10 @@ sso {
   carry the session's token in `X-CSRF-Token` and must not be marked
   cross-site (`Sec-Fetch-Site`) or come from another `Origin` than
   `redirect_url`'s. Requests with a bearer token are unaffected.
-- Sessions live in the memory of the replica that created them: behind
-  several replicas, use sticky sessions (open: sessions in PostgreSQL).
+- Without an `ha` block, sessions live in the memory of the replica that
+  created them (behind several replicas, use sticky sessions); with one,
+  they are sealed in PostgreSQL and shared (see
+  [High availability](#high-availability-several-replicas-since-v0140)).
 
 ### Admin web UI
 
@@ -1537,8 +1566,9 @@ security audit of 2026-10-26):
    [High availability](#high-availability-several-replicas-since-v0140));
    without one, run one replica per pool, since several would each grant the
    full reservation. Per-key `rpm`/`tpm`/`max_inflight` limits are still
-   counted per replica (N replicas allow up to N times the limit), and a
-   revocation reaches another replica's key cache after `key_cache_ttl`.
+   counted per replica (N replicas allow up to N times the limit). Without
+   an `ha` block, a revocation reaches another replica's key cache after
+   `key_cache_ttl` (with one, at once by NOTIFY).
    During a failover (up to `lease_ttl`) requests are admitted at the lowest
    priority without an owner's decision; a new owner's safety margin is the
    in-flight count persisted up to `usage_persist` earlier; the fencing token
@@ -1584,11 +1614,14 @@ security audit of 2026-10-26):
     retried, every webhook attempt carries the same `Idempotency-Key`
     (budget and period) so a receiver can de-duplicate, and give-ups and
     retries are counted (`llmflow_alert_failures_total`,
-    `llmflow_alert_retries_total`). A gateway stopped mid-retry does not
-    resume: the period is already marked as alerted.
+    `llmflow_alert_retries_total`). Without an `ha` block a gateway stopped
+    mid-retry does not resume (the period is already marked as alerted);
+    with one, retries live in a PostgreSQL outbox and resume on any
+    replica, delivered at least once.
 
-11. **SSO sessions live in one replica's memory**: behind several replicas,
-    use sticky sessions.
+11. **SSO sessions live in one replica's memory without an `ha` block**:
+    behind several replicas, use sticky sessions or the `ha` block (sessions
+    and logins in progress sealed in PostgreSQL).
 12. **A person holding a JWT cannot be revoked individually**: disable the
     team (this cuts their cached tokens at once on the replica that serves
     the request), change the `map` blocks, or revoke at the identity
@@ -1692,7 +1725,7 @@ end-to-end run of go-llmflow/bench v0.2.0 (same day) confirmed the following:
 | PostgreSQL partitioned | 503 within 5 s (A6); fail-closed on time; recovery when the partition heals. |
 | PostgreSQL restarted | A call that draws a dead pooled connection fails safe with 503 (one call in the test); the pool recovers by itself. |
 | Accounting during an outage | Every record of the requests served during the outage is lost and counted as failed (open defect 6). |
-| Two replicas, one database | A concurrent first start works (A7); keys are shared; a revocation reaches the other replica after `key_cache_ttl` (open defect 1); the audit chain stays one verifiable chain under two concurrent writers. |
+| Two replicas, one database | A concurrent first start works (A7); keys are shared; a revocation reaches the other replica after `key_cache_ttl` without an `ha` block (open defect 1), in 3 ms with one (v0.14.0); the audit chain stays one verifiable chain under two concurrent writers. |
 | Upstream killed mid-stream, restarted | The client gets the partial stream; counters return to zero; the next requests are served. |
 | Key rotated with 16 requests in flight | All 16 finish and are charged to the key; the old secret is refused at once and the new one is served. |
 | Clock stepped back 2 h | The audit chain still verifies. |

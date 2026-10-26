@@ -168,6 +168,8 @@ type metrics struct {
 	fallbacks  *counterVec // from, to
 	estimated  *counterVec // team, model
 	softAlerts *counterVec // kind
+	// revocations received from other replicas (ha), by kind.
+	revocations *counterVec
 	// auditFailures counts audit entries or checkpoints that could not be
 	// written.
 	auditFailures *counterVec // kind
@@ -204,7 +206,8 @@ func newMetrics() *metrics {
 		fallbacks: newCounterVec("llmflow_fallbacks_total",
 			"Requests moved to a fallback model group before the first byte, by group left, group used and reason (unavailable, saturated).",
 			"from", "to", "reason"),
-		softAlerts: newCounterVec("llmflow_soft_budget_alerts_total", "Soft-budget limits reached (one per budget and period).", "kind"),
+		softAlerts:  newCounterVec("llmflow_soft_budget_alerts_total", "Soft-budget limits reached (one per budget and period).", "kind"),
+		revocations: newCounterVec("llmflow_ha_revocations_total", "Revocations broadcast by other replicas and applied to the key caches, by kind.", "kind"),
 		auditFailures: newCounterVec("llmflow_audit_failures_total",
 			"Audit entries (by kind) or checkpoints that could not be written.", "kind"),
 		guardDecisions: newCounterVec("llmflow_guardrail_decisions_total",

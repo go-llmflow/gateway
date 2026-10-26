@@ -81,12 +81,15 @@ type Server struct {
 	ha         *ha.Node
 	haServer   *http.Server
 	haListener net.Listener
-	client     *http.Client
-	limiter    *limiter
-	budget     *budgeter
-	rec        *recorder
-	met        *metrics
-	keys       *keyCache
+	// shared is the rest of the replicas' shared state (SSO, alert
+	// outbox, revocations); nil without an ha block.
+	shared  store.HAStateStore
+	client  *http.Client
+	limiter *limiter
+	budget  *budgeter
+	rec     *recorder
+	met     *metrics
+	keys    *keyCache
 	// authFails limits failed authentications per client network.
 	authFails *failLimiter
 	// allowedTags is the request-tag allow-list; alerts sends soft-budget
@@ -391,6 +394,11 @@ func (s *Server) Start(ctx context.Context) error {
 		s.bg.Add(1)
 		go func() { defer s.bg.Done(); s.guardAuditLoop(bctx) }()
 	}
+	if s.shared != nil {
+		s.bg.Add(2)
+		go func() { defer s.bg.Done(); s.listenRevocations(bctx) }()
+		go func() { defer s.bg.Done(); s.outboxLoop(bctx) }()
+	}
 	for _, l := range s.uniqueRequestLogs() {
 		s.bg.Add(1)
 		go func() { defer s.bg.Done(); l.loop(bctx) }()
@@ -664,6 +672,9 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 	s.met.fallbacks.write(w)
 	s.met.estimated.write(w)
 	s.met.softAlerts.write(w)
+	if s.shared != nil {
+		s.met.revocations.write(w)
+	}
 	if s.alerts != nil {
 		s.alerts.failed.write(w)
 		s.alerts.retried.write(w)

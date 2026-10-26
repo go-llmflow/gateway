@@ -198,7 +198,7 @@ func (s *Server) disableOrg(w http.ResponseWriter, r *http.Request, p *principal
 		storeError(w, err)
 		return
 	}
-	s.forgetKeys(func(k store.Key) bool { return k.Org == name })
+	s.dropCached("org", name, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -267,7 +267,7 @@ func (s *Server) disableTeam(w http.ResponseWriter, r *http.Request, p *principa
 		storeError(w, err)
 		return
 	}
-	s.forgetKeys(func(k store.Key) bool { return k.Team == t.Name })
+	s.dropCached("team", t.Name, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -330,7 +330,7 @@ func (s *Server) disableProject(w http.ResponseWriter, r *http.Request, p *princ
 		return
 	}
 	_ = s.budget.refresh(r.Context())
-	s.forgetKeys(func(k store.Key) bool { return k.Team == t.Name && k.Project == name })
+	s.dropCached("project", t.Name, name)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -533,7 +533,7 @@ func (s *Server) revokeKey(w http.ResponseWriter, r *http.Request, p *principal)
 		storeError(w, err)
 		return
 	}
-	s.keys.forget(func(c store.Key) bool { return c.ID == k.ID })
+	s.dropCached("key", k.ID, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -578,7 +578,7 @@ func (s *Server) rotateKey(w http.ResponseWriter, r *http.Request, p *principal)
 		storeError(w, err)
 		return
 	}
-	s.keys.forget(func(c store.Key) bool { return c.ID == k.ID })
+	s.dropCached("key", k.ID, "")
 	s.audit("key.rotated", "key", k.ID, "team", k.Team, "by", p.name, "grace_period", grace.String())
 	out := map[string]any{"id": k.ID, "key": secret}
 	if grace > 0 {
