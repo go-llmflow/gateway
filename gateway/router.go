@@ -27,6 +27,9 @@ type upstream struct {
 	// unknown (not scraped, or the scrape failed): an unknown queue never
 	// counts as saturated.
 	waiting atomic.Int64
+	// external: a provider's API, not probed (it has no /health, and its
+	// keys are per organisation); a failed connection still cools it down.
+	external bool
 }
 
 func (u *upstream) available(now time.Time) bool {
@@ -39,6 +42,8 @@ type group struct {
 	upstreams []*upstream
 	pool      *fairshare.Pool
 	class     fairshare.Class
+	// ext is set for a model of an external provider (anthropic.go).
+	ext *extRuntime
 }
 
 // queueSaturated reports whether vLLM's own queues, as last scraped, reach
@@ -119,7 +124,7 @@ func (s *Server) probeAll(ctx context.Context) {
 	seen := map[*upstream]bool{}
 	for _, g := range s.groups {
 		for _, u := range g.upstreams {
-			if seen[u] {
+			if seen[u] || u.external {
 				continue
 			}
 			seen[u] = true

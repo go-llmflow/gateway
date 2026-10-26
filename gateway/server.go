@@ -187,24 +187,47 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 		if g.Class == config.Batch {
 			gr.class = fairshare.Batch
 		}
+		if g.External != nil {
+			ext, err := newExtRuntime(g, secrets.UpstreamKeys, cfg.CacheIsolation != "none")
+			if err != nil {
+				return nil, err
+			}
+			gr.ext = ext
+		}
 		for _, cu := range g.Upstreams {
 			if err := config.ValidateUpstream(cu.BaseURL); err != nil {
 				return nil, err
 			}
 			key := secrets.UpstreamKeys[cu.KeyFile]
-			if key == "" {
+			// An external provider's keys are per organisation (gr.ext);
+			// the upstream's own key, if any, is the default one.
+			if key == "" && g.External == nil {
 				return nil, fmt.Errorf("gateway: no key loaded for upstream %q of model %q", cu.Name, g.Name)
 			}
 			id := [2]string{cu.BaseURL, cu.KeyFile}
+			if g.External != nil {
+				id[0] = "external:" + cu.BaseURL
+			}
 			u := ups[id]
 			if u == nil {
 				u = newUpstream(cu.BaseURL, key)
+				u.external = g.External != nil
 				ups[id] = u
 			}
 			gr.upstreams = append(gr.upstreams, u)
 		}
 		s.groups[g.Name] = gr
 		s.gorder = append(s.gorder, g.Name)
+		if g.External != nil {
+			hosts := make([]string, 0, len(g.Upstreams))
+			for _, cu := range g.Upstreams {
+				hosts = append(hosts, redactURL(cu.BaseURL))
+			}
+			s.log.Warn("model sends prompts and completions off the site, to an external provider",
+				"model", g.Name, "provider", g.External.Provider, "upstream", strings.Join(hosts, ","),
+				"orgs", strings.Join(g.External.Orgs, ","), "teams", strings.Join(g.External.Teams, ","),
+				"guardrails_required", g.External.RequireGuardrails)
+		}
 	}
 	s.client = &http.Client{
 		Transport: &http.Transport{
@@ -517,7 +540,7 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	}
 	data := make([]map[string]any, 0, len(s.gorder))
 	for _, n := range s.gorder {
-		if s.groups[n].cfg.Class != config.Guard && s.budget.modelAllowed(key.Team, n) {
+		if s.groups[n].cfg.Class != config.Guard && s.budget.modelAllowed(key.Team, n) && externalVisible(s.groups[n], key) {
 			data = append(data, map[string]any{"id": n, "object": "model", "owned_by": "llmflow"})
 		}
 	}

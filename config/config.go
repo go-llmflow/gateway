@@ -440,6 +440,16 @@ type Cost struct {
 	// AudioPerHour is the price of transcription, in GPU-hours per hour of
 	// audio (vLLM reports a transcription's usage as a duration).
 	AudioPerHour float64
+	// Prompt-cache write prices of an external provider (Anthropic: a
+	// 5-minute and a 1-hour lifetime); reads use CachedPerMTok. Zero for
+	// both: writes are priced as input.
+	CacheWrite5mPerMTok float64
+	CacheWrite1hPerMTok float64
+	// LongContext, when set, replaces the prices of a request whose input
+	// (cached or not) exceeds LongContextAbove tokens (Claude Haiku 5.5
+	// above 100 000).
+	LongContextAbove int64
+	LongContext      *Cost
 	// Unit is "" for GPU-hours, otherwise a currency code (see
 	// store.NormalizeUnit); PriceDate (YYYY-MM-DD) records when the prices
 	// were read from the provider's price list, required with a currency.
@@ -479,6 +489,9 @@ type ModelGroup struct {
 	// on each upstream's /metrics (at the health interval, with its timeout)
 	// and calls the group saturated when their sum reaches it.
 	SaturationWaiting int
+	// External is set for a model served by an external provider
+	// (external.go); nil for vLLM.
+	External *External
 }
 
 // FallsBackOn reports whether the group takes its fallbacks on reason.
@@ -673,15 +686,25 @@ func (c *Config) OrgShare(name string) float64 {
 	return 0
 }
 
-// KeyFiles lists every distinct upstream key file, in configuration order.
+// KeyFiles lists every distinct upstream key file, in configuration order:
+// those of the upstreams, then an external provider's per-organisation
+// keys.
 func (c *Config) KeyFiles() []string {
-	seen := map[string]bool{}
+	seen := map[string]bool{"": true}
 	var out []string
+	add := func(f string) {
+		if !seen[f] {
+			seen[f] = true
+			out = append(out, f)
+		}
+	}
 	for _, g := range c.ModelGroups {
 		for _, u := range g.Upstreams {
-			if !seen[u.KeyFile] {
-				seen[u.KeyFile] = true
-				out = append(out, u.KeyFile)
+			add(u.KeyFile)
+		}
+		if g.External != nil {
+			for _, o := range g.External.OrgKeyOrder {
+				add(g.External.OrgKeys[o])
 			}
 		}
 	}

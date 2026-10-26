@@ -19,7 +19,16 @@ type Usage struct {
 	// AudioSeconds is the duration of transcribed audio, when vLLM reports
 	// it (TranscriptionUsageAudio) instead of tokens.
 	AudioSeconds float64 `json:"-"`
+	// CacheWrite5m and CacheWrite1h are prompt tokens written to a prompt
+	// cache with a 5-minute or a 1-hour lifetime (Anthropic's
+	// cache_creation), part of PromptTokens and not of Cached(): an external
+	// provider prices them apart.
+	CacheWrite5m int64 `json:"-"`
+	CacheWrite1h int64 `json:"-"`
 }
+
+// CacheWrites returns the prompt tokens written to a prompt cache.
+func (u Usage) CacheWrites() int64 { return u.CacheWrite5m + u.CacheWrite1h }
 
 // Cached returns the number of cached prompt tokens.
 func (u Usage) Cached() int64 {
@@ -34,7 +43,8 @@ func (u Usage) Cached() int64 {
 // negative charge.
 func (u Usage) Valid() bool {
 	return u.PromptTokens >= 0 && u.CompletionTokens >= 0 && u.Cached() >= 0 && u.Cached() <= u.PromptTokens &&
-		u.AudioSeconds >= 0 && u.AudioSeconds <= maxAudioSeconds
+		u.AudioSeconds >= 0 && u.AudioSeconds <= maxAudioSeconds &&
+		u.CacheWrite5m >= 0 && u.CacheWrite1h >= 0 && u.Cached()+u.CacheWrites() <= u.PromptTokens
 }
 
 // maxAudioSeconds bounds a reported duration (a week): beyond it the count

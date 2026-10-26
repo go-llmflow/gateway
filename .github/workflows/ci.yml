@@ -61,6 +61,7 @@ jobs:
           - { target: FuzzRef, pkg: ./secret }
           - { target: FuzzParseKV2, pkg: ./secret }
           - { target: FuzzClientAddr, pkg: ./gateway }
+          - { target: FuzzAnthropicHeaders, pkg: ./gateway }
           - { target: FuzzJWTBearer, pkg: ./gateway }
           - { target: FuzzSSOCallback, pkg: ./gateway }
           - { target: FuzzSCIM, pkg: ./gateway }

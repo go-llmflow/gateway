@@ -64,22 +64,37 @@ func rewriteMessages(body []byte, resolve func(string) (string, error), iso Isol
 	return out, req, nil
 }
 
-// anthropicUsage is AnthropicUsage.
+// anthropicUsage is AnthropicUsage, and the usage of Anthropic's own API
+// (platform.claude.com/docs/en/build-with-claude/prompt-caching, opened
+// 2026-10-26): input_tokens counts the tokens after the last cache
+// breakpoint only; cache_creation_input_tokens are written to the cache,
+// split by lifetime in cache_creation (their sum), cache_read_input_tokens
+// read from it.
 type anthropicUsage struct {
 	InputTokens              int64 `json:"input_tokens"`
 	OutputTokens             int64 `json:"output_tokens"`
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheCreation            *struct {
+		Ephemeral5m int64 `json:"ephemeral_5m_input_tokens"`
+		Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
+	} `json:"cache_creation"`
 }
 
 // usage converts to the gateway's Usage: the prompt is every input token,
-// cached or not.
+// cached or not; the cache writes are split by lifetime (all 5-minute when
+// the split is absent or does not add up).
 func (a anthropicUsage) usage() Usage {
 	prompt := a.InputTokens + a.CacheReadInputTokens + a.CacheCreationInputTokens
-	return Usage{PromptTokens: prompt, CompletionTokens: a.OutputTokens, TotalTokens: prompt + a.OutputTokens,
+	u := Usage{PromptTokens: prompt, CompletionTokens: a.OutputTokens, TotalTokens: prompt + a.OutputTokens,
 		PromptTokensDetails: &struct {
 			CachedTokens int64 `json:"cached_tokens"`
 		}{a.CacheReadInputTokens}}
+	u.CacheWrite5m = a.CacheCreationInputTokens
+	if c := a.CacheCreation; c != nil && c.Ephemeral5m >= 0 && c.Ephemeral1h >= 0 && c.Ephemeral5m+c.Ephemeral1h == a.CacheCreationInputTokens {
+		u.CacheWrite5m, u.CacheWrite1h = c.Ephemeral5m, c.Ephemeral1h
+	}
+	return u
 }
 
 func (a anthropicUsage) valid() bool {
@@ -130,8 +145,8 @@ func (t *messagesUsageTracker) inspect(event []byte) (Usage, bool) {
 	t.seen = true
 	merged := t.last
 	if merged.InputTokens+merged.CacheReadInputTokens+merged.CacheCreationInputTokens == 0 {
-		merged.InputTokens, merged.CacheReadInputTokens, merged.CacheCreationInputTokens =
-			t.start.InputTokens, t.start.CacheReadInputTokens, t.start.CacheCreationInputTokens
+		merged.InputTokens, merged.CacheReadInputTokens, merged.CacheCreationInputTokens, merged.CacheCreation =
+			t.start.InputTokens, t.start.CacheReadInputTokens, t.start.CacheCreationInputTokens, t.start.CacheCreation
 	}
 	merged.OutputTokens = max(merged.OutputTokens, t.start.OutputTokens)
 	u := merged.usage()

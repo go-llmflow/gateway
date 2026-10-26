@@ -39,6 +39,8 @@ type fileHCL struct {
 	ShutdownGrace        *string        `hcl:"shutdown_grace,optional"`
 	ShutdownGraceRange   hcl.Range      `hcl:"shutdown_grace,attr_value_range"`
 	ExposeOverheadHeader *bool          `hcl:"expose_overhead_header,optional"`
+	ExternalGuardrails   *bool          `hcl:"external_requires_guardrails,optional"`
+	ExternalGuardsRange  hcl.Range      `hcl:"external_requires_guardrails,attr_value_range"`
 	CacheIsolation       *string        `hcl:"cache_isolation,optional"`
 	CacheIsolationRange  hcl.Range      `hcl:"cache_isolation,attr_value_range"`
 	CacheSaltKeyFile     *string        `hcl:"cache_salt_key_file,optional"`
@@ -398,15 +400,20 @@ type poolHCL struct {
 }
 
 type costHCL struct {
-	InputPerMTok   *float64  `hcl:"input_per_mtok,optional"`
-	OutputPerMTok  *float64  `hcl:"output_per_mtok,optional"`
-	CachedPerMTok  *float64  `hcl:"cached_per_mtok,optional"`
-	AudioPerHour   *float64  `hcl:"audio_per_hour,optional"`
-	Unit           *string   `hcl:"unit,optional"`
-	UnitRange      hcl.Range `hcl:"unit,attr_value_range"`
-	PriceDate      *string   `hcl:"price_date,optional"`
-	PriceDateRange hcl.Range `hcl:"price_date,attr_value_range"`
-	DefRange       hcl.Range `hcl:",def_range"`
+	InputPerMTok  *float64 `hcl:"input_per_mtok,optional"`
+	OutputPerMTok *float64 `hcl:"output_per_mtok,optional"`
+	CachedPerMTok *float64 `hcl:"cached_per_mtok,optional"`
+	AudioPerHour  *float64 `hcl:"audio_per_hour,optional"`
+	// Prompt-cache write prices and the long-context tier of an external
+	// provider (external.go).
+	CacheWrite5m   *float64        `hcl:"cache_write_5m_per_mtok,optional"`
+	CacheWrite1h   *float64        `hcl:"cache_write_1h_per_mtok,optional"`
+	LongContext    *longContextHCL `hcl:"long_context,block"`
+	Unit           *string         `hcl:"unit,optional"`
+	UnitRange      hcl.Range       `hcl:"unit,attr_value_range"`
+	PriceDate      *string         `hcl:"price_date,optional"`
+	PriceDateRange hcl.Range       `hcl:"price_date,attr_value_range"`
+	DefRange       hcl.Range       `hcl:",def_range"`
 }
 
 type upstreamHCL struct {
@@ -436,7 +443,20 @@ type modelHCL struct {
 	SatWaitingRange    hcl.Range     `hcl:"saturation_waiting,attr_value_range"`
 	Cost               *costHCL      `hcl:"cost,block"`
 	Upstreams          []upstreamHCL `hcl:"upstream,block"`
-	DefRange           hcl.Range     `hcl:",def_range"`
+	// An external provider (external.go).
+	Provider          *string     `hcl:"provider,optional"`
+	ProviderRange     hcl.Range   `hcl:"provider,attr_value_range"`
+	AllowExternal     *bool       `hcl:"allow_external,optional"`
+	Orgs              []string    `hcl:"orgs,optional"`
+	OrgsRange         hcl.Range   `hcl:"orgs,attr_value_range"`
+	Teams             []string    `hcl:"teams,optional"`
+	TeamsRange        hcl.Range   `hcl:"teams,attr_value_range"`
+	AnthropicVersions []string    `hcl:"anthropic_versions,optional"`
+	VersionsRange     hcl.Range   `hcl:"anthropic_versions,attr_value_range"`
+	AnthropicBetas    []string    `hcl:"anthropic_betas,optional"`
+	BetasRange        hcl.Range   `hcl:"anthropic_betas,attr_value_range"`
+	OrgKeys           []orgKeyHCL `hcl:"org_key,block"`
+	DefRange          hcl.Range   `hcl:",def_range"`
 }
 
 // Error is a configuration error: HCL diagnostics with file:line:column
@@ -794,7 +814,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 				v.errf(u.BaseURLRange, "Invalid base_url", "%v", err)
 			}
 			key := strOr(u.KeyFile, strOr(m.KeyFile, ""))
-			if key == "" {
+			if key == "" && m.Provider == nil { // an external provider's keys: external.go
 				v.errf(u.DefRange, "Missing key file", "upstream %q of model %q has no key_file (set it on the upstream or the model)", u.Name, m.Name)
 			}
 			g.Upstreams = append(g.Upstreams, Upstream{Name: u.Name, BaseURL: u.BaseURL, KeyFile: key})
@@ -1238,6 +1258,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	c.Guardrails = v.guardrails(raw.Guardrails, orgs, teams, modelClass)
 	c.Tracing = v.tracing(raw.Tracing)
 	c.MCPServers = v.mcpServers(raw.MCPServers)
+	v.external(raw, c)
 	// Every *_file attribute is a secret reference: a file, or a field of
 	// an OpenBao/Vault KV v2 secret (package secret).
 	for _, ref := range c.SecretRefs() {
