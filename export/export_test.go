@@ -275,6 +275,49 @@ func TestQueue(t *testing.T) {
 	close(block4)
 }
 
+// Security audit 2026-10-26, finding A5 (chaos: the export target down):
+// the queue was bounded by its number of objects only (1024 by default),
+// and a request-log batch can reach 8 MiB, so an unreachable S3 let up to
+// 8 GiB of logs pile up in the gateway's memory before anything was
+// dropped. The queue is bounded in bytes too.
+func TestQueueBoundedInBytes(t *testing.T) {
+	down := &downSink{block: make(chan struct{})}
+	q := NewQueue(down, 1024)
+	q.sleep = func(context.Context, time.Duration) error { return nil }
+	defer q.Close(context.Background())
+	defer close(down.block)      // first: the writer gives up, then Close drains
+	batch := make([]byte, 8<<20) // one backing array: the test itself stays small
+	for i := 0; i < 200; i++ {
+		q.Enqueue(fmt.Sprintf("requests/%d", i), batch, PutOptions{})
+	}
+	if q.Dropped.Load() == 0 {
+		t.Fatalf("1.6 GiB queued behind an unreachable sink, nothing dropped")
+	}
+	if held := q.queued.Load(); held > DefaultMaxQueueBytes {
+		t.Fatalf("queue holds %d bytes, bound %d", held, DefaultMaxQueueBytes)
+	}
+}
+
+// downSink is an export target that is down: every Put waits for block
+// (or its context), then fails.
+type downSink struct{ block chan struct{} }
+
+func (d *downSink) Name() string { return "down" }
+func (d *downSink) Locked() bool { return false }
+func (d *downSink) Get(context.Context, string) ([]byte, error) {
+	return nil, errors.New("connection refused")
+}
+func (d *downSink) List(context.Context, string) ([]string, error) {
+	return nil, errors.New("connection refused")
+}
+func (d *downSink) Put(ctx context.Context, _ string, _ []byte, _ PutOptions) error {
+	select {
+	case <-d.block:
+	case <-ctx.Done():
+	}
+	return errors.New("connection refused")
+}
+
 type blockingSink struct {
 	Sink
 	block chan struct{}

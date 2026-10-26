@@ -8,13 +8,21 @@ import (
 	"time"
 )
 
-// Queue writes objects to a Sink in the background: bounded, in order,
-// each object retried with backoff. An object the queue had no room for
-// is dropped and counted; one that still fails after every retry is
-// counted too. OnDrop and OnFail, when set, are told (to alert).
+// DefaultMaxQueueBytes bounds the bytes a queue holds, the object being
+// written included. A request-log batch reaches 8 MiB: bounded by count
+// alone, a queue of 1024 behind an unreachable destination would hold up to
+// 8 GiB (security audit 2026-10-26, A5).
+const DefaultMaxQueueBytes = 256 << 20
+
+// Queue writes objects to a Sink in the background: bounded in objects and
+// in bytes, in order, each object retried with backoff. An object the queue
+// had no room for is dropped and counted; one that still fails after every
+// retry is counted too. OnDrop and OnFail, when set, are told (to alert).
 type Queue struct {
 	sink     Sink
 	ch       chan job
+	maxBytes int64
+	queued   atomic.Int64 // bytes held: waiting, or being written
 	attempts int
 	backoff  func(i int) time.Duration
 	sleep    func(ctx context.Context, d time.Duration) error
@@ -42,7 +50,7 @@ type job struct {
 // NewQueue starts a queue of size objects writing to sink.
 func NewQueue(sink Sink, size int) *Queue {
 	ctx, cancel := context.WithCancel(context.Background())
-	q := &Queue{sink: sink, ch: make(chan job, size), attempts: 8, ctx: ctx, cancel: cancel, drain: make(chan struct{}),
+	q := &Queue{sink: sink, ch: make(chan job, size), maxBytes: DefaultMaxQueueBytes, attempts: 8, ctx: ctx, cancel: cancel, drain: make(chan struct{}),
 		backoff: func(i int) time.Duration {
 			d := time.Second << min(i, 8) // 1 s doubling to about 4 min
 			return d + time.Duration(rand.Int64N(int64(d)/4+1))
@@ -69,16 +77,20 @@ func (q *Queue) Sink() Sink { return q.sink }
 // Enqueue adds an object without blocking; it reports false when the
 // queue was full and the object dropped.
 func (q *Queue) Enqueue(key string, body []byte, o PutOptions) bool {
-	select {
-	case q.ch <- job{key, body, o}:
-		return true
-	default:
-		q.Dropped.Add(1)
-		if q.OnDrop != nil {
-			q.OnDrop(key)
+	n := int64(len(body))
+	if q.queued.Add(n) <= q.maxBytes {
+		select {
+		case q.ch <- job{key, body, o}:
+			return true
+		default:
 		}
-		return false
 	}
+	q.queued.Add(-n)
+	q.Dropped.Add(1)
+	if q.OnDrop != nil {
+		q.OnDrop(key)
+	}
+	return false
 }
 
 func (q *Queue) run() {
@@ -104,6 +116,7 @@ func (q *Queue) run() {
 }
 
 func (q *Queue) write(j job) {
+	defer q.queued.Add(-int64(len(j.body)))
 	var err error
 	for i := 0; i < q.attempts; i++ {
 		if i > 0 {
