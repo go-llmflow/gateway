@@ -1404,6 +1404,11 @@ The node's vLLM port must be reachable by the gateway only (firewall), as for st
 
 At 20:00 the jobs end. The gateway drains them, its pool shrinks, and the reservations follow. At 07:00 the new jobs are admitted as soon as vLLM answers.
 
+**Tested against a real Slurm** (go-llmflow/bench `TestSlurmDiscoveryE2E`, 2026-10-26). The setup was Slurm 24.11.5 with slurmrestd data_parser v0.0.42, auth/jwt, arm64. Results:
+- A vLLM CPU job was admitted 18 s after `sbatch`, served a chat request, and was removed 2 s after `scancel`.
+- Another account's job claiming the model was rejected and never contacted.
+- A vLLM job whose engine failed to start stayed `RUNNING`, and it was never admitted.
+
 References opened on 2026-10-26:
 - Slurm `master` source: `src/slurmrestd/plugins/openapi/slurmctld/api.c` (`GET /slurm/{data_parser}/jobs/`); `src/plugins/data_parser/v0.0.43`–`v0.0.46` `parsers.c` (`PARSER_ARRAY(JOB_INFO)`: `job_id`, `name`, `comment`, `admin_comment`, `account`, `partition`, `user_name`, `batch_host`, and `job_state` as a flag array); `src/slurmrestd/plugins/auth/jwt/jwt.c` (`X-SLURM-USER-TOKEN`, `X-SLURM-USER-NAME`).
 - slurm.schedmd.com: `rest_api.html`, `rest_quickstart.html`, `jwt.html`, `scrontab.html`.
