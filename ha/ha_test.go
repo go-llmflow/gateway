@@ -20,7 +20,7 @@ import (
 var testSecret = []byte("0123456789abcdef0123456789abcdef")
 
 type member struct {
-	t    *testing.T
+	t    testing.TB
 	n    *Node
 	srv  *http.Server
 	ln   net.Listener
@@ -38,7 +38,7 @@ func testConfig(inst, addr string) Config {
 	}
 }
 
-func startMember(t *testing.T, st store.HAStore, inst string, mut func(*Config)) *member {
+func startMember(t testing.TB, st store.HAStore, inst string, mut func(*Config)) *member {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

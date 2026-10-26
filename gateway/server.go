@@ -72,21 +72,21 @@ type Server struct {
 	log     *slog.Logger
 	now     func() time.Time
 
-	groups  map[string]*group
-	gorder  []string
-	pools   map[string]admitter
-	porder  []string
+	groups map[string]*group
+	gorder []string
+	pools  map[string]admitter
+	porder []string
 	// ha shares the pools between replicas (nil: one replica); haServer
 	// serves its internal API.
 	ha         *ha.Node
 	haServer   *http.Server
 	haListener net.Listener
-	client  *http.Client
-	limiter *limiter
-	budget  *budgeter
-	rec     *recorder
-	met     *metrics
-	keys    *keyCache
+	client     *http.Client
+	limiter    *limiter
+	budget     *budgeter
+	rec        *recorder
+	met        *metrics
+	keys       *keyCache
 	// authFails limits failed authentications per client network.
 	authFails *failLimiter
 	// allowedTags is the request-tag allow-list; alerts sends soft-budget

@@ -91,6 +91,7 @@ jobs:
           - { target: FuzzHeaderValue, pkg: ./mcp }
           - { target: FuzzHeaderParams, pkg: ./mcp }
           - { target: FuzzReadResponse, pkg: ./mcp }
+          - { target: FuzzInternalAPI, pkg: ./ha }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

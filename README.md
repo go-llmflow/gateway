@@ -135,6 +135,96 @@ preemption of the largest `(priority, arrival)`) with closed-loop clients:
 | control: every request at priority 0 (no gateway priorities) | B gets 0.498, its fraction of clients, not its share |
 | C = 10 (reservations 8 / 2) | A never holds more than 8 within-share requests; B's guaranteed requests never queue behind more than 8 of A's |
 
+## High availability: several replicas (since v0.14.0)
+
+Without an `ha` block nothing changes: one replica, the fair-share state in
+its memory. With one, several replicas share the pools, and PostgreSQL stays
+the only shared component (no etcd, no Redis). Design and discussion:
+[#74](https://github.com/go-llmflow/gateway/issues/74).
+
+```hcl
+store {
+  kind      = "postgres"          # required by ha
+  dsn_file  = "/run/secrets/dsn"
+  spool_dir = "/var/spool/llmflow"
+}
+ha {
+  replica_id           = "gw-1"             # optional, default the host name
+  listen               = "10.0.0.5:9444"    # internal port, replicas only
+  advertise            = "10.0.0.5:9444"    # default: listen (an IP literal)
+  peer_networks        = ["10.0.0.0/24"]    # owners are dialled only there
+  secret_file          = "/run/secrets/ha"  # shared, at least 32 bytes
+  lease_ttl            = "6s"               # renewed every third
+  heartbeat            = "1s"               # grant reports to owners
+  forward_timeout      = "250ms"
+  usage_persist        = "10s"
+  on_owner_unreachable = "lowest_priority"  # or "reject" (503)
+}
+```
+
+- **One owner per pool.** Each pool's fair share (in-flight counts,
+  reservations, decayed usage) is decided by one replica at a time, the
+  holder of the pool's lease row in PostgreSQL. The lease's `epoch` is a
+  fencing token (Kleppmann, *How to do distributed locking*): it grows at
+  every change of owner. Expiry is computed with PostgreSQL's clock
+  (`now()`), never a replica's, and a takeover is one conditional statement,
+  so of several replicas racing on an expired lease exactly one wins.
+- **No split brain.** The owner decides only while the monotonic time at
+  which its last successful renewal *started*, plus 0.9 × `lease_ttl`, is in
+  the future; PostgreSQL cannot hand the lease to anyone before that renewal
+  expires. An owner cut from PostgreSQL therefore stops deciding before
+  another replica can start. Its usage writes are fenced at the storage (a
+  transaction that holds the lease row `FOR SHARE` and checks the epoch), and
+  a replica that has seen a newer epoch refuses an older owner's answer and
+  tells it to step down.
+- **Forwarding the decision, not the request.** The other replicas send
+  acquire and release to the owner over the internal port and still send the
+  request to vLLM themselves: one small round trip per admission (the release
+  is asynchronous), the streamed answer does not cross a second gateway, and
+  the owner's death does not cut streams it did not serve. Every request and
+  answer is HMAC-SHA256-signed (key derived with HKDF from `secret_file`),
+  bound to the sender's instance, a sequence number and a timestamp
+  (5 minutes of clock difference are accepted); replays are refused with a
+  sliding window per instance (RFC 4303, 3.4.3). The owner's address is read
+  from the database and dialled only inside `peer_networks`, without
+  redirects, with `forward_timeout`; bodies are bounded.
+- **Failover.** Every replica reports its live grants to the owner each
+  `heartbeat`. A new owner (epoch + 1) restores the decayed usage the
+  previous one persisted every `usage_persist` (decayed by PostgreSQL's
+  `now() - updated_at`, so the ranking survives), adopts the grants the
+  surviving replicas report, and counts the previous owner's last persisted
+  in-flight requests as **phantoms**: a safety margin that expires after
+  `limits.max_request_duration` and shrinks as reports account for them.
+  The grants of a replica that stops reporting for 3 heartbeats become
+  phantoms too. A graceful stop persists the usage and ends the lease at once.
+- **Without a reachable owner** (the seconds of a failover), a request is
+  admitted at the lowest borrowing priority (vLLM never lets a waiting
+  request preempt a running one and preempts the largest priority first, so
+  it cannot take anyone's reservation), or refused with 503 under
+  `on_owner_unreachable = "reject"`. Such a request cannot move to a fallback
+  on saturation (the pool's room is unknown).
+- Metrics: `llmflow_ha_owner`, `llmflow_ha_epoch`, `llmflow_ha_local_grants`
+  (per pool), `llmflow_ha_unowned_total`, and `llmflow_inflight_phantoms`
+  (per pool and organisation). The fair-share gauges are published by the
+  owner only.
+- `check-config` validates the block: the postgres store, an advertised IP
+  literal inside `peer_networks`, `heartbeat` at most a third of `lease_ttl`,
+  `forward_timeout` at most a heartbeat, and a secret of at least 32 bytes.
+
+Chaos tests (real PostgreSQL 18, 2026-10-26):
+
+| Fault | Result |
+|---|---|
+| Owner killed with SIGKILL (by PID) mid-traffic, 3 requests of one organisation in flight on two replicas (`TestHAOwnerKilled`) | survivor owner after 1.3 s (`lease_ttl` 1.5 s), epoch 1 → 2; its 2 requests adopted, the dead owner's one counted as a phantom, so the organisation stays at its reservation until `max_request_duration`; 207 requests served meanwhile, 0 failed (203 at the lowest priority before the takeover) |
+| Owner partitioned from PostgreSQL (blackhole, `TestChaosHAPartitionedOwner`) | stops deciding 804 ms after the cut (`lease_ttl` 900 ms), the other replica owns from 904 ms, epoch + 1; 0 of 805 samples with two owners; after the heal it forwards to the new owner and does not take the lease back |
+| Two replicas racing for a lease (8 claimants × 20 rounds on PostgreSQL; two replicas started together) | exactly one owner each time, epoch + 1 |
+| Clock skew ± 2 min on one replica | ownership does not move, forwarding works (0 admissions without owner), the skewed replica takes over normally |
+| Property: random partitions, kills and restarts of 4 replicas under traffic, 8 s (`TestPGPropertyOneOwnerPerEpoch`) | 14 000 to 27 000 decisions over 5 to 7 epochs per run: never two owners at one epoch, and the decisions of an epoch always end before the next epoch's first one; the checker fails on planted violations |
+
+Added latency of a forwarded admission: not measured yet (the machine's load
+was above 4); `BenchmarkAdmission` in `ha/` compares a single replica, the
+owner and a forwarded admission.
+
 ## Configuration
 
 The configuration is written in [HCL2 native syntax](https://github.com/hashicorp/hcl/blob/main/hclsyntax/spec.md).
@@ -1253,7 +1343,9 @@ The **W3C trace context of the upstream span is sent to vLLM** (`traceparent`/`t
 `GET /metrics` (Prometheus text format 0.0.4, optional bearer token):
 `llmflow_inflight`, `llmflow_inflight_borrowing`, `llmflow_borrowed_fraction`,
 `llmflow_reserved`, `llmflow_inflight_tokens`, `llmflow_fairshare_usage`,
-`llmflow_fairshare_level` (per pool and organisation, label `org`); `llmflow_upstream_healthy`,
+`llmflow_fairshare_level`, `llmflow_inflight_phantoms` (per pool and organisation, label `org`);
+with `ha`, `llmflow_ha_owner`, `llmflow_ha_epoch`, `llmflow_ha_local_grants`,
+`llmflow_ha_unowned_total`; `llmflow_upstream_healthy`,
 `llmflow_upstream_inflight`; `llmflow_requests_total`, `llmflow_tokens_total`,
 `llmflow_gpu_hours_total`, `llmflow_denied_total`,
 `llmflow_upstream_retries_total`; histograms `llmflow_overhead_seconds` and
@@ -1432,9 +1524,19 @@ Enforced:
 Open defects (v0.9.0; each entry re-checked against the code during the
 security audit of 2026-10-26):
 
-1. **State is per process.** In-flight counts, rate limits and the key cache
-   live in memory: run one gateway replica per pool. Several replicas would each
-   grant the full reservation.
+1. **Rate limits and the key cache are per process.** Since v0.14.0 the
+   fair-share state is shared between replicas with an `ha` block (see
+   [High availability](#high-availability-several-replicas-since-v0140));
+   without one, run one replica per pool, since several would each grant the
+   full reservation. Per-key `rpm`/`tpm`/`max_inflight` limits are still
+   counted per replica (N replicas allow up to N times the limit), and a
+   revocation reaches another replica's key cache after `key_cache_ttl`.
+   During a failover (up to `lease_ttl`) requests are admitted at the lowest
+   priority without an owner's decision; a new owner's safety margin is the
+   in-flight count persisted up to `usage_persist` earlier; the fencing token
+   is checked by PostgreSQL and by the replicas, not by vLLM, so a decision
+   an owner made just before a long pause can still reach vLLM. The internal
+   channel is authenticated, not encrypted (keep it on a private network).
 2. **Budgets lag.** Cost is known when a request ends, so a burst of long
    requests can overspend by what is in flight. Several gateways only see each
    other's spend at their next refresh.
