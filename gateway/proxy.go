@@ -677,7 +677,7 @@ func (s *Server) sendTyped(ctx context.Context, g *group, path string, body []by
 			}
 			return resp, u, t, nil
 		}
-		if resp.StatusCode >= 500 && attempt < s.cfg.Retries && len(tried) < len(g.upstreams) {
+		if resp.StatusCode >= 500 && attempt < s.cfg.Retries && len(tried) < len(g.members()) {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 			resp.Body.Close()
 			u.inflight.Add(-1)

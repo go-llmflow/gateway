@@ -138,3 +138,39 @@ func TestSmallPoolKeepsBGuarantee(t *testing.T) {
 	t.Logf("C=%d: A within-share max %d, B waited %d step-requests, at most behind %d of A; %d preemptions, all borrowers",
 		c, maxA, bWaitingSeen, maxBehind, len(r.e.preempted))
 }
+
+// An elastic pool (#75): SetCapacity re-apportions exactly as NewPool
+// would at the new C, and requests in flight keep their status.
+func TestSetCapacityReapportions(t *testing.T) {
+	shares := map[string]float64{"a": 0.5, "b": 0.3, "c": 0.2}
+	p := NewPool("p", 4, shares, 0, nil)
+	g := p.Acquire("a", Interactive, 1)
+	g2 := p.Acquire("a", Interactive, 1)
+	if g.Borrowing || g2.Borrowing {
+		t.Fatal("a's 2 within-share slots at C=4")
+	}
+	for _, c := range []int{0, 1, 7, 10, 3, 4} {
+		if old := p.SetCapacity(c); old == c && c != 4 {
+			t.Fatalf("SetCapacity(%d) returned %d", c, old)
+		}
+		want := NewPool("w", c, shares, 0, nil).Reserved()
+		got := p.Reserved()
+		if p.Capacity() != c || fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("C=%d: reserved %v, want %v", c, got, want)
+		}
+	}
+	p.SetCapacity(0)
+	if g3 := p.Acquire("a", Interactive, 1); !g3.Borrowing {
+		t.Error("C=0: a new request is within share")
+	} else {
+		g3.Release(0)
+	}
+	if _, ok := p.TryAcquire("b", Interactive, 1); ok {
+		t.Error("TryAcquire at C=0 with 2 in flight")
+	}
+	g.Release(0)
+	g2.Release(0)
+	if p.SetCapacity(-3); p.Capacity() != 0 {
+		t.Error("negative capacity")
+	}
+}

@@ -174,7 +174,52 @@ func (p *Pool) addTeam(name string, share float64, reserved int) *team {
 func (p *Pool) Name() string { return p.name }
 
 // Capacity returns C.
-func (p *Pool) Capacity() int { return p.capacity }
+func (p *Pool) Capacity() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.capacity
+}
+
+// SetCapacity changes C (an elastic pool whose instances come and go, #75)
+// and recomputes the within-share reservations with Apportion. Requests in
+// flight keep their within-share or borrowing status; new requests are
+// judged against the new reservations (and, for TryAcquire, the new C).
+// It returns the previous C.
+func (p *Pool) SetCapacity(capacity int) int {
+	if capacity < 0 {
+		capacity = 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	old := p.capacity
+	if capacity == old {
+		return old
+	}
+	p.capacity = capacity
+	names := make([]string, 0, len(p.order))
+	shares := make(map[string]float64, len(p.order))
+	for _, t := range p.order {
+		names = append(names, t.name)
+		shares[t.name] = t.share
+	}
+	sort.Strings(names)
+	reserved := Apportion(capacity, names, shares)
+	for _, t := range p.order {
+		t.reserved = reserved[t.name]
+	}
+	return old
+}
+
+// Reserved returns the within-share slots of each organisation.
+func (p *Pool) Reserved() map[string]int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]int, len(p.order))
+	for _, t := range p.order {
+		out[t.name] = t.reserved
+	}
+	return out
+}
 
 // Grant is the decision for one request. Release must be called exactly
 // once when the request has finished (successfully or not).

@@ -87,7 +87,9 @@ type Server struct {
 	haListener net.Listener
 	// shared is the rest of the replicas' shared state (SSO, alert
 	// outbox, revocations); nil without an ha block.
-	shared  store.HAStateStore
+	shared store.HAStateStore
+	// capMu serialises the recomputation of a pool's C (slurm.go).
+	capMu   sync.Mutex
 	client  *http.Client
 	limiter *limiter
 	budget  *budgeter
@@ -214,6 +216,7 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 			}
 			gr.ext = ext
 		}
+		var members []*upstream
 		for _, cu := range g.Upstreams {
 			if err := config.ValidateUpstream(cu.BaseURL); err != nil {
 				return nil, err
@@ -234,7 +237,15 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 				u.external = g.External != nil
 				ups[id] = u
 			}
-			gr.upstreams = append(gr.upstreams, u)
+			members = append(members, u)
+		}
+		gr.setMembers(members)
+		if g.Slurm != nil {
+			d, err := newSlurmDiscovery(s, gr, secrets.UpstreamKeys)
+			if err != nil {
+				return nil, err
+			}
+			gr.disc = d
 		}
 		s.groups[g.Name] = gr
 		s.gorder = append(s.gorder, g.Name)
@@ -383,6 +394,12 @@ func (s *Server) Start(ctx context.Context) error {
 	s.rec.start()
 	s.bg.Add(2)
 	go func() { defer s.bg.Done(); s.healthLoop(bctx) }()
+	for _, gn := range s.gorder {
+		if d := s.groups[gn].disc; d != nil {
+			s.bg.Add(1)
+			go func() { defer s.bg.Done(); d.loop(bctx) }()
+		}
+	}
 	go func() {
 		defer s.bg.Done()
 		s.budget.loop(bctx, s.cfg.BudgetRefresh, func(err error) { s.log.Error("budget refresh failed", "err", err) })
@@ -654,11 +671,27 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 			}
 		}
 	}
+	writeHeader(w, "llmflow_pool_capacity", "The pool's C: its configured capacity plus that of its Slurm-discovered instances.", "gauge")
+	for _, p := range s.porder {
+		writeSample(w, "llmflow_pool_capacity", []string{"pool"}, []string{p}, float64(s.poolCapacity(p)))
+	}
+	writeHeader(w, "llmflow_slurm_last_success_timestamp_seconds", "Time of the last successful slurmrestd poll, per Slurm-discovered model (0: none yet).", "gauge")
+	for _, gn := range s.gorder {
+		if d := s.groups[gn].disc; d != nil {
+			v := 0.0
+			if t := d.lastSuccess(); !t.IsZero() {
+				v = float64(t.UnixNano()) / 1e9
+			}
+			writeSample(w, "llmflow_slurm_last_success_timestamp_seconds", []string{"model"}, []string{gn}, v)
+		}
+	}
+	s.met.slurmPolls.write(w)
+	s.met.slurmRejected.write(w)
 	writeHeader(w, "llmflow_upstream_healthy", "1 when the upstream answers its health check and is not cooling down.", "gauge")
 	writeHeader(w, "llmflow_upstream_inflight", "Requests in flight per upstream.", "gauge")
 	now := s.now()
 	for _, gn := range s.gorder {
-		for _, u := range s.groups[gn].upstreams {
+		for _, u := range s.groups[gn].members() {
 			v := 0.0
 			if u.available(now) {
 				v = 1

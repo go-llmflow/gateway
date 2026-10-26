@@ -555,7 +555,10 @@ type ModelGroup struct {
 	Pool          string
 	Class         Class
 	Upstreams     []Upstream
-	Cost          Cost
+	// Slurm, when set, adds the running Slurm jobs of the convention
+	// llmflow:<model>:<port>[:<capacity>] as upstreams (#75).
+	Slurm *Slurm
+	Cost  Cost
 	// Fallbacks are tried in order when no upstream of this group can take
 	// the request (all down, or vLLM answers 429/503) before anything was
 	// sent to the client.
@@ -787,6 +790,11 @@ func (c *Config) KeyFiles() []string {
 			for _, o := range g.External.OrgKeyOrder {
 				add(g.External.OrgKeys[o])
 			}
+		}
+		if g.Slurm != nil {
+			// The discovered instances' vLLM key, and slurmrestd's JWT.
+			add(g.Slurm.KeyFile)
+			add(g.Slurm.TokenFile)
 		}
 	}
 	return out
