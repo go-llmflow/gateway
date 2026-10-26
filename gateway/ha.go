@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -81,8 +82,17 @@ func (s *Server) buildHA(shares map[string]float64) error {
 	for _, p := range s.cfg.Pools {
 		specs = append(specs, ha.PoolSpec{Name: p.Name, Capacity: p.Capacity, Shares: shares, HalfLife: s.cfg.FairShare.HalfLife})
 	}
+	var clientTLS *tls.Config
+	if s.secrets.HATLSCert != "" || s.secrets.HATLSKey != "" || s.secrets.HATLSCA != "" {
+		var err error
+		s.haTLS, clientTLS, err = ha.MutualTLS([]byte(s.secrets.HATLSCert), []byte(s.secrets.HATLSKey), []byte(s.secrets.HATLSCA), h.TLSServerName)
+		if err != nil {
+			return fmt.Errorf("gateway: %w", err)
+		}
+	}
 	n, err := ha.New(ha.Config{
-		Instance: inst, Advertise: h.Advertise, Secret: []byte(s.secrets.HASecret), PeerNetworks: h.PeerNetworks,
+		ClientTLS: clientTLS,
+		Instance:  inst, Advertise: h.Advertise, Secret: []byte(s.secrets.HASecret), PeerNetworks: h.PeerNetworks,
 		LeaseTTL: h.LeaseTTL, Heartbeat: h.Heartbeat, ForwardTimeout: h.ForwardTimeout, UsagePersist: h.UsagePersist,
 		MaxRequest: s.cfg.Limits.MaxRequestDuration, RejectUnreachable: h.OnOwnerUnreachable == "reject",
 		Pools: specs, Now: s.now, Log: s.log, Membership: s.poolMembership,
@@ -130,6 +140,9 @@ func (s *Server) startHA(ctx context.Context) error {
 		if ln, err = net.Listen("tcp", s.cfg.HA.Listen); err != nil {
 			return fmt.Errorf("gateway: ha listen: %w", err)
 		}
+	}
+	if s.haTLS != nil {
+		ln = tls.NewListener(ln, s.haTLS)
 	}
 	s.haServer = &http.Server{
 		Handler: s.ha.Handler(), ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 10 * time.Second,

@@ -63,12 +63,26 @@ func TestParseHAErrors(t *testing.T) {
 		{"persist", with(ok + "  usage_persist = \"100ms\""), "Invalid usage_persist"},
 		{"unreachable", with(ok + "  on_owner_unreachable = \"guess\""), "Invalid on_owner_unreachable"},
 		{"replica id", with(ok + "  replica_id = \"a b\""), "Invalid replica_id"},
+		{"tls incomplete", with(ok + "  tls_cert_file = \"/run/c\"\n  tls_key_file = \"/run/k\""), "Incomplete ha TLS"},
+		{"tls name", with(ok + "  tls_server_name = \"bad name\""), "Invalid tls_server_name"},
 		{"same listener", valid + pgStore + "listen = \"10.0.0.5:9444\"\n" + haBlock, "Internal listener on the client one"},
 	} {
 		_, err := parse(c.src)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v, want %q", c.name, err, c.want)
 		}
+	}
+	// Mutual TLS: the three files are secret references check-config reads.
+	c, err := parse(with(ok + "  tls_cert_file = \"/run/c\"\n  tls_key_file = \"/run/k\"\n  tls_ca_file = \"/run/ca\""))
+	if err != nil || c.HA.TLSServerName != DefaultHATLSServerName {
+		t.Fatalf("%v %+v", err, c)
+	}
+	refs := map[string]bool{}
+	for _, r := range c.SecretRefs() {
+		refs[r] = true
+	}
+	if !refs["/run/c"] || !refs["/run/k"] || !refs["/run/ca"] {
+		t.Fatalf("tls files not among the secret references: %v", refs)
 	}
 	// The short durations of a test cluster are accepted.
 	if _, err := parse(with(ok + "  lease_ttl = \"1500ms\"\n  heartbeat = \"200ms\"\n  forward_timeout = \"200ms\"\n  usage_persist = \"300ms\"")); err != nil {

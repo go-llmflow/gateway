@@ -404,7 +404,7 @@ model "m" {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	// With ha too (since v0.16.0): the owner's view sets C.
+	// With ha too (since v0.15.2): the owner's view sets C.
 	withHA := ok + `
 store {
   kind      = "postgres"

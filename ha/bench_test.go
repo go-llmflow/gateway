@@ -36,4 +36,18 @@ func BenchmarkAdmission(b *testing.B) {
 			b.Fatal("admissions were not forwarded")
 		}
 	})
+	pki := newTestPKI(b, "llmflow-ha")
+	tst := NewMemStore(nil)
+	tOwner := startTLSMember(b, tst, "owner", pki)
+	tOther := startTLSMember(b, tst, "other", pki)
+	_ = tOwner
+	b.Run("forwarded-mtls", func(b *testing.B) {
+		for b.Loop() {
+			g, _, _ := tOther.n.Acquire("p", "a", fairshare.Interactive, 100, false)
+			g.Release(0.001)
+		}
+		if tOther.n.Degraded() != 0 {
+			b.Fatal("admissions were not forwarded")
+		}
+	})
 }

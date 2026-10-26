@@ -184,6 +184,11 @@ type haHCL struct {
 	PeerNetworksRange   hcl.Range `hcl:"peer_networks,attr_value_range"`
 	SecretFile          string    `hcl:"secret_file"`
 	SecretFileRange     hcl.Range `hcl:"secret_file,attr_value_range"`
+	TLSCertFile         *string   `hcl:"tls_cert_file,optional"`
+	TLSKeyFile          *string   `hcl:"tls_key_file,optional"`
+	TLSCAFile           *string   `hcl:"tls_ca_file,optional"`
+	TLSServerName       *string   `hcl:"tls_server_name,optional"`
+	TLSRange            hcl.Range `hcl:"tls_cert_file,attr_value_range"`
 	LeaseTTL            *string   `hcl:"lease_ttl,optional"`
 	LeaseTTLRange       hcl.Range `hcl:"lease_ttl,attr_value_range"`
 	Heartbeat           *string   `hcl:"heartbeat,optional"`
@@ -196,6 +201,29 @@ type haHCL struct {
 	OnUnreachableRange  hcl.Range `hcl:"on_owner_unreachable,attr_value_range"`
 	DefRange            hcl.Range `hcl:",def_range"`
 }
+
+// validHostName accepts a DNS name: dot-separated labels of letters,
+// digits and hyphens, at most 253 bytes.
+func validHostName(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for _, l := range strings.Split(s, ".") {
+		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+			return false
+		}
+		for _, r := range l {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// DefaultHATLSServerName is the name the replicas' certificates carry
+// (they are dialled by IP, so the name is checked instead).
+const DefaultHATLSServerName = "llmflow-ha"
 
 // HA defaults.
 const (
@@ -234,6 +262,24 @@ func (v *validator) buildHA(h *haHCL, c *Config) *HA {
 	}
 	if h.SecretFile == "" {
 		v.errf(h.SecretFileRange, "Missing secret_file", "the ha block needs secret_file (a shared secret of at least 32 bytes)")
+	}
+	out.TLSCertFile, out.TLSKeyFile, out.TLSCAFile = strOr(h.TLSCertFile, ""), strOr(h.TLSKeyFile, ""), strOr(h.TLSCAFile, "")
+	out.TLSServerName = strOr(h.TLSServerName, DefaultHATLSServerName)
+	set := 0
+	for _, f := range []string{out.TLSCertFile, out.TLSKeyFile, out.TLSCAFile} {
+		if f != "" {
+			set++
+		}
+	}
+	if set != 0 && set != 3 {
+		r := h.TLSRange
+		if h.TLSCertFile == nil {
+			r = h.DefRange
+		}
+		v.errf(r, "Incomplete ha TLS", "tls_cert_file, tls_key_file and tls_ca_file go together (mutual TLS between replicas)")
+	}
+	if !validHostName(out.TLSServerName) {
+		v.errf(h.DefRange, "Invalid tls_server_name", "tls_server_name %q: a DNS name the replicas' certificates carry", out.TLSServerName)
 	}
 	out.PeerNetworks = v.prefixes(h.PeerNetworks, h.PeerNetworksRange, "peer_networks")
 	if len(h.PeerNetworks) == 0 {
@@ -1476,6 +1522,9 @@ func (c *Config) SecretRefs() []string {
 	}
 	if c.HA != nil {
 		add(c.HA.SecretFile)
+		add(c.HA.TLSCertFile)
+		add(c.HA.TLSKeyFile)
+		add(c.HA.TLSCAFile)
 	}
 	add(c.Audit.SigningKeyFile)
 	for _, e := range c.Exports {

@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/ed25519"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,6 +63,9 @@ type Secrets struct {
 	MCPTokens map[string]string
 	// HASecret is the replicas' shared secret (ha block).
 	HASecret string
+	// HATLSCert, HATLSKey and HATLSCA (PEM) put the internal channel under
+	// mutual TLS (empty: plain HTTP, HMAC-signed).
+	HATLSCert, HATLSKey, HATLSCA string
 }
 
 // Server is the gateway.
@@ -85,6 +89,9 @@ type Server struct {
 	ha         *ha.Node
 	haServer   *http.Server
 	haListener net.Listener
+	// haTLS is the internal listener's mutual-TLS configuration (nil:
+	// plain HTTP).
+	haTLS *tls.Config
 	// shared is the rest of the replicas' shared state (SSO, alert
 	// outbox, revocations); nil without an ha block.
 	shared store.HAStateStore
