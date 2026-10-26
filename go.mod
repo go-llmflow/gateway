@@ -11,6 +11,7 @@ require (
 	github.com/go-ooxml/ooxml v0.6.0
 	github.com/go-opentype/fonts v0.14.0
 	github.com/go-pdfkit/pdfkit v0.19.0
+	github.com/go-plot/plot v0.2.0
 	github.com/go-volumes/s3 v0.2.2
 	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/jackc/pgx/v5 v5.11.0
@@ -44,11 +45,13 @@ require (
 	github.com/go-images/png v0.2.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
+	github.com/go-ndarray/ndarray v0.18.0 // indirect
 	github.com/go-ooxml/opc v0.2.0 // indirect
 	github.com/go-opentype/opentype v0.16.0 // indirect
 	github.com/go-opentype/shape v0.7.0 // indirect
 	github.com/go-richdoc/richdoc v0.7.0 // indirect
 	github.com/go-simd/highway v0.0.14 // indirect
+	github.com/go-tex/math v0.50.0 // indirect
 	github.com/go-typeset/bidi v0.3.1 // indirect
 	github.com/go-widgets/mvvm v0.15.0 // indirect
 	github.com/go-widgets/painter v0.16.0 // indirect

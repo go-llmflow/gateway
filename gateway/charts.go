@@ -14,9 +14,9 @@ import (
 // and no style attribute (the UI's CSP allows styles from /ui/style.css
 // only), so every colour is a presentation attribute. Every text is escaped.
 //
-// The charts sit behind chartRenderer so that go-plot/plot can draw them
-// once its pie chart is released (go-plot/plot v0.1.1 has none); svgCharts
-// is the gateway's own small renderer until then.
+// The charts sit behind chartRenderer: plotCharts (plot_charts.go) draws
+// the pie with go-plot/plot; svgCharts, the gateway's own small renderer,
+// draws the bars and the series, and the pie when go-plot refuses one.
 
 type chartSlice struct {
 	Label string

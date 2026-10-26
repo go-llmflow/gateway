@@ -3,8 +3,10 @@ package gateway
 import (
 	"math"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-llmflow/gateway/store"
 )
@@ -88,6 +90,42 @@ func FuzzReportsQuery(f *testing.F) {
 			t.Fatalf("unescaped: %s", body)
 		}
 	})
+}
+
+// TestPlotPie: go-plot draws the wedges, no data string reaches it, the
+// legend escapes the names, and two pies on one page share no id.
+func TestPlotPie(t *testing.T) {
+	var c chartRenderer = plotCharts{}
+	in := []chartSlice{{Label: `$\input{/etc/passwd}$`, Value: 3}, {Label: "<script>alert(1)</script>", Value: 2}, {Label: "$5 and $6", Value: 1}}
+	start := time.Now()
+	a, b := string(c.Pie("one", "GPU-hours", in)), string(c.Pie("two", "USD", in[:2]))
+	t.Logf("two pies in %v", time.Since(start))
+	page := a + b
+	if p := os.Getenv("LLMFLOW_PIE_SAMPLE"); p != "" {
+		_ = os.WriteFile(p, []byte(a), 0o600) // for a person to look at
+		// The two pies on one page under the UI's policy, and a control page
+		// with a planted inline style the policy must refuse.
+		head := `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="` + uiCSP + `"></head><body>`
+		_ = os.WriteFile(p+".html", []byte(head+a+b+"</body></html>"), 0o600)
+		_ = os.WriteFile(p+".control.html", []byte(head+`<p style="color:red">x</p>`+a+"</body></html>"), 0o600)
+	}
+	if !strings.Contains(a, "xmlns:xlink") || strings.Count(a, "<svg") != 2 {
+		t.Fatal("go-plot was not used (fallback)")
+	}
+	for _, bad := range []string{"<script", "style=", " id=", "<foreignObject", "href=", "<image", "root:"} {
+		if strings.Contains(page, bad) {
+			t.Fatalf("page contains %q", bad)
+		}
+	}
+	for _, want := range []string{`$\input{/etc/passwd}$ —`, "&lt;script&gt;alert(1)&lt;/script&gt; —", "$5 and $6 —"} {
+		if !strings.Contains(a, want) {
+			t.Errorf("legend misses %q", want)
+		}
+	}
+	// Refused sizes fall back to the gateway's renderer, never to an error.
+	if s := string(c.Pie("z", "GPU-hours", []chartSlice{{Label: "x", Value: 0}})); !strings.Contains(s, "no data") {
+		t.Fatalf("zero: %s", s)
+	}
 }
 
 func TestCharts(t *testing.T) {

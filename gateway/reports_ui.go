@@ -316,7 +316,7 @@ func (s *Server) reportsPage(w http.ResponseWriter, r *http.Request, p *principa
 		order = append(order, u)
 	}
 	sort.Strings(order) // "" (GPU-hours) first
-	var charts chartRenderer = svgCharts{}
+	var charts chartRenderer = plotCharts{}
 	next := drillNext[group]
 	for _, u := range order {
 		sec := reportSection{Unit: displayUnit(u)}
