@@ -110,6 +110,8 @@ metrics_token_file = "/m"
 store {
   kind = "postgres"
   dsn_file = "/dsn"
+  spool_dir = "/spool"
+  spool_max_bytes = 2097152
   fail_closed = false
   queue_size = 10
   batch_size = 5
@@ -177,6 +179,8 @@ func TestParseRejectsWithPosition(t *testing.T) {
 		{"team without org", valid + `team "t" {}`, "Unsupported block type"},
 		{"org without share", valid + `org "c" {}`, "Missing required argument"},
 		{"pg without dsn", valid + `store { kind = "postgres" }`, "Missing DSN file"},
+		{"pg without spool", valid + "store {\n kind = \"postgres\"\n dsn_file = \"/d\"\n}\n", "Missing spool directory"},
+		{"tiny spool", valid + "store {\n kind = \"postgres\"\n dsn_file = \"/d\"\n spool_dir = \"/s\"\n spool_max_bytes = 10\n}\n", "Invalid spool size"},
 		{"bad store kind", valid + `store { kind = "redis" }`, "Invalid store kind"},
 		{"zero capacity", strings.Replace(valid, "capacity = 256", "capacity = 0", 1), `test.hcl:7:26: Invalid capacity`},
 		{"negative cost", strings.Replace(valid, "input_per_mtok  = 0.01", "input_per_mtok  = -1", 1), "Invalid cost"},

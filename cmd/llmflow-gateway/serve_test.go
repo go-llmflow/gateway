@@ -81,7 +81,7 @@ func TestServeErrors(t *testing.T) {
 	if _, err := run(t, "serve", "-c", "/nonexistent"); err == nil {
 		t.Fatal("missing config accepted")
 	}
-	cfg := gatewayConfig(t, "store {\n  kind = \"postgres\"\n  dsn_file = \"/nonexistent\"\n}\n")
+	cfg := gatewayConfig(t, "store {\n  kind = \"postgres\"\n  dsn_file = \"/nonexistent\"\n  spool_dir = \""+t.TempDir()+"\"\n}\n")
 	if _, err := run(t, "serve", "-c", cfg); err == nil || !strings.Contains(err.Error(), "dsn_file") {
 		t.Fatalf("missing dsn file: %v", err)
 	}

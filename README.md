@@ -180,7 +180,7 @@ model "llama-3.3-70b" {
 | `org "<name>" { share, team "<name>" {} … }` | an organisation (institution) with the fraction of every pool reserved for it (sum ≤ 1) and the teams (labs) declared under it; team names are global |
 | `pool "<name>" { capacity }` | C, sustainable concurrency of the pool (1..1048576) |
 | `model "<name>" { … }` | client model name → `upstream_model`, `pool`, `class` (`interactive` / `batch`), `key_file`, `cost { input_per_mtok, output_per_mtok, cached_per_mtok }` in GPU-hours per million tokens, and `upstream "<name>" { base_url, key_file }` blocks |
-| `store { … }` | `kind` (`memory` / `postgres`), `dsn_file`, `fail_closed` (default true), `queue_size`, `batch_size` |
+| `store { … }` | `kind` (`memory` / `postgres`), `dsn_file`, `spool_dir` (required with postgres, see [Durable accounting](#durable-accounting)), `spool_max_bytes` (default 256 MiB), `fail_closed` (default true), `queue_size`, `batch_size` |
 | `fairshare { half_life }` | usage decay half-life (default `"168h"`) |
 | `limits { … }`, `health { … }` | body and header size, timeouts, maximum request duration and response size; health-check interval, timeout, cooldown, path |
 | `tags { header, allowed }` | the request header clients may tag requests with, and the allowed tags |
@@ -414,6 +414,50 @@ They do **not** go through the fair-share pool. A guard call is the gateway chec
 **HTTP adapter.** It POSTs `{"guardrail", "stage", "messages", "completion"}`, receives the already-masked text, and expects `{"action": "allow"|"block"|"log", "categories": [...]}`. Answers are capped at 64 KiB and redirects are not followed. It is refused at configuration time without `allow_external = true`, and `serve` logs a warning at start that prompts leave the site.
 
 All guard answers are parsed defensively and fuzzed (`FuzzParseGuardAnswers`), as are the hold-back (`FuzzHoldback`: streamed in any pieces equals masked whole), the SSE rewriter (`FuzzStreamFilter`: no secret in any released string) and the request mapping (`FuzzMapRequest`).
+
+## Durable accounting
+
+Usage is billed between institutions, so a record must survive a PostgreSQL outage and a crash of the gateway. With `kind = "postgres"`, `store.spool_dir` is therefore required (since v0.10.0):
+
+```hcl
+store {
+  kind            = "postgres"
+  dsn_file        = "/etc/llmflow/pg.dsn"
+  spool_dir       = "/var/lib/llmflow/spool"
+  spool_max_bytes = 268435456 # 256 MiB per process
+}
+```
+
+**What a record goes through:**
+
+1. Every batch of usage records is appended to this process's spool file and fsync'd before it is inserted. Batches are flushed every second, or every `batch_size` records.
+2. When the store refuses, the batch stays pending, in order, and is retried every second. `llmflow_accounting_spooled` shows how many records wait.
+3. Once everything is stored, the file is emptied.
+4. A process that stops cleanly removes its empty file and keeps a non-empty one.
+5. A process that dies (`kill -9`, OOM, power loss) leaves its file locked by nobody. The next process on the directory adopts it, at start and then every 10 s, and stores what it holds. `llmflow_accounting_replayed_total` counts those records.
+
+**No double billing.** Every record has an ID (the request id), and PostgreSQL stores a record ID at most once (`ON CONFLICT DO NOTHING`). A batch stored just before a crash, and replayed after it, is billed once.
+
+**Bounded.** One process's spool holds at most `spool_max_bytes`. Beyond that, a batch is still sent to the store once. If the store refuses it, the batch is lost: counted in `llmflow_accounting_failed_total` and alerted as `accounting_records_lost`.
+
+**Untrusted after a crash.** The spool is read defensively, and the reader is fuzzed (`FuzzRead`):
+
+- each frame carries a CRC-32C, its length is bounded, and its payload must be a record;
+- a torn last frame (an interrupted write) is ignored;
+- anything else stops the reading, and the file is kept as `*.corrupt` for an operator, with an alert.
+
+**Permissions.**
+
+- Spool files are created with mode 0600. The directory is created with mode 0700.
+- A directory writable by group or others is refused at start, since another user could plant records there.
+- Each process holds an exclusive `flock` on its own file. Several gateways may share a directory: on Unix, a file is adopted only when its owner is gone.
+
+**What is not covered.** Records still in the in-memory queue when the process dies are lost: at most the last second of traffic.
+
+**Measured.**
+
+- `TestChaosAccountingOutage`: 21 of 21 records stored once after a PostgreSQL outage. v0.9.0 lost all 21.
+- `TestCrashWithSpooledRecordsIsReplayed`: 20 records were spooled while PostgreSQL was unreachable, then the gateway was killed with SIGKILL and restarted. 21 of 21 records were stored, with 21 distinct IDs.
 
 ## Budgets
 
@@ -1156,11 +1200,11 @@ security audit of 2026-10-26):
    `key` to narrow that, at the cost of less cache reuse. vLLM itself states
    that `cache_salt` is "not an isolation boundary": tenants that need hard
    isolation need their own vLLM instance.
-6. **Accounting can drop records** when the queue is full or a batch write fails
-   twice; both are counted in metrics; budgets count the cost until the next
-   refresh only. Measured (`TestChaosAccountingOutage`): a PostgreSQL outage
-   of 3 s lost every record of the requests served meanwhile (21 of 21,
-   counted as failed); fail-closed bounds such an outage to 3 refresh periods.
+6. **Accounting drops records only when its bounds are reached**.
+   - A record is dropped when the in-memory queue (`queue_size`) is full.
+   - A record is lost when the durable spool (`spool_max_bytes`) is full or cannot be written, and the store refuses it too. This is counted in `llmflow_accounting_failed_total` and alerted as `accounting_records_lost`.
+   - A record still in the queue when the process dies (at most about 1 s of traffic) is lost. Everything that reached the spool survives a store outage and a crash (see [Durable accounting](#durable-accounting)).
+   - Until v0.9.0, a store outage lost every record served meanwhile: 21 of 21 in `TestChaosAccountingOutage`.
 7. No TLS termination in the gateway (put it behind a TLS proxy); the admin API
    shares the client listener; `/v1/responses` is served statelessly only
    (see [Responses API](#responses-api)).
@@ -1313,9 +1357,10 @@ refused instead of building unpatched code.
 
 **Residual risks.**
 
-1. Usage served during a store outage is not recorded (open defect 6), so
-   budgets and reports undercount it. Fail-closed bounds the window to 3
-   refresh periods.
+1. Usage served during a store outage was not recorded. **Fixed in v0.10.0**
+   by the durable accounting spool: the chaos runs recovered 21 of 21 records
+   after an outage, and 21 of 21 after a SIGKILL of the gateway followed by a
+   restart, none of them duplicated.
 2. SCIM adopts an existing gateway user with the same `userName`, and
    re-enables it if a proxy admin had disabled it by hand. The identity
    provider is already trusted for usernames through SSO.
