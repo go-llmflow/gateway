@@ -1382,7 +1382,7 @@ model "llama" {
 - Every change is audited: `slurm.member_added`, `slurm.member_drained` (with the reason), `slurm.member_removed`, and `pool.capacity` (before, after, reservations).
 - Requests in flight keep their within-share or borrowing status.
 
-**With an `ha` block (since v0.16.0).**
+**With an `ha` block (since v0.15.2).**
 - Every replica runs its own discovery and its own health checks, for its own routing. Publishing the healthy set through PostgreSQL was the alternative; it was not chosen because it ties every replica's routing to the owner's liveness and to PostgreSQL, and because what is healthy depends on the replica's network path to the instance.
 - Only the pool's owner's view sets C. The owner decides with it, and publishes C and the integer reservations with the lease's epoch (`llmflow_pool_capacity` shows the decided C on every replica). Forwarded decisions therefore use the owner's membership, and a replica that sees fewer instances still routes only to those it sees.
 - A replica takes a pool only after its discovery has read the members once. Until then, as after a takeover before that, requests are admitted at the lowest priority (or refused with `on_owner_unreachable = "reject"`), as when no owner answers.
