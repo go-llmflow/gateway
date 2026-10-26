@@ -537,6 +537,7 @@ func (s *Server) callGuardModel(ctx context.Context, rq *guardReq, model, path s
 	end := time.Now()
 	s.rec.record(store.Record{
 		Time: end.UTC(), Org: rq.key.Org, Team: rq.key.Team, Project: rq.key.Project, KeyID: rq.key.ID, Model: g.cfg.Name, Pool: g.cfg.Pool,
+		User: recordUser(rq.key), Lab: s.cfg.LabOf(rq.key.Team),
 		Upstream: redactURL(u.base), PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
 		CachedTokens: usage.Cached(), Cost: cost, Unit: g.cfg.Cost.Unit, LatencyMS: float64(end.Sub(t0).Microseconds()) / 1000,
 		Status: resp.StatusCode, Estimated: !ok, Tags: rq.scope.tags,

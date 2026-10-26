@@ -309,6 +309,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request, p *princi
 		storeError(w, err)
 		return
 	}
+	_ = s.budget.refresh(r.Context()) // project attribution sees it at once
 	writeJSON(w, http.StatusCreated, map[string]any{"team": t.Name, "name": in.Name})
 }
 
@@ -326,6 +327,7 @@ func (s *Server) disableProject(w http.ResponseWriter, r *http.Request, p *princ
 		storeError(w, err)
 		return
 	}
+	_ = s.budget.refresh(r.Context())
 	s.forgetKeys(func(k store.Key) bool { return k.Team == t.Name && k.Project == name })
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -775,6 +777,7 @@ func (s *Server) grantRole(w http.ResponseWriter, r *http.Request, p *principal)
 		return
 	}
 	s.log.Info("role granted", "user", b.User, "role", b.Role, "org", b.Org, "team", b.Team, "by", p.name)
+	_ = s.budget.refresh(r.Context())
 	writeJSON(w, http.StatusOK, b)
 }
 
@@ -789,6 +792,7 @@ func (s *Server) ungrantRole(w http.ResponseWriter, r *http.Request, p *principa
 		return
 	}
 	s.log.Info("role removed", "user", b.User, "role", b.Role, "org", b.Org, "team", b.Team, "by", p.name)
+	_ = s.budget.refresh(r.Context())
 	w.WriteHeader(http.StatusNoContent)
 }
 

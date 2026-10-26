@@ -25,51 +25,52 @@ import (
 // diagnostic points at it.
 
 type fileHCL struct {
-	Listen               *string        `hcl:"listen,optional"`
-	ListenRange          hcl.Range      `hcl:"listen,attr_value_range"`
-	MasterKeyFile        string         `hcl:"master_key_file"`
-	MasterKeyFileRange   hcl.Range      `hcl:"master_key_file,attr_value_range"`
-	MetricsTokenFile     *string        `hcl:"metrics_token_file,optional"`
-	Retries              *int           `hcl:"retries,optional"`
-	RetriesRange         hcl.Range      `hcl:"retries,attr_value_range"`
-	BudgetRefresh        *string        `hcl:"budget_refresh,optional"`
-	BudgetRefreshRange   hcl.Range      `hcl:"budget_refresh,attr_value_range"`
-	KeyCacheTTL          *string        `hcl:"key_cache_ttl,optional"`
-	KeyCacheTTLRange     hcl.Range      `hcl:"key_cache_ttl,attr_value_range"`
-	ShutdownGrace        *string        `hcl:"shutdown_grace,optional"`
-	ShutdownGraceRange   hcl.Range      `hcl:"shutdown_grace,attr_value_range"`
-	ExposeOverheadHeader *bool          `hcl:"expose_overhead_header,optional"`
-	ExternalGuardrails   *bool          `hcl:"external_requires_guardrails,optional"`
-	ExternalGuardsRange  hcl.Range      `hcl:"external_requires_guardrails,attr_value_range"`
-	CacheIsolation       *string        `hcl:"cache_isolation,optional"`
-	CacheIsolationRange  hcl.Range      `hcl:"cache_isolation,attr_value_range"`
-	CacheSaltKeyFile     *string        `hcl:"cache_salt_key_file,optional"`
-	AuthFailures         *int           `hcl:"auth_failures_per_minute,optional"`
-	AuthFailuresRange    hcl.Range      `hcl:"auth_failures_per_minute,attr_value_range"`
-	Store                *storeHCL      `hcl:"store,block"`
-	Limits               *limitsHCL     `hcl:"limits,block"`
-	FairShare            *fairHCL       `hcl:"fairshare,block"`
-	Health               *healthHCL     `hcl:"health,block"`
-	Orgs                 []orgHCL       `hcl:"org,block"`
-	Tags                 *tagsHCL       `hcl:"tags,block"`
-	Alerts               *alertsHCL     `hcl:"alerts,block"`
-	Pools                []poolHCL      `hcl:"pool,block"`
-	Models               []modelHCL     `hcl:"model,block"`
-	Vault                *vaultHCL      `hcl:"vault,block"`
-	TrustedProxies       []string       `hcl:"trusted_proxies,optional"`
-	TrustedProxiesRange  hcl.Range      `hcl:"trusted_proxies,attr_value_range"`
-	Routes               *routesHCL     `hcl:"routes,block"`
-	JWT                  *jwtHCL        `hcl:"jwt,block"`
-	SSO                  *ssoHCL        `hcl:"sso,block"`
-	KeyRotation          *rotHCL        `hcl:"key_rotation,block"`
-	SCIM                 *scimHCL       `hcl:"scim,block"`
-	Policies             []policyHCL    `hcl:"policy,block"`
-	Audit                *auditHCL      `hcl:"audit,block"`
-	Exports              []exportHCL    `hcl:"export,block"`
-	Logging              []loggingHCL   `hcl:"logging,block"`
-	Guardrails           []guardrailHCL `hcl:"guardrail,block"`
-	Tracing              *tracingHCL    `hcl:"tracing,block"`
-	MCPServers           []mcpServerHCL `hcl:"mcp_server,block"`
+	Listen               *string         `hcl:"listen,optional"`
+	ListenRange          hcl.Range       `hcl:"listen,attr_value_range"`
+	MasterKeyFile        string          `hcl:"master_key_file"`
+	MasterKeyFileRange   hcl.Range       `hcl:"master_key_file,attr_value_range"`
+	MetricsTokenFile     *string         `hcl:"metrics_token_file,optional"`
+	Retries              *int            `hcl:"retries,optional"`
+	RetriesRange         hcl.Range       `hcl:"retries,attr_value_range"`
+	BudgetRefresh        *string         `hcl:"budget_refresh,optional"`
+	BudgetRefreshRange   hcl.Range       `hcl:"budget_refresh,attr_value_range"`
+	KeyCacheTTL          *string         `hcl:"key_cache_ttl,optional"`
+	KeyCacheTTLRange     hcl.Range       `hcl:"key_cache_ttl,attr_value_range"`
+	ShutdownGrace        *string         `hcl:"shutdown_grace,optional"`
+	ShutdownGraceRange   hcl.Range       `hcl:"shutdown_grace,attr_value_range"`
+	ExposeOverheadHeader *bool           `hcl:"expose_overhead_header,optional"`
+	ExternalGuardrails   *bool           `hcl:"external_requires_guardrails,optional"`
+	ExternalGuardsRange  hcl.Range       `hcl:"external_requires_guardrails,attr_value_range"`
+	CacheIsolation       *string         `hcl:"cache_isolation,optional"`
+	CacheIsolationRange  hcl.Range       `hcl:"cache_isolation,attr_value_range"`
+	CacheSaltKeyFile     *string         `hcl:"cache_salt_key_file,optional"`
+	AuthFailures         *int            `hcl:"auth_failures_per_minute,optional"`
+	AuthFailuresRange    hcl.Range       `hcl:"auth_failures_per_minute,attr_value_range"`
+	Store                *storeHCL       `hcl:"store,block"`
+	Limits               *limitsHCL      `hcl:"limits,block"`
+	FairShare            *fairHCL        `hcl:"fairshare,block"`
+	Health               *healthHCL      `hcl:"health,block"`
+	Orgs                 []orgHCL        `hcl:"org,block"`
+	Tags                 *tagsHCL        `hcl:"tags,block"`
+	Attribution          *attributionHCL `hcl:"attribution,block"`
+	Alerts               *alertsHCL      `hcl:"alerts,block"`
+	Pools                []poolHCL       `hcl:"pool,block"`
+	Models               []modelHCL      `hcl:"model,block"`
+	Vault                *vaultHCL       `hcl:"vault,block"`
+	TrustedProxies       []string        `hcl:"trusted_proxies,optional"`
+	TrustedProxiesRange  hcl.Range       `hcl:"trusted_proxies,attr_value_range"`
+	Routes               *routesHCL      `hcl:"routes,block"`
+	JWT                  *jwtHCL         `hcl:"jwt,block"`
+	SSO                  *ssoHCL         `hcl:"sso,block"`
+	KeyRotation          *rotHCL         `hcl:"key_rotation,block"`
+	SCIM                 *scimHCL        `hcl:"scim,block"`
+	Policies             []policyHCL     `hcl:"policy,block"`
+	Audit                *auditHCL       `hcl:"audit,block"`
+	Exports              []exportHCL     `hcl:"export,block"`
+	Logging              []loggingHCL    `hcl:"logging,block"`
+	Guardrails           []guardrailHCL  `hcl:"guardrail,block"`
+	Tracing              *tracingHCL     `hcl:"tracing,block"`
+	MCPServers           []mcpServerHCL  `hcl:"mcp_server,block"`
 }
 
 type loggingHCL struct {
@@ -388,7 +389,16 @@ type orgHCL struct {
 type orgTeamHCL struct {
 	Name      string    `hcl:"name,label"`
 	NameRange hcl.Range `hcl:"name,label_range"`
+	Lab       *string   `hcl:"lab,optional"`
+	LabRange  hcl.Range `hcl:"lab,attr_value_range"`
 	DefRange  hcl.Range `hcl:",def_range"`
+}
+
+type attributionHCL struct {
+	ProjectHeader  *string   `hcl:"project_header,optional"`
+	HeaderRange    hcl.Range `hcl:"project_header,attr_value_range"`
+	DefaultProject *string   `hcl:"default_project,optional"`
+	DefaultRange   hcl.Range `hcl:"default_project,attr_value_range"`
 }
 
 type poolHCL struct {
@@ -720,6 +730,15 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			}
 			teams[t.Name] = true
 			org.Teams = append(org.Teams, t.Name)
+			if t.Lab != nil {
+				if !ValidName(*t.Lab) {
+					v.errf(t.LabRange, "Invalid lab name", "team %q lab %q: want [A-Za-z0-9_.-]{1,64}", t.Name, *t.Lab)
+				}
+				if org.Labs == nil {
+					org.Labs = map[string]string{}
+				}
+				org.Labs[t.Name] = *t.Lab
+			}
 		}
 		c.Orgs = append(c.Orgs, org)
 	}
@@ -873,6 +892,21 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			seen[fb] = true
 		}
 		c.ModelGroups[i].Fallbacks = m.Fallbacks
+	}
+	c.Attribution = Attribution{ProjectHeader: DefaultProjectHeader}
+	if a := raw.Attribution; a != nil {
+		if a.ProjectHeader != nil {
+			c.Attribution.ProjectHeader = *a.ProjectHeader
+			if !validHeaderName(*a.ProjectHeader) || strings.EqualFold(*a.ProjectHeader, "Authorization") {
+				v.errf(a.HeaderRange, "Invalid project_header", "project_header %q: want a header name", *a.ProjectHeader)
+			}
+		}
+		if a.DefaultProject != nil {
+			c.Attribution.DefaultProject = *a.DefaultProject
+			if !ValidName(*a.DefaultProject) {
+				v.errf(a.DefaultRange, "Invalid default_project", "default_project %q: want [A-Za-z0-9_.-]{1,64}", *a.DefaultProject)
+			}
+		}
 	}
 	if t := raw.Tags; t != nil {
 		if !validHeaderName(t.Header) {

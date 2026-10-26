@@ -126,12 +126,17 @@ type Record struct {
 	// stored does nothing, so the accounting spool can replay a batch that
 	// may have been written before a crash without billing it twice. Empty
 	// for records written before v0.10.0.
-	ID               string
-	Time             time.Time
-	Org              string
-	Team             string
-	Project          string
-	KeyID            string
+	ID      string
+	Time    time.Time
+	Org     string
+	Team    string
+	Project string
+	KeyID   string
+	// User is the gateway user the request is attributed to: the key's
+	// owner, or a JWT's username; "" for a service key. Never a token.
+	User string
+	// Lab is the team's lab at the time of the request ("" for none).
+	Lab              string
 	Model            string
 	Pool             string
 	Upstream         string

@@ -15,12 +15,13 @@ import (
 // its tags when "tag" is a dimension (and once under "" when it has none),
 // so totals over tags can exceed the grand total.
 var reportDims = map[string]string{
-	"org": "org", "team": "team", "project": "project", "key": "key_id",
+	"org": "org", "lab": "lab", "team": "team", "project": "project", "user": "user_name", "key": "key_id",
 	"model": "model", "pool": "pool", "tag": "tag",
 }
 
-// ReportDims lists the accepted dimensions, in canonical order.
-var ReportDims = []string{"org", "team", "project", "key", "model", "pool", "tag"}
+// ReportDims lists the accepted dimensions, in canonical order: the
+// hierarchy org → lab → team → project, then user, key, model, pool, tag.
+var ReportDims = []string{"org", "lab", "team", "project", "user", "key", "model", "pool", "tag"}
 
 // ValidateDims checks and orders report dimensions.
 func ValidateDims(dims []string) ([]string, error) {
@@ -48,8 +49,10 @@ func ValidateDims(dims []string) ([]string, error) {
 // read it).
 type ReportRow struct {
 	Org               string  `json:"org,omitempty"`
+	Lab               string  `json:"lab,omitempty"`
 	Team              string  `json:"team,omitempty"`
 	Project           string  `json:"project,omitempty"`
+	User              string  `json:"user,omitempty"`
 	Key               string  `json:"key,omitempty"`
 	Model             string  `json:"model,omitempty"`
 	Pool              string  `json:"pool,omitempty"`
@@ -78,10 +81,14 @@ func (r ReportRow) Dim(d string) string {
 	switch d {
 	case "org":
 		return r.Org
+	case "lab":
+		return r.Lab
 	case "team":
 		return r.Team
 	case "project":
 		return r.Project
+	case "user":
+		return r.User
 	case "key":
 		return r.Key
 	case "model":
@@ -98,10 +105,14 @@ func (r *ReportRow) setDim(d, v string) {
 	switch d {
 	case "org":
 		r.Org = v
+	case "lab":
+		r.Lab = v
 	case "team":
 		r.Team = v
 	case "project":
 		r.Project = v
+	case "user":
+		r.User = v
 	case "key":
 		r.Key = v
 	case "model":
@@ -171,7 +182,7 @@ func (m *Memory) Report(_ context.Context, from, to time.Time, dims []string) ([
 		if r.Time.Before(from) || !r.Time.Before(to) {
 			continue
 		}
-		base := ReportRow{Org: r.Org, Team: r.Team, Project: r.Project, Key: r.KeyID, Model: r.Model, Pool: r.Pool,
+		base := ReportRow{Org: r.Org, Lab: r.Lab, Team: r.Team, Project: r.Project, User: r.User, Key: r.KeyID, Model: r.Model, Pool: r.Pool,
 			Requests: 1, PromptTokens: r.PromptTokens, CompletionTokens: r.CompletionTokens, CachedTokens: r.CachedTokens,
 			Cost: r.Cost, Unit: r.Unit}
 		if r.Estimated {

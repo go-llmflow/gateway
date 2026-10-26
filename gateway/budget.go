@@ -101,14 +101,19 @@ type softAlert struct {
 // never waits on PostgreSQL. Between refreshes it adds the cost of the
 // requests this process finished. It also holds the team model lists.
 type budgeter struct {
-	mu         sync.Mutex
-	st         store.Store
-	now        func() time.Time
-	budgets    map[store.BudgetKey]*budgetState
-	pending    map[store.BudgetKey]float64 // charged here, record not yet stored
-	written    map[store.BudgetKey]float64 // stored since the last refresh query
-	models     map[string]map[string]bool  // team → allowed model groups
-	allow      map[store.AllowKey][]netip.Prefix
+	mu      sync.Mutex
+	st      store.Store
+	now     func() time.Time
+	budgets map[store.BudgetKey]*budgetState
+	pending map[store.BudgetKey]float64 // charged here, record not yet stored
+	written map[store.BudgetKey]float64 // stored since the last refresh query
+	models  map[string]map[string]bool  // team → allowed model groups
+	allow   map[store.AllowKey][]netip.Prefix
+	// projects: team → enabled project names; members: user → the scopes
+	// their stored bindings cover ("team:<t>", "org:<o>", "*" for a proxy
+	// admin). Both serve project attribution without a store read.
+	projects   map[string]map[string]bool
+	members    map[string]map[string]bool
 	lastOK     time.Time
 	everOK     bool
 	maxAge     time.Duration
@@ -215,14 +220,69 @@ func (b *budgeter) refresh(ctx context.Context) error {
 		// an empty non-nil slice matches nothing.
 		allow[l.AllowKey] = ps
 	}
+	projs, err := b.st.ListProjects(ctx, "")
+	if err != nil {
+		restore()
+		return err
+	}
+	projects := map[string]map[string]bool{}
+	for _, p := range projs {
+		if p.Disabled {
+			continue
+		}
+		if projects[p.Team] == nil {
+			projects[p.Team] = map[string]bool{}
+		}
+		projects[p.Team][p.Name] = true
+	}
+	binds, err := b.st.Bindings(ctx, "")
+	if err != nil {
+		restore()
+		return err
+	}
+	members := map[string]map[string]bool{}
+	for _, bd := range binds {
+		scope := ""
+		switch bd.Role {
+		case store.RoleProxyAdmin:
+			scope = "*"
+		case store.RoleOrgAdmin:
+			scope = "org:" + bd.Org
+		case store.RoleTeamAdmin, store.RoleMember:
+			scope = "team:" + bd.Team
+		default:
+			continue // viewers read; they do not spend
+		}
+		if members[bd.User] == nil {
+			members[bd.User] = map[string]bool{}
+		}
+		members[bd.User][scope] = true
+	}
 	b.mu.Lock()
 	b.budgets, b.models, b.allow, b.lastOK, b.everOK = budgets, models, allow, now, true
+	b.projects, b.members = projects, members
 	onSoft := b.onSoft
 	b.mu.Unlock()
 	if onSoft != nil && len(alerts) > 0 {
 		onSoft(alerts)
 	}
 	return nil
+}
+
+// hasProject reports whether team has an enabled project of that name.
+func (b *budgeter) hasProject(team, name string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.projects[team][name]
+}
+
+// member reports whether user's stored bindings let them spend in team
+// (member or team_admin of it, org_admin of its org, proxy_admin).
+func (b *budgeter) member(user, team, org string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	m := b.members[user]
+	return m["*"] || m["team:"+team] || org != "" && m["org:"+org]
 }
 
 // refreshTimeout bounds one refresh of the budget state.

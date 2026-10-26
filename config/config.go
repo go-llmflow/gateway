@@ -56,6 +56,8 @@ type Config struct {
 	// Tags configures request tags; Alerts the soft-budget alert channels.
 	Tags   Tags
 	Alerts Alerts
+	// Attribution names the project header and the default project.
+	Attribution Attribution
 	// AuthFailuresPerMinute is the number of failed authentications a
 	// client network (IPv4 address, IPv6 /64) may make per minute before it
 	// gets 429; 0 disables the limit.
@@ -419,6 +421,34 @@ type Org struct {
 	Name  string
 	Share float64
 	Teams []string
+	// Labs maps a configured team to its lab (team "t" { lab = "x" }): an
+	// optional accounting level between the organisation and its teams,
+	// for reports only (RBAC does not use it). Teams without a lab, and
+	// teams created through the API, belong to no lab.
+	Labs map[string]string
+}
+
+// Attribution says how a request names its project.
+type Attribution struct {
+	// ProjectHeader is the request header naming the project, within the
+	// key's own team (default X-Llmflow-Project).
+	ProjectHeader string
+	// DefaultProject applies when neither the header nor the key names a
+	// project, if the key's team has a project of that name.
+	DefaultProject string
+}
+
+// DefaultProjectHeader is the default attribution header.
+const DefaultProjectHeader = "X-Llmflow-Project"
+
+// LabOf returns the lab of a configured team, or "".
+func (c *Config) LabOf(team string) string {
+	for _, o := range c.Orgs {
+		if l, ok := o.Labs[team]; ok {
+			return l
+		}
+	}
+	return ""
 }
 
 // Pool is a capacity domain whose sustainable concurrency C is measured

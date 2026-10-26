@@ -82,7 +82,7 @@ func TestSpendReports(t *testing.T) {
 		t.Fatalf("member sees only own key: %s", body)
 	}
 
-	for _, q := range []string{"&group_by=user", "&format=xml"} {
+	for _, q := range []string{"&group_by=planet", "&format=xml"} {
 		if code, body := report("master", q); code != 400 {
 			t.Fatalf("%s: %d %s", q, code, body)
 		}
