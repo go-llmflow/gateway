@@ -71,6 +71,7 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	h("DELETE /admin/budgets", s.deleteBudget)
 	h("GET /admin/spend", s.spendReport)
 	h("GET /admin/usage.csv", s.usageCSV)
+	h("GET /admin/export", s.exportReport)
 	h("GET /admin/fairshare", s.fairshareState)
 	h("GET /admin/audit", s.listAudit)
 	h("POST /admin/audit/verify", s.verifyAudit)

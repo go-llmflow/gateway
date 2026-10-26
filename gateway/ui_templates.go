@@ -99,6 +99,7 @@ organisation administrator sees their organisation only.</p>
 {{range .Data.Filters}}<input type="hidden" name="{{.Dim}}" value="{{.Raw}}">{{end}}
 <button>Show</button></form>
 <p class="chips">Periods: {{range .Data.Presets}}<a href="{{.Remove}}">{{.Dim}}</a>{{end}}</p>
+{{if .Data.Exports}}<p class="chips">Export the whole period (every visible organisation, audited): {{range .Data.Exports}}<a href="{{.Remove}}">{{.Dim}}</a>{{end}}</p>{{end}}
 {{if .Data.Filters}}<p class="chips">Filters: {{range .Data.Filters}}<a href="{{.Remove}}" title="remove">{{.Dim}} = {{.Value}} ✕</a>{{end}}</p>{{end}}
 <p>Period <strong>{{.Data.From}}</strong> to <strong>{{.Data.To}}</strong> (UTC, end exclusive), compared with
 <strong>{{.Data.PrevFrom}}</strong> to <strong>{{.Data.PrevTo}}</strong>.</p>

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/go-llmflow/gateway/store"
@@ -56,7 +57,23 @@ type reportsData struct {
 	Dims                       []string
 	Presets                    []reportFilter // Dim = label, Remove = link
 	Filters                    []reportFilter
+	Exports                    []reportFilter // Dim = label, Remove = link
 	Sections                   []reportSection
+}
+
+// uiExport downloads an export of GET /admin/export (audited there).
+func (s *Server) uiExport(w http.ResponseWriter, r *http.Request, p *principal, csrf string) {
+	q := r.URL.Query()
+	v := url.Values{"from": {q.Get("from")}, "to": {q.Get("to")}, "format": {q.Get("format")}}
+	rec := s.callAdminRecorded(r, p, "GET /admin/export", "/admin/export", v, nil, nil)
+	if rec.status != http.StatusOK {
+		s.render(w, "reports", view{Title: "Reports", User: p.name, CSRF: csrf, Error: apiMessage(rec.body.Bytes())})
+		return
+	}
+	for _, k := range []string{"Content-Type", "Content-Disposition"} {
+		w.Header().Set(k, rec.Header().Get(k))
+	}
+	_, _ = w.Write(rec.body.Bytes())
 }
 
 func displayUnit(u string) string {
@@ -202,6 +219,10 @@ func (s *Server) uiReports(w http.ResponseWriter, r *http.Request, p *principal,
 		data.Filters = append(data.Filters, reportFilter{Dim: d, Value: labelOr(filters[d]), Raw: filters[d], Remove: link(from, to, group, rest)})
 	}
 	data.From, data.To = from.Format("2006-01-02"), to.Format("2006-01-02")
+	for _, f := range []string{FormatCSV, FormatXLSX, FormatPDF} {
+		data.Exports = append(data.Exports, reportFilter{Dim: strings.ToUpper(f),
+			Remove: "/ui/reports/export?" + url.Values{"from": {data.From}, "to": {data.To}, "format": {f}}.Encode()})
+	}
 	if errMsg == "" && !from.Before(to) {
 		errMsg = "from must be before to"
 	}
