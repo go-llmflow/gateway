@@ -118,6 +118,8 @@ func (s *Server) teamTools(ctx context.Context, team string) ([]string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.lists == nil || s.now().Sub(c.at) >= toolListsTTL {
+		ctx, cancel := context.WithTimeout(ctx, storeTimeout)
+		defer cancel()
 		l, err := s.st.TeamTools(ctx)
 		if err != nil {
 			return nil, err

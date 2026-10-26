@@ -208,13 +208,22 @@ func (l *failLimiter) fail(p netip.Prefix) {
 
 var errAuthUnavailable = errors.New("key store unreachable")
 
+// storeTimeout bounds a store read on the request path. Without it, a
+// network partition between the gateway and PostgreSQL (nothing refused,
+// nothing answered) held every request with an uncached key until its
+// client gave up, each one holding a pooled connection (security audit
+// 2026-10-26, A6). Past it the request gets 503, like a store that refuses.
+const storeTimeout = 5 * time.Second
+
 // lookup resolves a presented secret to a valid key.
 func (s *Server) lookup(ctx context.Context, secret string) (store.Key, bool, error) {
 	h := store.HashSecret(secret)
 	k, found, cached := s.keys.get(h)
 	if !cached {
 		var err error
+		ctx, cancel := context.WithTimeout(ctx, storeTimeout)
 		k, err = s.st.KeyByHash(ctx, h)
+		cancel()
 		switch {
 		case errors.Is(err, store.ErrNotFound):
 			s.keys.putMissing(h)

@@ -223,6 +223,9 @@ func (b *budgeter) refresh(ctx context.Context) error {
 	return nil
 }
 
+// refreshTimeout bounds one refresh of the budget state.
+const refreshTimeout = 30 * time.Second
+
 func (b *budgeter) loop(ctx context.Context, every time.Duration, onErr func(error)) {
 	t := time.NewTicker(every)
 	defer t.Stop()
@@ -231,7 +234,13 @@ func (b *budgeter) loop(ctx context.Context, every time.Duration, onErr func(err
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := b.refresh(ctx); err != nil && onErr != nil {
+			// Bounded: a refresh stuck on a partitioned store would stop
+			// every later one (A6). Fail-closed is decided by the age of
+			// the last success, not by this loop.
+			rctx, cancel := context.WithTimeout(ctx, refreshTimeout)
+			err := b.refresh(rctx)
+			cancel()
+			if err != nil && onErr != nil {
 				onErr(err)
 			}
 		}

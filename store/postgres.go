@@ -89,14 +89,30 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 	if err != nil {
 		return nil, fmt.Errorf("postgres: connect: %w", err)
 	}
-	for _, s := range []string{schema, usersSchema, modelsSchema, toolsSchema, budgetsSchema, allowSchema, rotationSchema, scimSchema, auditSchema} {
-		if _, err := pool.Exec(ctx, s); err != nil {
-			pool.Close()
-			return nil, fmt.Errorf("postgres: schema: %w", err)
+	// One schema creation at a time across processes: two gateways started
+	// together on an empty database raced on CREATE TABLE IF NOT EXISTS,
+	// and one failed to start with a unique violation on pg_type (security
+	// audit 2026-10-26, chaos, A7). DDL is transactional in PostgreSQL.
+	err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(schemaLock)); err != nil {
+			return err
 		}
+		for _, s := range []string{schema, usersSchema, modelsSchema, toolsSchema, budgetsSchema, allowSchema, rotationSchema, scimSchema, auditSchema} {
+			if _, err := tx.Exec(ctx, s); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("postgres: schema: %w", err)
 	}
 	return &Postgres{pool: pool}, nil
 }
+
+// schemaLock is the advisory lock key serialising schema creation.
+const schemaLock = 0x6c6c6d66_73636865 // "llmfsche"
 
 func uniqueViolation(err error) bool {
 	var pe *pgconn.PgError

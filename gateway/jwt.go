@@ -61,6 +61,8 @@ func claimValues(tok *oidc.Token, name string) []string {
 // jwtIdentity maps a verified token onto a team through the ordered map
 // blocks: the first block whose claim holds its value wins.
 func (s *Server) jwtIdentity(ctx context.Context, tok *oidc.Token) (store.Key, error) {
+	ctx, cancel := context.WithTimeout(ctx, storeTimeout)
+	defer cancel()
 	j := s.cfg.JWT
 	for _, m := range j.Maps {
 		if !slices.Contains(claimValues(tok, m.Claim), m.Value) {
