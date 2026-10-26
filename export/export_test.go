@@ -285,7 +285,7 @@ func TestQueueBoundedInBytes(t *testing.T) {
 	q := NewQueue(down, 1024)
 	q.sleep = func(context.Context, time.Duration) error { return nil }
 	defer q.Close(context.Background())
-	defer close(down.block) // first: the writer gives up, then Close drains
+	defer close(down.block)      // first: the writer gives up, then Close drains
 	batch := make([]byte, 8<<20) // one backing array: the test itself stays small
 	for i := 0; i < 200; i++ {
 		q.Enqueue(fmt.Sprintf("requests/%d", i), batch, PutOptions{})
