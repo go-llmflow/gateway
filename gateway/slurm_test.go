@@ -161,7 +161,7 @@ func TestSlurmDiscovery(t *testing.T) {
 	e := newEnv(t, slurmConfig(t, restd.srv.URL), WithClock(clk.now))
 	g := e.srv.groups["llama"]
 	d := g.disc
-	pool := e.srv.pools["gpu"]
+	pool := e.srv.pools["gpu"].(localPool).p
 	ctx := context.Background()
 	_, key := e.newKey("etabA")
 	members := func() int { return len(g.members()) }
@@ -285,8 +285,8 @@ func TestSlurmDrainWaitsForInflight(t *testing.T) {
 	u.inflight.Add(1) // a request still running there
 	restd.set()
 	g.disc.poll(ctx)
-	if len(g.members()) != 1 || !u.draining.Load() || e.srv.pools["gpu"].Capacity() != 0 {
-		t.Fatalf("draining with a request in flight: %d members, draining %v, C %d", len(g.members()), u.draining.Load(), e.srv.pools["gpu"].Capacity())
+	if len(g.members()) != 1 || !u.draining.Load() || e.srv.poolCapacity("gpu") != 0 {
+		t.Fatalf("draining with a request in flight: %d members, draining %v, C %d", len(g.members()), u.draining.Load(), e.srv.poolCapacity("gpu"))
 	}
 	if g.pick(map[*upstream]bool{}, time.Now()) != nil {
 		t.Fatal("a draining instance was picked")
@@ -403,6 +403,22 @@ model "m" {
 		if _, err := config.Parse([]byte(strings.Replace(ok, bad[0], bad[1], 1)), "s.hcl"); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+	// Not with ha: a shared pool's capacity is its owner's, fixed.
+	withHA := ok + `
+store {
+  kind      = "postgres"
+  dsn_file  = "/run/dsn"
+  spool_dir = "/var/spool/llmflow"
+}
+ha {
+  listen        = "10.0.0.5:9444"
+  peer_networks = ["10.0.0.0/24"]
+  secret_file   = "/run/ha"
+}
+`
+	if _, err := config.Parse([]byte(withHA), "s.hcl"); err == nil || !strings.Contains(err.Error(), "not supported with an ha block") {
+		t.Errorf("slurm discovery with ha: %v", err)
 	}
 	// capacity = 0 only for a pool fed by Slurm.
 	static := ok[:strings.Index(ok, "  slurm {")] + `  upstream "u" { base_url = "http://h:1" }` + "\n}\n"

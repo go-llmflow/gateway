@@ -1221,6 +1221,13 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	}
 	if raw.HA != nil {
 		c.HA = v.buildHA(raw.HA, c)
+		// A shared pool's C is its owner's, fixed at start (package ha):
+		// an elastic pool would drift between replicas.
+		for i, m := range raw.Models {
+			if m.Slurm != nil && i < len(c.ModelGroups) {
+				v.errf(m.Slurm.DefRange, "Slurm discovery with ha", "model %q: slurm discovery (elastic pools) is not supported with an ha block yet: a shared pool's capacity is fixed by its owner", m.Name)
+			}
+		}
 	}
 	if kr := raw.KeyRotation; kr != nil {
 		ck := &KeyRotation{VaultPrefix: strings.Trim(kr.VaultPrefix, "/"),

@@ -525,8 +525,8 @@ type elasticPool interface {
 	reserved() map[string]int
 }
 
-func (l localPool) setCapacity(c int) int     { return l.p.SetCapacity(c) }
-func (l localPool) capacity() int             { return l.p.Capacity() }
+func (l localPool) setCapacity(c int) int    { return l.p.SetCapacity(c) }
+func (l localPool) capacity() int            { return l.p.Capacity() }
 func (l localPool) reserved() map[string]int { return l.p.Reserved() }
 
 // poolCapacity is a pool's current C: its elastic value on this replica,

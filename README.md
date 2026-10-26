@@ -1363,6 +1363,7 @@ model "llama" {
 - Every membership change re-apportions the organisations' integer reservations with the same Hamilton method (`fairshare.Pool.SetCapacity`).
 - Every change is audited: `slurm.member_added`, `slurm.member_drained` (with the reason), `slurm.member_removed`, and `pool.capacity` (before, after, reservations).
 - Requests in flight keep their within-share or borrowing status.
+- Not yet with an `ha` block: a shared pool's C is fixed by its owner replica, so the configuration refuses the combination.
 
 **Safety.**
 - Only the configured accounts and partitions (and users) are trusted. Without this, anyone could submit a job named `llmflow:llama:8000` and capture prompts.
