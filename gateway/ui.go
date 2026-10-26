@@ -59,6 +59,7 @@ func (s *Server) uiRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /ui/budgets/delete", page(s.uiDeleteBudget))
 	mux.Handle("GET /ui/spend", page(s.uiSpend))
 	mux.Handle("GET /ui/reports", page(s.uiReports))
+	mux.Handle("GET /ui/reports/export", page(s.uiExport))
 	mux.Handle("GET /ui/fairshare", page(s.uiFairshare))
 	mux.Handle("GET /ui/audit", page(s.uiAudit))
 	mux.Handle("POST /ui/audit/verify", page(s.uiVerify))
@@ -137,16 +138,24 @@ func (r *uiRecorder) WriteHeader(s int) {
 // callAdmin runs an admin API handler in-process for p, as the API would
 // for the same principal.
 func (s *Server) callAdmin(r *http.Request, p *principal, pattern string, path string, query url.Values, body any, vals map[string]string) (int, []byte) {
+	rec := s.callAdminRecorded(r, p, pattern, path, query, body, vals)
+	return rec.status, rec.body.Bytes()
+}
+
+// callAdminRecorded is callAdmin, keeping the handler's headers.
+func (s *Server) callAdminRecorded(r *http.Request, p *principal, pattern string, path string, query url.Values, body any, vals map[string]string) *uiRecorder {
 	f := s.adminFuncs[pattern]
 	if f == nil {
-		return http.StatusNotFound, []byte(`{"error":{"message":"no such admin route"}}`)
+		rec := &uiRecorder{status: http.StatusNotFound}
+		rec.body.WriteString(`{"error":{"message":"no such admin route"}}`)
+		return rec
 	}
 	method, _, _ := strings.Cut(pattern, " ")
 	var rd io.Reader = http.NoBody
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return http.StatusBadRequest, nil
+			return &uiRecorder{status: http.StatusBadRequest}
 		}
 		rd = bytes.NewReader(b)
 	}
@@ -156,7 +165,7 @@ func (s *Server) callAdmin(r *http.Request, p *principal, pattern string, path s
 	}
 	req, err := http.NewRequestWithContext(r.Context(), method, u, rd)
 	if err != nil {
-		return http.StatusBadRequest, nil
+		return &uiRecorder{status: http.StatusBadRequest}
 	}
 	req.RemoteAddr = r.RemoteAddr
 	req.Header.Set("Content-Type", "application/json")
@@ -171,7 +180,7 @@ func (s *Server) callAdmin(r *http.Request, p *principal, pattern string, path s
 	if rec.status == 0 {
 		rec.status = http.StatusOK
 	}
-	return rec.status, rec.body.Bytes()
+	return rec
 }
 
 // apiMessage extracts an API error's message.

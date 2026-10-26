@@ -684,6 +684,36 @@ unchanged; every label is escaped. The page's queries are fuzzed
 `lab`, `user`), and every report now runs under a 60-second deadline in the
 store.
 
+**Exports** (since v0.13.0), from the Reports page (CSV, XLSX, PDF links) or
+the API:
+
+```
+GET /admin/export?from=2026-10-01&to=2026-11-01&format=csv|xlsx|pdf[&group_by=org,lab,team,project,user]
+```
+
+| format | content |
+|---|---|
+| `csv` | the spend report (default grouping `org,lab,team,project,user,model,pool`), with `cost` and `unit` columns |
+| `xlsx` | a **Summary** sheet (period dates, totals per unit against the previous period, Slurm batch GPU-hours when given), then one sheet per grouping (`org`, `lab`, `team`, `project`, `user`, `model`, `pool`, `tag`, `day`); numbers are typed, each cost column names its unit (`Cost (GPU-hours)`, `Cost (USD)`) and a unit has its own column |
+| `pdf` | a management summary: period, totals per unit, totals per level (org, lab, team, project; ten largest) with pie charts, the daily trend, and a reconciliation table of inference against Slurm batch GPU-hours per organisation |
+
+What an export shows is what the spend report shows the same person (an
+organisation administrator: their organisation only). Every download is
+written to the audit log with kind `export` (actor, roles, query, format,
+size, status), refusals included. Bounds: at most 366 days, at most 100 000
+rows at the finest grouping (413 beyond), the 60-second store deadline.
+
+Injection: a CSV cell that begins with `=`, `+`, `-`, `@`, a tab or a
+carriage return is prefixed with `'`; the XLSX writer (go-ooxml v0.6.0) has
+no formula API at all and marks such strings `quotePrefix`; the PDF
+(go-pdfkit v0.19.0, one embedded font, Atkinson Hyperlegible) draws every
+label as glyphs, so no data reaches the PDF syntax, and it carries no
+action, link, script or attachment. Labels lose their control and format
+characters (bidi overrides included) and are clipped. The file name is
+built from the dates only. The writers are fuzzed (`FuzzExportWriters`).
+go-pdfkit/html2pdf was considered and set aside: it puts an HTML and CSS
+engine (go-webengine) in front of the same writer, and has no release.
+
 The UI holds no privilege of its own: every page calls the admin API's
 handlers in-process with the signed-in person, so it sees and changes exactly
 what the API lets their roles (an organisation administrator sees their
@@ -1434,6 +1464,7 @@ security audit of 2026-10-26):
     - Audit entries of guardrail decisions are written asynchronously. When the queue is full they are dropped, counted (`llmflow_guardrail_audit_dropped_total`) and alerted.
 16. **Phone numbers have no checksum**: a PII guardrail that masks them also masks 10-digit references that start with 0. This was measured in go-llmflow/pii.
 17. **Fallback on saturation is the gateway's estimate.** vLLM queues instead of answering `429`/`503`, so `fallback_on = ["saturated"]` (v0.11.0) decides from two signals: the pool's in-flight count against C, and, optionally, vLLM's `num_requests_waiting` scraped at the health interval. A burst shorter than that interval is judged on the first signal only.
+18. **The PDF export links more than it uses.** go-pdfkit/pdfkit v0.19.0's root package imports go-widgets/toolkit for its widget bridge (`Page.AddWidget`), so the gateway binary also carries go-widgets/toolkit, go-crdt/collab, richdoc, and the JPEG 2000 and JBIG2 decoders: 33.8 MB without the exports, 38.0 MB with them (darwin/arm64, `CGO_ENABLED=0 -trimpath`). None of that code is reached from the export: the gateway only draws paths and text. The fix belongs upstream (moving the bridge to a subpackage); until then `govulncheck` also scans those modules.
 
 ## Security audit 2026-10-26
 
