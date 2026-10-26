@@ -842,7 +842,7 @@ rows at the finest grouping (413 beyond), the 60-second store deadline.
 Injection: a CSV cell that begins with `=`, `+`, `-`, `@`, a tab or a
 carriage return is prefixed with `'`; the XLSX writer (go-ooxml v0.6.0) has
 no formula API at all and marks such strings `quotePrefix`; the PDF
-(go-pdfkit v0.19.0, one embedded font, Atkinson Hyperlegible) draws every
+(go-pdfkit v0.20.0, one embedded font, Atkinson Hyperlegible) draws every
 label as glyphs, so no data reaches the PDF syntax, and it carries no
 action, link, script or attachment. Labels lose their control and format
 characters (bidi overrides included) and are clipped. The file name is
@@ -1751,7 +1751,10 @@ security audit of 2026-10-26):
     - Audit entries of guardrail decisions are written asynchronously. When the queue is full they are dropped, counted (`llmflow_guardrail_audit_dropped_total`) and alerted.
 16. **Phone numbers have no checksum**: a PII guardrail that masks them also masks 10-digit references that start with 0. This was measured in go-llmflow/pii.
 17. **Fallback on saturation is the gateway's estimate.** vLLM queues instead of answering `429`/`503`, so `fallback_on = ["saturated"]` (v0.11.0) decides from two signals: the pool's in-flight count against C, and, optionally, vLLM's `num_requests_waiting` scraped at the health interval. A burst shorter than that interval is judged on the first signal only.
-18. **The PDF export links more than it uses.** go-pdfkit/pdfkit v0.19.0's root package imports go-widgets/toolkit for its widget bridge (`Page.AddWidget`), so the gateway binary also carries go-widgets/toolkit, go-crdt/collab, richdoc, and the JPEG 2000 and JBIG2 decoders: 33.8 MB without the exports, 38.0 MB with them (darwin/arm64, `CGO_ENABLED=0 -trimpath`). None of that code is reached from the export: the gateway only draws paths and text. The fix belongs upstream (moving the bridge to a subpackage); until then `govulncheck` also scans those modules.
+18. ~~**The PDF export links more than it uses.**~~ **Fixed upstream in go-pdfkit/pdfkit v0.20.0.** Its widget bridge moved to the subpackage `pdfkit/widget`, so importing pdfkit no longer links go-widgets/toolkit, go-crdt/collab, richdoc, or the JPEG 2000 and JBIG2 decoders.
+    - The gateway binary went from 42,110,114 to 39,790,834 bytes, 2,319,280 bytes (5.5%) smaller (darwin/arm64, `CGO_ENABLED=0 -trimpath`, same tree but for the bump).
+    - `go list -deps ./cmd/llmflow-gateway` names none of those modules.
+    - A test in pdfkit fails if its root package links the toolkit again.
 
 ## Security audit 2026-10-26
 
