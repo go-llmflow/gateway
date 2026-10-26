@@ -34,7 +34,7 @@ func (s *Server) nextFallback(primary *group, idx *int, key store.Key, scope req
 			continue
 		}
 		sc := scope
-		sc.model = name
+		sc.model, sc.unit = name, g.cfg.Cost.Unit
 		if s.budget.check(sc) != nil {
 			continue
 		}
@@ -166,7 +166,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			apiError(w, http.StatusBadRequest, "invalid_request_error", msg)
 			return
 		}
-		scope := reqScope{org: key.Org, team: key.Team, project: key.Project, key: key.ID, model: g.cfg.Name, tags: tags}
+		scope := reqScope{org: key.Org, team: key.Team, project: key.Project, key: key.ID, model: g.cfg.Name, tags: tags, unit: g.cfg.Cost.Unit}
 		switch err := s.budget.check(scope); {
 		case errors.Is(err, errBudgetExceeded):
 			s.met.denied.add(1, key.Team, "budget")
@@ -244,7 +244,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				grant.Release(0)
 				s.met.fallbacks.add(1, g.cfg.Name, next.cfg.Name, "saturated")
 				g, grant, out = next, tg, moved
-				scope.model = g.cfg.Name
+				scope.model, scope.unit = g.cfg.Name, g.cfg.Cost.Unit
 				w.Header().Set("X-Llmflow-Model", g.cfg.Name)
 				break
 			}
@@ -291,7 +291,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				s.met.tokens.add(float64(usage.PromptTokens), key.Team, g.cfg.Name, "prompt")
 				s.met.tokens.add(float64(usage.CompletionTokens), key.Team, g.cfg.Name, "completion")
 				s.met.tokens.add(float64(usage.Cached()), key.Team, g.cfg.Name, "cached")
-				s.met.gpuHours.add(cost, key.Team, g.cfg.Pool)
+				s.met.charge(cost, key.Team, g.cfg.Pool, g.cfg.Cost.Unit)
 			}
 			grant.Release(consumed)
 			s.limiter.release(key.ID, usage.PromptTokens+usage.CompletionTokens)
@@ -320,7 +320,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			rec := store.Record{
 				ID: rid, Time: end.UTC(), Org: key.Org, Team: key.Team, Project: key.Project, KeyID: key.ID, Model: g.cfg.Name, Pool: g.cfg.Pool,
 				Upstream: upstreamLabel, PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
-				CachedTokens: usage.Cached(), Cost: cost, LatencyMS: float64(end.Sub(t0).Microseconds()) / 1000,
+				CachedTokens: usage.Cached(), Cost: cost, Unit: g.cfg.Cost.Unit, LatencyMS: float64(end.Sub(t0).Microseconds()) / 1000,
 				Status: status, Priority: grant.Priority, Borrowing: grant.Borrowing, Stream: req.Stream,
 				Estimated: estimated, Tags: tags,
 			}
@@ -381,7 +381,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			upSpan.AddEvent("fallback", trace.WithAttributes(attribute.String("from", g.cfg.Name), attribute.String("to", next.cfg.Name)))
 			grant.Release(0)
 			g = next
-			scope.model = g.cfg.Name
+			scope.model, scope.unit = g.cfg.Name, g.cfg.Cost.Unit
 			grant = g.pool.Acquire(key.Org, g.class, promptEst+req.MaxTokens)
 			target := g.cfg.UpstreamModel
 			if out, _, err = openai.RewriteFor(ep, body, func(string) (string, error) { return target, nil }, s.isolation(key)); err != nil {

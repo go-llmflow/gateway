@@ -569,6 +569,7 @@ func TestPostgresContract(t *testing.T) {
 		t.Fatalf("audit UPDATE: %v", err)
 	}
 	contractAllowlists(t, p)
+	contractUnits(t, p)
 
 	if _, err := OpenPostgres(ctx, "postgres://u:hunter2@[::1"); err == nil || strings.Contains(err.Error(), "hunter2") {
 		t.Fatalf("bad DSN error leaks or passes: %v", err)

@@ -398,11 +398,15 @@ type poolHCL struct {
 }
 
 type costHCL struct {
-	InputPerMTok  *float64  `hcl:"input_per_mtok,optional"`
-	OutputPerMTok *float64  `hcl:"output_per_mtok,optional"`
-	CachedPerMTok *float64  `hcl:"cached_per_mtok,optional"`
-	AudioPerHour  *float64  `hcl:"audio_per_hour,optional"`
-	DefRange      hcl.Range `hcl:",def_range"`
+	InputPerMTok   *float64  `hcl:"input_per_mtok,optional"`
+	OutputPerMTok  *float64  `hcl:"output_per_mtok,optional"`
+	CachedPerMTok  *float64  `hcl:"cached_per_mtok,optional"`
+	AudioPerHour   *float64  `hcl:"audio_per_hour,optional"`
+	Unit           *string   `hcl:"unit,optional"`
+	UnitRange      hcl.Range `hcl:"unit,attr_value_range"`
+	PriceDate      *string   `hcl:"price_date,optional"`
+	PriceDateRange hcl.Range `hcl:"price_date,attr_value_range"`
+	DefRange       hcl.Range `hcl:",def_range"`
 }
 
 type upstreamHCL struct {
@@ -726,6 +730,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	// models
 	models := map[string]bool{}
 	modelClass := map[string]Class{}
+	poolUnit := map[string]string{}
 	for _, m := range raw.Models {
 		g := ModelGroup{Name: m.Name, UpstreamModel: strOr(m.UpstreamModel, m.Name), Pool: strOr(m.Pool, m.Name), Class: Class(strOr(m.Class, string(Interactive)))}
 		if m.Name == "" || len(m.Name) > 256 || strings.ContainsAny(m.Name, "\x00\r\n") {
@@ -757,8 +762,25 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 				}
 			}
 			g.Cost = Cost{InputPerMTok: f64(m.Cost.InputPerMTok), OutputPerMTok: f64(m.Cost.OutputPerMTok), CachedPerMTok: f64(m.Cost.CachedPerMTok),
-				AudioPerHour: f64(m.Cost.AudioPerHour)}
+				AudioPerHour: f64(m.Cost.AudioPerHour), PriceDate: strOr(m.Cost.PriceDate, "")}
+			unit, ok := normalizeUnit(strOr(m.Cost.Unit, ""))
+			if !ok {
+				v.errf(m.Cost.UnitRange, "Invalid unit", "unit = %q: want \"gpu_hours\" or a currency code such as \"USD\" (letters, digits, _; at most 16)", strOr(m.Cost.Unit, ""))
+			}
+			g.Cost.Unit = unit
+			if m.Cost.PriceDate != nil {
+				if _, err := time.Parse("2006-01-02", *m.Cost.PriceDate); err != nil {
+					v.errf(m.Cost.PriceDateRange, "Invalid price date", "price_date = %q: want YYYY-MM-DD, the day the prices were read", *m.Cost.PriceDate)
+				}
+			} else if unit != "" {
+				v.errf(m.Cost.DefRange, "Missing price date", "model %q: a cost in %s needs price_date (YYYY-MM-DD), the day the prices were read from the provider", m.Name, unit)
+			}
 		}
+		if prev, ok := poolUnit[g.Pool]; ok && prev != g.Cost.Unit {
+			v.errf(m.DefRange, "Mixed cost units", "pool %q: model %q costs in %s, another model of the pool in %s; fair share sums the usage of a pool, so its models share one unit",
+				g.Pool, m.Name, unitName(g.Cost.Unit), unitName(prev))
+		}
+		poolUnit[g.Pool] = g.Cost.Unit
 		if len(m.Upstreams) == 0 {
 			v.errf(m.DefRange, "No upstream", "model %q needs at least one upstream block", m.Name)
 		}

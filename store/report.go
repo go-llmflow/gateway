@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -40,7 +41,11 @@ func ValidateDims(dims []string) ([]string, error) {
 }
 
 // ReportRow is one group of a spend report. Only the dimensions asked for
-// are filled.
+// are filled. Every report is split by cost unit, whatever the dimensions:
+// a row holds the costs of one unit only (Unit "" is GPU-hours), so
+// GPU-hours and a currency are never summed. GPUHours repeats Cost for a
+// GPU-hours row and is 0 otherwise (the v0.11 field, kept for clients that
+// read it).
 type ReportRow struct {
 	Org               string  `json:"org,omitempty"`
 	Team              string  `json:"team,omitempty"`
@@ -49,12 +54,23 @@ type ReportRow struct {
 	Model             string  `json:"model,omitempty"`
 	Pool              string  `json:"pool,omitempty"`
 	Tag               string  `json:"tag,omitempty"`
+	Unit              string  `json:"-"`
 	Requests          int64   `json:"requests"`
 	PromptTokens      int64   `json:"prompt_tokens"`
 	CompletionTokens  int64   `json:"completion_tokens"`
 	CachedTokens      int64   `json:"cached_tokens"`
+	Cost              float64 `json:"cost"`
 	GPUHours          float64 `json:"gpu_hours"`
 	EstimatedRequests int64   `json:"estimated_requests"`
+}
+
+// MarshalJSON writes the unit by its name ("gpu_hours" for "").
+func (r ReportRow) MarshalJSON() ([]byte, error) {
+	type plain ReportRow
+	return json.Marshal(struct {
+		plain
+		Unit string `json:"unit"`
+	}{plain(r), UnitName(r.Unit)})
 }
 
 // Dim returns the value of one dimension.
@@ -102,23 +118,28 @@ func (r *ReportRow) add(o ReportRow) {
 	r.PromptTokens += o.PromptTokens
 	r.CompletionTokens += o.CompletionTokens
 	r.CachedTokens += o.CachedTokens
-	r.GPUHours += o.GPUHours
+	r.Cost += o.Cost
 	r.EstimatedRequests += o.EstimatedRequests
+	if r.Unit == "" {
+		r.GPUHours = r.Cost
+	}
 }
 
-// Regroup aggregates rows onto fewer dimensions, sorted.
+// Regroup aggregates rows onto fewer dimensions, sorted, keeping the cost
+// units apart.
 func Regroup(rows []ReportRow, dims []string) []ReportRow {
 	agg := map[string]*ReportRow{}
 	var order []string
 	for _, r := range rows {
-		parts := make([]string, len(dims))
+		parts := make([]string, len(dims), len(dims)+1)
 		for i, d := range dims {
 			parts[i] = r.Dim(d)
 		}
+		parts = append(parts, r.Unit)
 		k := strings.Join(parts, "\x00")
 		g := agg[k]
 		if g == nil {
-			g = &ReportRow{}
+			g = &ReportRow{Unit: r.Unit}
 			for i, d := range dims {
 				g.setDim(d, parts[i])
 			}
@@ -152,7 +173,7 @@ func (m *Memory) Report(_ context.Context, from, to time.Time, dims []string) ([
 		}
 		base := ReportRow{Org: r.Org, Team: r.Team, Project: r.Project, Key: r.KeyID, Model: r.Model, Pool: r.Pool,
 			Requests: 1, PromptTokens: r.PromptTokens, CompletionTokens: r.CompletionTokens, CachedTokens: r.CachedTokens,
-			GPUHours: r.Cost}
+			Cost: r.Cost, Unit: r.Unit}
 		if r.Estimated {
 			base.EstimatedRequests = 1
 		}
@@ -195,16 +216,12 @@ func (p *Postgres) Report(ctx context.Context, from, to time.Time, dims []string
 		src = `(SELECT u.*, t.tag FROM llmflow_usage u,
 			LATERAL unnest(CASE WHEN cardinality(u.tags) = 0 THEN ARRAY[''] ELSE u.tags END) AS t(tag)) AS u`
 	}
-	sel := strings.Join(cols, ", ")
-	if sel != "" {
-		sel += ", "
-	}
+	// Always grouped by unit: costs of different units are never summed.
+	cols = append(cols, "unit")
+	sel := strings.Join(cols, ", ") + ", "
 	q := `SELECT ` + sel + `count(*), coalesce(sum(prompt_tokens), 0), coalesce(sum(completion_tokens), 0),
 		coalesce(sum(cached_tokens), 0), coalesce(sum(cost), 0), count(*) FILTER (WHERE estimated)
-		FROM ` + src + ` WHERE ts >= $1 AND ts < $2`
-	if len(cols) > 0 {
-		q += ` GROUP BY ` + strings.Join(cols, ", ")
-	}
+		FROM ` + src + ` WHERE ts >= $1 AND ts < $2 GROUP BY ` + strings.Join(cols, ", ")
 	rows, err := p.pool.Query(ctx, q, from, to)
 	if err != nil {
 		return nil, err
@@ -212,11 +229,11 @@ func (p *Postgres) Report(ctx context.Context, from, to time.Time, dims []string
 	out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (ReportRow, error) {
 		var row ReportRow
 		vals := make([]string, len(dims))
-		dest := make([]any, 0, len(dims)+6)
+		dest := make([]any, 0, len(dims)+7)
 		for i := range vals {
 			dest = append(dest, &vals[i])
 		}
-		dest = append(dest, &row.Requests, &row.PromptTokens, &row.CompletionTokens, &row.CachedTokens, &row.GPUHours, &row.EstimatedRequests)
+		dest = append(dest, &row.Unit, &row.Requests, &row.PromptTokens, &row.CompletionTokens, &row.CachedTokens, &row.Cost, &row.EstimatedRequests)
 		if err := r.Scan(dest...); err != nil {
 			return row, err
 		}

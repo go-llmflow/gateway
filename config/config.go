@@ -428,7 +428,11 @@ type Pool struct {
 	Capacity int
 }
 
-// Cost is the internal price of tokens, in GPU-hours per million tokens.
+// Cost is the price of tokens per million, in Unit: GPU-hours ("") for a
+// vLLM model by default, or a currency ("USD") for an external provider.
+// Costs of different units are never added: budgets and reports keep
+// them apart, and every model of a pool must share one unit (fair-share
+// usage is a sum over the pool).
 type Cost struct {
 	InputPerMTok  float64
 	OutputPerMTok float64
@@ -436,6 +440,11 @@ type Cost struct {
 	// AudioPerHour is the price of transcription, in GPU-hours per hour of
 	// audio (vLLM reports a transcription's usage as a duration).
 	AudioPerHour float64
+	// Unit is "" for GPU-hours, otherwise a currency code (see
+	// store.NormalizeUnit); PriceDate (YYYY-MM-DD) records when the prices
+	// were read from the provider's price list, required with a currency.
+	Unit      string
+	PriceDate string
 }
 
 // Upstream is one vLLM server of a model group.
@@ -579,6 +588,43 @@ func readBounded(path string, limit int64) ([]byte, error) {
 		return nil, fmt.Errorf("%s is larger than %d bytes", path, limit)
 	}
 	return data, nil
+}
+
+// normalizeUnit maps "gpu_hours" to "" and checks a currency unit, like
+// store.NormalizeUnit (the config does not import the store).
+func normalizeUnit(u string) (string, bool) {
+	if u == "" || u == "gpu_hours" {
+		return "", true
+	}
+	if len(u) > 16 {
+		return u, false
+	}
+	for _, r := range u {
+		if !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_') {
+			return u, false
+		}
+	}
+	return u, true
+}
+
+func unitName(u string) string {
+	if u == "" {
+		return "gpu_hours"
+	}
+	return u
+}
+
+// Units lists the cost units the models use, GPU-hours ("") first.
+func (c *Config) Units() []string {
+	seen := map[string]bool{"": true}
+	out := []string{""}
+	for _, g := range c.ModelGroups {
+		if !seen[g.Cost.Unit] {
+			seen[g.Cost.Unit] = true
+			out = append(out, g.Cost.Unit)
+		}
+	}
+	return out
 }
 
 // ValidName reports whether s is an acceptable team or pool name.

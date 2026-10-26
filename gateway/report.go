@@ -123,7 +123,9 @@ func csvSafe(s string) string {
 
 func reportHeader(dims []string) []string {
 	h := append([]string{"from", "to"}, dims...)
-	return append(h, "requests", "prompt_tokens", "completion_tokens", "cached_tokens", "gpu_hours", "estimated_requests")
+	// cost and unit are appended (v0.12.0) so that the earlier columns keep
+	// their positions; gpu_hours is 0 on a row of another unit.
+	return append(h, "requests", "prompt_tokens", "completion_tokens", "cached_tokens", "gpu_hours", "estimated_requests", "cost", "unit")
 }
 
 func reportRecord(from, to time.Time, dims []string, r store.ReportRow) []string {
@@ -133,7 +135,21 @@ func reportRecord(from, to time.Time, dims []string, r store.ReportRow) []string
 	}
 	return append(rec, strconv.FormatInt(r.Requests, 10), strconv.FormatInt(r.PromptTokens, 10),
 		strconv.FormatInt(r.CompletionTokens, 10), strconv.FormatInt(r.CachedTokens, 10),
-		strconv.FormatFloat(r.GPUHours, 'f', 6, 64), strconv.FormatInt(r.EstimatedRequests, 10))
+		strconv.FormatFloat(r.GPUHours, 'f', 6, 64), strconv.FormatInt(r.EstimatedRequests, 10),
+		strconv.FormatFloat(r.Cost, 'f', 6, 64), store.UnitName(r.Unit))
+}
+
+// reportUnit is the report's unit when every row has the same one
+// ("gpu_hours" for an empty report), "per_row" otherwise.
+func reportUnit(rows []store.ReportRow) string {
+	u := ""
+	for i, r := range rows {
+		if i > 0 && r.Unit != u {
+			return "per_row"
+		}
+		u = r.Unit
+	}
+	return store.UnitName(u)
 }
 
 // writeReport writes a spend report in one of the formats.
@@ -152,7 +168,7 @@ func writeReport(w io.Writer, format string, from, to time.Time, dims []string, 
 			rows = []store.ReportRow{}
 		}
 		return json.NewEncoder(w).Encode(map[string]any{
-			"from": from.UTC(), "to": to.UTC(), "group_by": dims, "unit": "gpu_hours", "rows": rows,
+			"from": from.UTC(), "to": to.UTC(), "group_by": dims, "unit": reportUnit(rows), "rows": rows,
 		})
 	case FormatCSV, FormatParsable2:
 		cw := csv.NewWriter(w)

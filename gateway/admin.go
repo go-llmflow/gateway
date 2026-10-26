@@ -3,6 +3,7 @@ package gateway
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -861,8 +862,29 @@ func (s *Server) budgetAccess(r *http.Request, p *principal, k store.BudgetKey) 
 
 type budgetOut struct {
 	store.Budget
+	// Unit is spelled out ("gpu_hours" for ""), shadowing the key's.
+	Unit  string  `json:"unit"`
 	Spent float64 `json:"spent"`
 	Limit float64 `json:"limit"`
+}
+
+// budgetUnit normalises a budget's unit and refuses one no model costs in:
+// a budget in a unit nothing is charged in would never fill.
+func (s *Server) budgetUnit(u string) (string, error) {
+	n, err := store.NormalizeUnit(u)
+	if err != nil {
+		return "", err
+	}
+	for _, have := range s.cfg.Units() {
+		if have == n {
+			return n, nil
+		}
+	}
+	names := []string{}
+	for _, have := range s.cfg.Units() {
+		names = append(names, store.UnitName(have))
+	}
+	return "", fmt.Errorf("unit %q: no model costs in it (configured: %s)", u, strings.Join(names, ", "))
 }
 
 func (s *Server) listBudgets(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -883,7 +905,7 @@ func (s *Server) listBudgets(w http.ResponseWriter, r *http.Request, p *principa
 			continue
 		}
 		spent, _ := s.budget.spent(b.BudgetKey)
-		out = append(out, budgetOut{b, spent, b.Limit(now)})
+		out = append(out, budgetOut{b, store.UnitName(b.Unit), spent, b.Limit(now)})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -894,6 +916,11 @@ func (s *Server) setBudget(w http.ResponseWriter, r *http.Request, p *principal)
 		return
 	}
 	b.TempIncrease, b.TempExpiry = 0, nil // only through /admin/budgets/increase
+	var err error
+	if b.Unit, err = s.budgetUnit(b.Unit); err != nil {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
 	if err := store.ValidateBudget(b); err != nil {
 		apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -932,6 +959,11 @@ func (s *Server) increaseBudget(w http.ResponseWriter, r *http.Request, p *princ
 		apiError(w, http.StatusBadRequest, "invalid_request_error", "amount must be positive and expires_at within the next year")
 		return
 	}
+	var err error
+	if in.Unit, err = s.budgetUnit(in.Unit); err != nil {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
 	_, write, err := s.budgetAccess(r, p, in.BudgetKey)
 	if err != nil {
 		storeError(w, err)
@@ -953,6 +985,11 @@ func (s *Server) increaseBudget(w http.ResponseWriter, r *http.Request, p *princ
 func (s *Server) deleteBudget(w http.ResponseWriter, r *http.Request, p *principal) {
 	q := r.URL.Query()
 	k := store.BudgetKey{Kind: store.ScopeKind(q.Get("kind")), Name: q.Get("name"), Model: q.Get("model")}
+	var err error
+	if k.Unit, err = store.NormalizeUnit(q.Get("unit")); err != nil {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
 	_, write, err := s.budgetAccess(r, p, k)
 	if err != nil {
 		storeError(w, err)
