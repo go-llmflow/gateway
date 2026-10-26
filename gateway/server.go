@@ -415,12 +415,22 @@ func (s *Server) Handler() http.Handler {
 	// the ones the mux writes itself (the redirect that cleans "//", 404s,
 	// 405s), not only on the pages the UI handlers render.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No server-wide WriteTimeout (a stream lasts as long as generation
+		// does), but no response outlives max_request_duration either: a
+		// client that stops reading would otherwise block its handler in a
+		// write forever, holding the buffered answer, its key's in-flight
+		// slot and its fair-share grant (security audit 2026-10-26, A2).
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(s.cfg.Limits.MaxRequestDuration + writeGrace))
 		if strings.HasPrefix(r.URL.Path, "/ui/") {
 			uiHeaders(w)
 		}
 		mux.ServeHTTP(w, r)
 	})
 }
+
+// writeGrace lets the error answer of a request that reached
+// max_request_duration still be written.
+const writeGrace = 5 * time.Second
 
 // HTTPServer returns an http.Server with the configured limits.
 func (s *Server) HTTPServer() *http.Server {
