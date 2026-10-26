@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // MutualTLS returns the server and client configurations of the internal
@@ -18,6 +19,12 @@ func MutualTLS(certPEM, keyPEM, caPEM []byte, serverName string) (server, client
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return nil, nil, fmt.Errorf("ha tls: certificate and key: %w", err)
+	}
+	// The peers would refuse it at every handshake: say so at start (and
+	// in check-config) instead.
+	if now := time.Now(); now.After(cert.Leaf.NotAfter) || now.Before(cert.Leaf.NotBefore) {
+		return nil, nil, fmt.Errorf("ha tls: this replica's certificate is valid from %s to %s only",
+			cert.Leaf.NotBefore.Format(time.RFC3339), cert.Leaf.NotAfter.Format(time.RFC3339))
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {

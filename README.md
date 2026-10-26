@@ -204,7 +204,14 @@ ha {
   `tls_*` files (secret references, all three or none) the channel runs
   over mutual TLS 1.3: each replica presents its certificate, accepts only
   peers the CA signed, and checks that the server's certificate carries
-  `tls_server_name` (replicas are dialled by IP). The HMAC signatures stay
+  `tls_server_name` (replicas are dialled by IP). The three are PEM, read
+  over several lines (files, or OpenBao/Vault fields): the certificate file
+  may carry intermediates after the leaf, the CA file may bundle several
+  CAs, the key is one PEM block (PKCS #8, EC or RSA; ECDSA and Ed25519
+  tested) and its file must not be readable by group or others (`chmod
+  600`). `check-config` also refuses a certificate outside its validity.
+  v0.16.0 read them with the one-line secret reader and refused every real
+  PEM file; fixed in v0.16.1. The HMAC signatures stay
   (they bind each answer to its request and refuse replays). The cost is a
   handshake per kept-alive connection, then AES-GCM on bodies of a few
   hundred bytes; `BenchmarkAdmission/forwarded-mtls` measures it (not

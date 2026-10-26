@@ -104,13 +104,23 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 		if len(s.HASecret) < ha.MinSecret {
 			return s, fmt.Errorf("ha secret_file: the shared secret must be at least %d bytes", ha.MinSecret)
 		}
+		// PEM over several lines: not the one-line reader of tokens.
 		for _, f := range []struct {
-			name, ref string
-			dst       *string
-		}{{"ha tls_cert_file", c.HA.TLSCertFile, &s.HATLSCert}, {"ha tls_key_file", c.HA.TLSKeyFile, &s.HATLSKey}, {"ha tls_ca_file", c.HA.TLSCAFile, &s.HATLSCA}} {
-			if err := get(f.name, f.ref, f.dst); err != nil {
-				return s, err
+			name, ref, kind string
+			dst             *string
+		}{
+			{"ha tls_cert_file", c.HA.TLSCertFile, secret.PEMCertificates, &s.HATLSCert},
+			{"ha tls_key_file", c.HA.TLSKeyFile, secret.PEMPrivateKey, &s.HATLSKey},
+			{"ha tls_ca_file", c.HA.TLSCAFile, secret.PEMCertificates, &s.HATLSCA},
+		} {
+			if f.ref == "" {
+				continue
 			}
+			b, err := res.ResolvePEM(ctx, f.ref, f.kind)
+			if err != nil {
+				return s, fmt.Errorf("%s: %w", f.name, err)
+			}
+			*f.dst = string(b)
 		}
 		if s.HATLSCert != "" {
 			// check-config proves the pair and the CA parse.
