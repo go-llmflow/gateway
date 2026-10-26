@@ -1074,7 +1074,7 @@ Enforced:
 - **OpenID Connect access tokens on the inference API.** With a `jwt { … }`
   block, a bearer token that has the JWS compact shape (three dot-separated
   segments) is verified by [`github.com/go-authn/oidc`](https://github.com/go-authn/oidc)
-  v0.4.2 (fuzzed in its own repository; v0.4.2 refuses an `nbf` that wrapped
+  v0.4.3 (fuzzed in its own repository; since v0.4.2 it refuses an `nbf` that wrapped
   past the int64 range and RSA exponents below 3) instead of being looked up
   as a virtual key. That library does the
   JOSE work and its refusals: no `alg: none`, no HMAC algorithm (so the
@@ -1299,8 +1299,17 @@ gateway built with Go 1.27.3. go-authn/oidc v0.4.2, go-authn/rp v0.1.2 and
 go-volumes/s3 v0.2.0 declare `go 1.27.1`: built with that toolchain, nine
 standard-library vulnerabilities are reachable from them (net/http, crypto/tls,
 crypto/x509; fixed in 1.27.2 and 1.27.3). The gateway's binary is not affected
-because it is built with 1.27.3, but those modules should raise their `go`
-line. go-authn/scim v0.1.0 is clean.
+because it is built with 1.27.3. Measured with go-fleettools/modfloor, every
+fleet module in the gateway's build graph now declares `go 1.27.3`, and the
+gateway requires those releases:
+
+- go-authn/oidc v0.4.3 (#18), go-authn/rp v0.1.3 (#7), go-authn/scim v0.1.1 (#4);
+- go-volumes/interface #8 and go-volumes/pool #14 (untagged), go-volumes/s3 v0.2.1 (#17);
+- go-llmflow/pii v0.2.1 (#3);
+- go-gitsafe/gitsafe v0.17.1, which already declared it.
+
+A consumer building with `GOTOOLCHAIN=local` on an older toolchain is now
+refused instead of building unpatched code.
 
 **Residual risks.**
 
