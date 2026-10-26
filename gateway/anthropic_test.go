@@ -70,6 +70,11 @@ func (f *fakeAnthropic) serve(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"type":"error","error":{"type":"rate_limit_error","message":"slow down"},"request_id":"req_test"}`)
 		return
 	}
+	if r.URL.Path == "/v1/messages/count_tokens" {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"input_tokens":42}`)
+		return
+	}
 	if stream, _ := body["stream"].(bool); stream {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"m\",\"usage\":%s}}\n\n", strings.Replace(fakeAnthUsage, `"output_tokens":5`, `"output_tokens":1`, 1))
@@ -401,6 +406,81 @@ func TestAnthropicFallbackToLocal(t *testing.T) {
 		if r.Model == "llama" && r.Unit != "" {
 			t.Errorf("local model charged in %q", r.Unit)
 		}
+	}
+}
+
+// /v1/messages/count_tokens: Anthropic's count with the organisation's key
+// (masked before egress, not charged, its 429 not a messages back-off), or
+// vLLM's own count for a local model; an organisation not allowed sees 404.
+func TestCountTokens(t *testing.T) {
+	e, up, vllm, _ := newAnthropicEnv(t, "")
+	_, keyA := e.newKey("etabA")
+	_, keyC := e.newKey("etabC")
+	count := func(model string) string {
+		return `{"model":"` + model + `","priority":-5,"cache_salt":"mine","chat_template_kwargs":{"enable_thinking":false},` +
+			`"messages":[{"role":"user","content":"mail jean.dupont@example.fr"}]}`
+	}
+	resp := e.do("POST", "/v1/messages/count_tokens", keyA, count("claude"), "Anthropic-Version", "2023-06-01")
+	if body := readAll(t, resp); resp.StatusCode != 200 || !strings.Contains(body, `"input_tokens":42`) {
+		t.Fatalf("anthropic count: %d %s", resp.StatusCode, body)
+	}
+	got := up.last(t)
+	if got.Path != "/v1/messages/count_tokens" || got.Header.Get("X-Api-Key") != keyAlpha || got.Body["model"] != "claude-sonnet-5-5" {
+		t.Errorf("at the provider: path %q key %q model %v", got.Path, got.Header.Get("X-Api-Key"), got.Body["model"])
+	}
+	for _, f := range []string{"priority", "cache_salt"} {
+		if _, ok := got.Body[f]; ok {
+			t.Errorf("field %s reached the provider", f)
+		}
+	}
+	if text, _ := json.Marshal(got.Body["messages"]); strings.Contains(string(text), "jean.dupont@example.fr") {
+		t.Errorf("PII left the site in a count: %s", text)
+	}
+	n := up.count()
+	if resp := e.do("POST", "/v1/messages/count_tokens", keyC, count("claude")); readAll(t, resp) == "" || resp.StatusCode != 404 || up.count() != n {
+		t.Errorf("etabC: %d (want 404), provider calls %d → %d", resp.StatusCode, n, up.count())
+	}
+
+	// A local model: vLLM's own count, with its key, without cache_salt.
+	resp = e.do("POST", "/v1/messages/count_tokens", keyA, count("llama"))
+	if body := readAll(t, resp); resp.StatusCode != 200 || !strings.Contains(body, `"input_tokens":17`) {
+		t.Fatalf("vllm count: %d %s", resp.StatusCode, body)
+	}
+	if v := vllm.last(); v.Path != "/v1/messages/count_tokens" || v.Body["cache_salt"] != nil || v.Body["priority"] != nil ||
+		v.Body["chat_template_kwargs"] == nil || !strings.HasPrefix(v.Header.Get("Authorization"), "Bearer ") {
+		t.Errorf("at vLLM: path %q body %v auth %q", v.Path, v.Body, v.Header.Get("Authorization"))
+	}
+
+	// Separate limits: a 429 on a count does not stop the messages, and a
+	// messages back-off does not stop the counts.
+	up.set(429, "30")
+	if resp := e.do("POST", "/v1/messages/count_tokens", keyA, count("claude")); readAll(t, resp) == "" || resp.StatusCode != 429 || resp.Header.Get("Retry-After") != "30" {
+		t.Fatalf("count 429: %d retry-after %q", resp.StatusCode, resp.Header.Get("Retry-After"))
+	}
+	up.set(0, "")
+	if resp := e.do("POST", "/v1/messages", keyA, anthMsg(false)); readAll(t, resp) == "" || resp.StatusCode != 200 {
+		t.Fatalf("messages after a count 429: %d", resp.StatusCode)
+	}
+	up.set(429, "30")
+	readAll(t, e.do("POST", "/v1/messages", keyA, anthMsg(false)))
+	up.set(0, "")
+	if resp := e.do("POST", "/v1/messages/count_tokens", keyA, count("claude")); readAll(t, resp) == "" || resp.StatusCode != 200 {
+		t.Fatalf("count during a messages back-off: %d", resp.StatusCode)
+	}
+
+	e.srv.Close(context.Background())
+	counts := 0
+	for _, r := range e.st.Records() {
+		if r.Status != 200 || r.CompletionTokens != 0 {
+			continue // a message (5 tokens out), or a refusal
+		}
+		counts++
+		if r.Cost != 0 || r.PromptTokens != 0 || r.Estimated {
+			t.Errorf("a count was charged: %+v", r)
+		}
+	}
+	if counts != 3 {
+		t.Errorf("%d count records, want 3", counts)
 	}
 }
 

@@ -46,16 +46,29 @@ const (
 	// into a JSON view for the shared pipeline (see package gateway) and
 	// rebuilds the form for vLLM.
 	Transcriptions
+	// CountTokens is /v1/messages/count_tokens (Anthropic Messages shape,
+	// answer {"input_tokens": N}). References opened 2026-10-26:
+	// platform.claude.com/docs/en/build-with-claude/token-counting ("free to
+	// use", rate limits separate from message creation);
+	// code.claude.com/docs/en/llm-gateway-protocol (optional; Claude Code
+	// estimates from characters without it); vLLM v0.32.0
+	// vllm/entrypoints/anthropic/serving.py count_tokens (renders the chat
+	// template and counts the prompt token ids). Nothing is generated.
+	CountTokens
 )
 
 // Metered reports whether the endpoint's work is charged: when usage is
 // missing, the gateway estimates it for a metered endpoint only.
-func (ep Endpoint) Metered() bool { return ep != Tokenize && ep != Detokenize }
+func (ep Endpoint) Metered() bool { return !ep.counting() }
 
 // Guarded reports whether the guardrails apply. Tokenization sends the text
 // to vLLM's API server only (no model runs) and returns token ids; masking
-// it would only make the count wrong.
-func (ep Endpoint) Guarded() bool { return ep != Tokenize && ep != Detokenize }
+// it would only make the count wrong. (A count sent to an external provider
+// is still masked before egress: package gateway decides that.)
+func (ep Endpoint) Guarded() bool { return !ep.counting() }
+
+// counting reports the endpoints that only count tokens.
+func (ep Endpoint) counting() bool { return ep == Tokenize || ep == Detokenize || ep == CountTokens }
 
 // ErrStateful refuses Responses features that keep state in vLLM.
 //
@@ -85,6 +98,12 @@ func RewriteFor(ep Endpoint, body []byte, resolve func(model string) (string, er
 		// No cache_salt field there (vllm/entrypoints/serve/tokenize), but
 		// chat messages are rendered, media included: their uuids are scoped.
 		return rewritePlain(body, resolve, Isolation{ScopeUUID: iso.ScopeUUID}, "messages")
+	case CountTokens:
+		// No cache_salt (vLLM's AnthropicCountTokensRequest has none, and
+		// Anthropic refuses it); the client's engine fields are stripped.
+		// chat_template_kwargs stays, as on /v1/messages: the count is of
+		// the prompt the same request would render.
+		return rewritePlain(body, resolve, Isolation{})
 	case Transcriptions:
 		return rewriteTranscription(body, resolve)
 	default:
@@ -191,7 +210,7 @@ func ParseUsageFor(ep Endpoint, body []byte) (Usage, bool) {
 		return parseRerankUsage(body)
 	case Transcriptions:
 		return parseTranscriptionUsage(body)
-	case Tokenize, Detokenize:
+	case Tokenize, Detokenize, CountTokens:
 		return Usage{}, true
 	default:
 		return ParseUsage(body)

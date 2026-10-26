@@ -164,7 +164,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			if g == nil || g.cfg.Class == config.Guard || !s.budget.modelAllowed(key.Team, m) || !externalVisible(g, key) {
 				return "", errUnknownModel
 			}
-			if g.ext != nil && ep != openai.Messages {
+			if g.ext != nil && ep != openai.Messages && ep != openai.CountTokens {
 				return "", errExternalEndpoint
 			}
 			return g.cfg.UpstreamModel, nil
@@ -215,7 +215,10 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		// Guardrails, last of the checks before vLLM: a guard model costs
 		// GPU time, not spent on a request refused for cheaper reasons.
 		var guards []*guardrail
-		if ep.Guarded() {
+		// A count sent to an external provider still carries the prompt off
+		// the site: it is masked like the request it counts (which also
+		// makes the count that of the prompt actually sent).
+		if ep.Guarded() || g.ext != nil {
 			guards, err = s.guardsFor(key)
 		}
 		if err != nil {
@@ -376,7 +379,11 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		ctx, upSpan := s.trace.tracer.Start(ctx, "upstream", trace.WithSpanKind(trace.SpanKindClient))
 		// For an external provider: the organisation (its key) and the
 		// client's Anthropic headers, filtered when the request is built.
-		ctx = withEgress(ctx, clientEgress(r, key.Org))
+		eg := clientEgress(r, key.Org)
+		// Counting has its own rate limits upstream: the messages back-off
+		// neither stops it nor is set by it.
+		eg.count = ep == openai.CountTokens
+		ctx = withEgress(ctx, eg)
 		defer upSpan.End()
 		var resp *http.Response
 		sendOnce := func() error {
@@ -543,7 +550,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		}
 		if resp.StatusCode < 300 {
 			usage, haveUsage = openai.ParseUsageFor(ep, data)
-			if rq != nil && rq.hasStage("post") {
+			if rq != nil && ep.Guarded() && rq.hasStage("post") {
 				// The work is done and charged whatever the guards say.
 				guarded, gerr := s.post(r.Context(), rq, data)
 				if gerr != nil {
@@ -590,7 +597,7 @@ func (s *Server) sendTyped(ctx context.Context, g *group, path string, body []by
 	if g.ext != nil {
 		// The provider asked this organisation to wait, or its workspace
 		// is shared: nothing leaves.
-		if _, err := g.ext.wait(eg.org, s.now()); err != nil {
+		if _, err := g.ext.wait(eg.org, s.now()); err != nil && !(eg.count && errors.Is(err, errBackoff)) {
 			return nil, nil, time.Now(), err
 		}
 	}
@@ -649,7 +656,7 @@ func (s *Server) sendTyped(ctx context.Context, g *group, path string, body []by
 			// 429/529, never a cooldown of the upstream (its limits are per
 			// organisation and workspace, and the other institutions' keys
 			// are not affected).
-			if other := g.ext.observe(eg.org, resp, s.now()); other != "" {
+			if other := g.ext.observe(eg.org, resp, s.now(), !eg.count); other != "" {
 				s.log.Error("two organisations reached the same provider workspace: their prompt caches are shared; both are refused until each has its own key",
 					"model", g.cfg.Name, "org", eg.org, "other_org", other)
 			}

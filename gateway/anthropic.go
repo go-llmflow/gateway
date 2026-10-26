@@ -117,8 +117,9 @@ func (e *extRuntime) wait(org string, now time.Time) (time.Duration, error) {
 }
 
 // observe reads an answer: the workspace it was served from, and a back-off
-// on 429 and 529. It reports a workspace newly found shared.
-func (e *extRuntime) observe(org string, resp *http.Response, now time.Time) (sharedWith string) {
+// on 429 and 529 when backoff is set (not for token counting, whose limits
+// are separate). It reports a workspace newly found shared.
+func (e *extRuntime) observe(org string, resp *http.Response, now time.Time, backoff bool) (sharedWith string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if ws := resp.Header.Get("Anthropic-Workspace-Id"); ws != "" && e.isolated {
@@ -128,7 +129,7 @@ func (e *extRuntime) observe(org string, resp *http.Response, now time.Time) (sh
 		}
 		e.wsOrg[ws], e.ws[org] = org, ws
 	}
-	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == 529 {
+	if backoff && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == 529) {
 		d := defaultBackoff
 		if s, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); err == nil && s >= 0 {
 			d = time.Duration(s) * time.Second
@@ -149,6 +150,8 @@ type egress struct {
 	version  string
 	betas    []string
 	external bool
+	// count marks /v1/messages/count_tokens.
+	count bool
 }
 
 type egressKey struct{}

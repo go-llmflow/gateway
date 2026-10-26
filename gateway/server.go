@@ -419,10 +419,12 @@ func (s *Server) Handler() http.Handler {
 	// responses would be shared by every tenant; see openai.ErrStateful).
 	mux.Handle("POST /v1/responses", inf(s.proxyFor(openai.Responses, "/v1/responses")))
 	// Anthropic Messages, served by vLLM itself (no translation here).
-	// /v1/messages/count_tokens is not routed: vLLM computes it outside the
-	// generation path, so it would escape rate limits for nothing a client
-	// needs from a local model.
 	mux.Handle("POST /v1/messages", inf(s.proxyFor(openai.Messages, "/v1/messages")))
+	// Token counting (Claude Code calls it, and estimates from characters
+	// without it): vLLM's own count of the rendered prompt, or Anthropic's
+	// with the organisation's key. Authenticated and rate limited like
+	// everything else, not charged.
+	mux.Handle("POST /v1/messages/count_tokens", inf(s.proxyFor(openai.CountTokens, "/v1/messages/count_tokens")))
 	// vLLM's rerank (score models), Jina/Cohere v1 and Cohere v2 shapes.
 	mux.Handle("POST /v1/rerank", inf(s.proxyFor(openai.Rerank, "/v1/rerank")))
 	mux.Handle("POST /v2/rerank", inf(s.proxyFor(openai.Rerank, "/v2/rerank")))
