@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/go-llmflow/gateway/slurm"
 	"github.com/go-llmflow/gateway/store"
 )
 
@@ -50,7 +53,18 @@ type reportBundle struct {
 	By                 map[string][]store.ReportRow // per export dimension
 	Days               []store.ReportRow
 	Totals             []unitTotal
-	Batch              map[string]float64 // Slurm batch GPU-hours per org; nil without input
+	Batch              *batchInput // Slurm batch GPU-hours per org; nil without input
+}
+
+// inferenceByOrg is the GPU-hours (not a currency) per org.
+func (b *reportBundle) inferenceByOrg() map[string]float64 {
+	out := map[string]float64{}
+	for _, r := range b.By["org"] {
+		if r.Unit == "" {
+			out[r.Org] += r.Cost
+		}
+	}
+	return out
 }
 
 func (s *Server) buildBundle(r *http.Request, p *principal, from, to time.Time) (*reportBundle, error) {
@@ -127,9 +141,9 @@ func downloadName(from, to time.Time, ext string) string {
 func (s *Server) exportReport(w http.ResponseWriter, r *http.Request, p *principal) {
 	q := r.URL.Query()
 	format := q.Get("format")
-	status, size, rows := http.StatusOK, 0, 0
+	status, size, rows, batchSource := http.StatusOK, 0, 0, ""
 	defer func() {
-		after, _ := json.Marshal(map[string]any{"format": format, "bytes": size, "rows": rows})
+		after, _ := json.Marshal(map[string]any{"format": format, "bytes": size, "rows": rows, "slurm": batchSource})
 		addr, _ := clientAddrOf(r)
 		ip := ""
 		if addr.IsValid() {
@@ -190,7 +204,26 @@ func (s *Server) exportReport(w http.ResponseWriter, r *http.Request, p *princip
 			storeError(w, err)
 			return
 		}
-		b.Batch = s.batchByOrg(r, p, from, to)
+		var upload []byte
+		if r.Method == http.MethodPost {
+			if upload, err = readUpload(w, r); err != nil {
+				fail(http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		if b.Batch, err = s.batch(p, upload); err != nil {
+			if upload != nil {
+				fail(http.StatusBadRequest, clip(err.Error(), 200))
+			} else {
+				status = http.StatusInternalServerError
+				s.log.Error("export: slurm.sreport_file", "err", err)
+				apiError(w, status, "server_error", "the configured Slurm report could not be read")
+			}
+			return
+		}
+		if b.Batch != nil {
+			batchSource = b.Batch.Source
+		}
 		for _, d := range exportDims {
 			rows += len(b.By[d])
 		}
@@ -220,8 +253,15 @@ func (s *Server) exportReport(w http.ResponseWriter, r *http.Request, p *princip
 	_, _ = w.Write(out.Bytes())
 }
 
-// batchByOrg is the Slurm batch usage per org, when an input is set (#68
-// part 4); nil otherwise.
-func (s *Server) batchByOrg(_ *http.Request, _ *principal, _, _ time.Time) map[string]float64 {
-	return nil
+// readUpload reads a POSTed sreport output: text, at most slurm.MaxBytes.
+func readUpload(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if mt != "text/plain" && mt != "text/csv" && mt != "application/octet-stream" {
+		return nil, errors.New("the body is an sreport output: text/plain, text/csv or application/octet-stream")
+	}
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, slurm.MaxBytes))
+	if err != nil {
+		return nil, fmt.Errorf("the Slurm report is larger than %d bytes", slurm.MaxBytes)
+	}
+	return data, nil
 }

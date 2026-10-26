@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-llmflow/gateway/slurm"
 )
 
 // The admin UI: server-rendered HTML, no JavaScript, no third-party asset.
@@ -33,6 +35,12 @@ const uiCSP = "default-src 'none'; style-src 'self'; img-src 'self'; form-action
 
 // maxUIForm bounds a posted form.
 const maxUIForm = 16 << 10
+
+// uiUploadPath is the one UI form with a file, bounded by maxUIUpload.
+const (
+	uiUploadPath = "/ui/reports/reconcile"
+	maxUIUpload  = slurm.MaxBytes + 64<<10
+)
 
 func (s *Server) uiRoutes(mux *http.ServeMux) {
 	wrap := func(f http.HandlerFunc) http.Handler { return s.withClientAddr(s.cfg.Routes.Admin, f) }
@@ -60,6 +68,7 @@ func (s *Server) uiRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /ui/spend", page(s.uiSpend))
 	mux.Handle("GET /ui/reports", page(s.uiReports))
 	mux.Handle("GET /ui/reports/export", page(s.uiExport))
+	mux.Handle("POST "+uiUploadPath, page(s.uiReconcile))
 	mux.Handle("GET /ui/fairshare", page(s.uiFairshare))
 	mux.Handle("GET /ui/audit", page(s.uiAudit))
 	mux.Handle("POST /ui/audit/verify", page(s.uiVerify))
@@ -77,14 +86,24 @@ func (s *Server) uiPrincipal(w http.ResponseWriter, r *http.Request) (*principal
 	}
 	if r.Method == http.MethodPost {
 		mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-		if err != nil || mt != "application/x-www-form-urlencoded" {
+		switch {
+		case r.URL.Path == uiUploadPath && err == nil && mt == "multipart/form-data":
+			// The one form that carries a file (a Slurm report): bounded,
+			// held in memory (no temporary file).
+			r.Body = http.MaxBytesReader(w, r.Body, maxUIUpload)
+			if err := r.ParseMultipartForm(maxUIUpload); err != nil {
+				http.Error(w, "form too large or malformed", http.StatusBadRequest)
+				return nil, "", false
+			}
+		case err != nil || mt != "application/x-www-form-urlencoded":
 			http.Error(w, "a form is expected", http.StatusUnsupportedMediaType)
 			return nil, "", false
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxUIForm)
-		if err := r.ParseForm(); err != nil {
-			http.Error(w, "form too large or malformed", http.StatusBadRequest)
-			return nil, "", false
+		default:
+			r.Body = http.MaxBytesReader(w, r.Body, maxUIForm)
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, "form too large or malformed", http.StatusBadRequest)
+				return nil, "", false
+			}
 		}
 		// The token travels in the form; the session check reads it from
 		// the header the API uses.
@@ -152,6 +171,11 @@ func (s *Server) callAdminRecorded(r *http.Request, p *principal, pattern string
 	}
 	method, _, _ := strings.Cut(pattern, " ")
 	var rd io.Reader = http.NoBody
+	ctype := "application/json"
+	if raw, ok := body.([]byte); ok {
+		// A file, passed as it came (a Slurm report).
+		rd, ctype, body = bytes.NewReader(raw), "text/plain", nil
+	}
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
@@ -168,7 +192,7 @@ func (s *Server) callAdminRecorded(r *http.Request, p *principal, pattern string
 		return &uiRecorder{status: http.StatusBadRequest}
 	}
 	req.RemoteAddr = r.RemoteAddr
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", ctype)
 	if id := r.Header.Get("X-Request-Id"); id != "" {
 		req.Header.Set("X-Request-Id", id)
 	}

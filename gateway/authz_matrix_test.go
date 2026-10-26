@@ -137,6 +137,7 @@ func matrixRows() []matrixRow {
 		{"GET /admin/spend", "GET", p("/admin/spend" + span), "", nil, outsiders},
 		{"GET /admin/usage.csv", "GET", p("/admin/usage.csv" + span), "", nil, outsiders},
 		{"GET /admin/export", "GET", p("/admin/export" + span + "&format=csv"), "", nil, outsiders},
+		{"POST /admin/export", "POST", p("/admin/export" + span + "&format=csv"), "", nil, outsiders},
 		{"GET /admin/fairshare", "GET", p("/admin/fairshare"), "", nil, outsiders},
 		{"GET /admin/audit", "GET", p("/admin/audit"), "", proxyViews, nil},
 		{"POST /admin/audit/verify", "POST", p("/admin/audit/verify"), "", proxyViews, nil},

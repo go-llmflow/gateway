@@ -99,7 +99,7 @@ func TestPDFSample(t *testing.T) {
 	}
 	day := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	b := &reportBundle{From: day, To: day.AddDate(0, 0, 26), PrevFrom: day.AddDate(0, 0, -26), Generated: day.AddDate(0, 0, 26),
-		By: map[string][]store.ReportRow{}, Batch: map[string]float64{"etabA": 1200, "etabB": 300}}
+		By: map[string][]store.ReportRow{}, Batch: &batchInput{ByOrg: map[string]float64{"etabA": 1200, "etabB": 300}, Period: "2026-10-01T00:00:00 - 2026-10-26T23:59:59", Source: "file"}}
 	var base []store.ReportRow
 	for i, org := range []string{"etabA", "etabB", "etabC"} {
 		for j, lab := range []string{"physics", "chemistry", "biology", ""} {
@@ -269,7 +269,7 @@ func FuzzExportWriters(f *testing.F) {
 			Day: "2026-01-01", Unit: unit, Requests: 1, Cost: cost}
 		b := &reportBundle{From: day, To: day.AddDate(0, 0, 2), PrevFrom: day.AddDate(0, 0, -2), Generated: day,
 			By: map[string][]store.ReportRow{}, Days: []store.ReportRow{row}, Totals: []unitTotal{{Unit: unit, Cost: cost, Requests: 1}},
-			Batch: map[string]float64{label: 2}}
+			Batch: &batchInput{ByOrg: map[string]float64{label: 2}, Period: label, Source: "upload"}}
 		for _, d := range exportDims {
 			b.By[d] = []store.ReportRow{row}
 		}

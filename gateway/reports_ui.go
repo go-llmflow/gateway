@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/go-llmflow/gateway/slurm"
 	"github.com/go-llmflow/gateway/store"
 )
 
@@ -59,6 +61,9 @@ type reportsData struct {
 	Filters                    []reportFilter
 	Exports                    []reportFilter // Dim = label, Remove = link
 	Sections                   []reportSection
+	Upload                     string // the reconciliation form's action
+	Recon                      []reconLine
+	ReconNote                  string
 }
 
 // uiExport downloads an export of GET /admin/export (audited there).
@@ -147,6 +152,52 @@ func keep(rows []store.ReportRow, filters map[string]string) []store.ReportRow {
 }
 
 func (s *Server) uiReports(w http.ResponseWriter, r *http.Request, p *principal, csrf string) {
+	s.reportsPage(w, r, p, csrf, nil)
+}
+
+// uiReconcile takes an uploaded sreport output: the Reports page with the
+// reconciliation table (format html), or an XLSX or PDF export with it.
+func (s *Server) uiReconcile(w http.ResponseWriter, r *http.Request, p *principal, csrf string) {
+	var upload []byte
+	if fhs := r.MultipartForm.File["sreport"]; len(fhs) == 1 {
+		f, err := fhs[0].Open()
+		if err == nil {
+			upload, err = io.ReadAll(io.LimitReader(f, slurm.MaxBytes+1))
+			f.Close()
+		}
+		if err != nil || len(upload) > slurm.MaxBytes {
+			s.render(w, "reports", view{Title: "Reports", User: p.name, CSRF: csrf, Error: "the Slurm report could not be read (at most 1 MiB)"})
+			return
+		}
+	}
+	if upload == nil {
+		s.render(w, "reports", view{Title: "Reports", User: p.name, CSRF: csrf, Error: "choose an sreport output to upload"})
+		return
+	}
+	switch f := r.PostForm.Get("format"); f {
+	case FormatXLSX, FormatPDF:
+		q := r.URL.Query()
+		v := url.Values{"from": {q.Get("from")}, "to": {q.Get("to")}, "format": {f}}
+		rec := s.callAdminRecorded(r, p, "POST /admin/export", "/admin/export", v, upload, nil)
+		if rec.status != http.StatusOK {
+			s.render(w, "reports", view{Title: "Reports", User: p.name, CSRF: csrf, Error: apiMessage(rec.body.Bytes())})
+			return
+		}
+		for _, k := range []string{"Content-Type", "Content-Disposition"} {
+			w.Header().Set(k, rec.Header().Get(k))
+		}
+		_, _ = w.Write(rec.body.Bytes())
+	default:
+		s.reportsPage(w, r, p, csrf, upload)
+	}
+}
+
+// reconLine is a row of the page's reconciliation table.
+type reconLine struct {
+	Org, Inference, Batch, Share string
+}
+
+func (s *Server) reportsPage(w http.ResponseWriter, r *http.Request, p *principal, csrf string, upload []byte) {
 	q := r.URL.Query()
 	now := s.now().UTC()
 	today := now.Truncate(24 * time.Hour)
@@ -219,6 +270,7 @@ func (s *Server) uiReports(w http.ResponseWriter, r *http.Request, p *principal,
 		data.Filters = append(data.Filters, reportFilter{Dim: d, Value: labelOr(filters[d]), Raw: filters[d], Remove: link(from, to, group, rest)})
 	}
 	data.From, data.To = from.Format("2006-01-02"), to.Format("2006-01-02")
+	data.Upload = uiUploadPath + "?" + url.Values{"from": {data.From}, "to": {data.To}, "group": {group}}.Encode()
 	for _, f := range []string{FormatCSV, FormatXLSX, FormatPDF} {
 		data.Exports = append(data.Exports, reportFilter{Dim: strings.ToUpper(f),
 			Remove: "/ui/reports/export?" + url.Values{"from": {data.From}, "to": {data.To}, "format": {f}}.Encode()})
@@ -344,6 +396,44 @@ func (s *Server) uiReports(w http.ResponseWriter, r *http.Request, p *principal,
 		sec.Bars = charts.Bars(title+" against "+data.PrevFrom+" to "+data.PrevTo, sec.Unit, bars)
 		sec.Series = charts.Series(sec.Unit+" per day, "+data.From+" to "+data.To, sec.Unit, points)
 		data.Sections = append(data.Sections, sec)
+	}
+	// Reconciliation with Slurm batch usage, when an input is at hand.
+	b, err := s.batch(p, upload)
+	if err != nil {
+		msg := "the configured Slurm report could not be read"
+		if upload != nil {
+			msg = clip(err.Error(), 200)
+		} else {
+			s.log.Error("reports: slurm.sreport_file", "err", err)
+		}
+		s.render(w, "reports", view{Title: "Reports", User: p.name, CSRF: csrf, Error: msg, Data: data})
+		return
+	}
+	if b != nil {
+		orgRows, e := s.fetchReport(r, p, from, to, []string{"org"})
+		if e != "" {
+			s.render(w, "reports", view{Title: "Reports", User: p.name, CSRF: csrf, Error: e, Data: data})
+			return
+		}
+		inf := map[string]float64{}
+		for _, x := range orgRows {
+			if x.Unit == "" {
+				inf[x.Org] += x.Cost
+			}
+		}
+		for _, x := range reconcile(inf, b) {
+			l := reconLine{Org: labelOr(x.Org), Inference: fmtNum(x.Inference), Batch: fmtNum(x.Batch)}
+			if t := x.Inference + x.Batch; t > 0 {
+				l.Share = fmt.Sprintf("%.1f %%", 100*x.Inference/t)
+			}
+			data.Recon = append(data.Recon, l)
+		}
+		data.ReconNote = "Slurm report (" + b.Source + ")"
+		if b.Period != "" {
+			data.ReconNote += ", period " + b.Period
+		} else {
+			data.ReconNote += ", no period printed: check it covers this one"
+		}
 	}
 	s.render(w, "reports", view{Title: "Reports", User: p.name, CSRF: csrf, Data: data})
 }

@@ -113,6 +113,16 @@ organisation administrator sees their organisation only.</p>
 <td class="num">{{.Cost}}</td><td class="num">{{.Shared}}</td><td class="num">{{.Prev}}</td><td class="num">{{.Delta}}</td></tr>{{end}}</table>
 {{if .Truncated}}<p>{{.Truncated}} more rows not shown: export the report for all of them.</p>{{end}}
 {{end}}
+{{if .Data.Recon}}<h2>Reconciliation: inference and Slurm batch (GPU-hours)</h2>
+<p>{{.Data.ReconNote}}.</p>
+<table><tr><th>org</th><th>inference (GPU-hours)</th><th>batch (GPU-hours)</th><th>inference share</th></tr>
+{{range .Data.Recon}}<tr><td>{{.Org}}</td><td class="num">{{.Inference}}</td><td class="num">{{.Batch}}</td><td class="num">{{.Share}}</td></tr>{{end}}</table>{{end}}
+{{if .Data.Upload}}<fieldset><legend>Reconcile with Slurm batch usage</legend>
+<form method="post" action="{{.Data.Upload}}" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<label>Output of <code>sreport -P cluster AccountUtilizationByUser -T gres/gpu -t Hours start=… end=…</code> (at most 1 MiB)
+<input type="file" name="sreport" required></label>
+<label>As <select name="format"><option value="html">this page</option><option value="xlsx">XLSX</option><option value="pdf">PDF</option></select></label>
+<button>Reconcile</button></form></fieldset>{{end}}
 {{template "foot" .}}{{end}}
 
 {{define "fairshare"}}{{template "head" .}}
