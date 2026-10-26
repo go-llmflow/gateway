@@ -72,6 +72,18 @@ type slurmDiscovery struct {
 	stale   bool
 	ignored map[string]bool // foreign jobs already reported, by job id and reason
 	cap     atomic.Int64    // see publish
+	// ready: a poll succeeded and its members were reconciled at least
+	// once, so this replica knows the members (ha: it may own the pool).
+	ready atomic.Bool
+}
+
+// known reports whether the members are known (ready) and still read from
+// slurmrestd (fresh: not stale).
+func (d *slurmDiscovery) known() (ready, fresh bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	r := d.ready.Load()
+	return r, r && !d.stale
 }
 
 type slurmMember struct {
@@ -196,6 +208,7 @@ func (d *slurmDiscovery) poll(ctx context.Context) {
 	if d.stale {
 		d.s.log.Info("slurm: slurmrestd answers again", "model", model)
 	}
+	wasFresh := !d.stale && d.ready.Load()
 	d.lastOK, d.stale = now, false
 	want := map[string]candidate{}
 	for _, j := range jobs {
@@ -207,6 +220,12 @@ func (d *slurmDiscovery) poll(ctx context.Context) {
 	}
 	d.mu.Unlock()
 	d.maintain(ctx, now, want)
+	if !d.ready.Swap(true) || !wasFresh {
+		// Known (again): this replica may own the pool now.
+		if d.s.ha != nil {
+			d.s.ha.Poke()
+		}
+	}
 }
 
 // qualify applies the convention and the trust rules to one job. Called
@@ -496,8 +515,6 @@ func (s *Server) recomputeCapacity(pool string) {
 	defer s.capMu.Unlock()
 	p, ok := s.pools[pool].(elasticPool)
 	if !ok {
-		// A pool decided by its owner among replicas (ha) has a fixed C:
-		// the configuration refuses slurm discovery with an ha block.
 		return
 	}
 	c := 0
@@ -525,6 +542,12 @@ type elasticPool interface {
 	reserved() map[string]int
 }
 
+// A pool shared between replicas (ha): setCapacity is this replica's view,
+// which counts when it owns the pool; capacity and reserved are what the
+// owner decides with (its own, or the one it published with the epoch).
+func (h haPool) setCapacity(c int) int       { return h.n.SetCapacity(h.name, c) }
+func (h haPool) capacity() int               { return h.n.Capacity(h.name) }
+func (h haPool) reserved() map[string]int    { return h.n.Reserved(h.name) }
 func (l localPool) setCapacity(c int) int    { return l.p.SetCapacity(c) }
 func (l localPool) capacity() int            { return l.p.Capacity() }
 func (l localPool) reserved() map[string]int { return l.p.Reserved() }

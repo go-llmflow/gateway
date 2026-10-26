@@ -85,7 +85,7 @@ func (s *Server) buildHA(shares map[string]float64) error {
 		Instance: inst, Advertise: h.Advertise, Secret: []byte(s.secrets.HASecret), PeerNetworks: h.PeerNetworks,
 		LeaseTTL: h.LeaseTTL, Heartbeat: h.Heartbeat, ForwardTimeout: h.ForwardTimeout, UsagePersist: h.UsagePersist,
 		MaxRequest: s.cfg.Limits.MaxRequestDuration, RejectUnreachable: h.OnOwnerUnreachable == "reject",
-		Pools: specs, Now: s.now, Log: s.log,
+		Pools: specs, Now: s.now, Log: s.log, Membership: s.poolMembership,
 	}, hs)
 	if err != nil {
 		return err
@@ -98,6 +98,25 @@ func (s *Server) buildHA(shares map[string]float64) error {
 		s.pools[p.Name] = haPool{n: n, name: p.Name}
 	}
 	return nil
+}
+
+// poolMembership tells package ha whether this replica knows a pool's
+// members (#75): every replica runs its own Slurm discovery, with its own
+// health checks, for its own routing; only the owner's view sets C. A
+// replica takes a pool only once each of its Slurm-discovered models has
+// been read, and an owner whose slurmrestd stops answering (stale) yields
+// the pool to a replica that still reads it.
+func (s *Server) poolMembership(pool string) (ready, fresh bool) {
+	ready, fresh = true, true
+	for _, gn := range s.gorder {
+		g := s.groups[gn]
+		if g.disc == nil || g.cfg.Pool != pool {
+			continue
+		}
+		r, f := g.disc.known()
+		ready, fresh = ready && r, fresh && f
+	}
+	return ready, fresh
 }
 
 // startHA opens the internal listener and claims the leases.

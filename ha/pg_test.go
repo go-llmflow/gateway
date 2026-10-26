@@ -59,7 +59,7 @@ func TestPGPropertyOneOwnerPerEpoch(t *testing.T) { propertyOneOwnerPerEpoch(t, 
 func TestPGUsageWriteFenced(t *testing.T) {
 	st := pgStore(t)
 	ctx := context.Background()
-	l, err := st.ClaimLease(ctx, "p", "old", "127.0.0.1:1", 0, 50*time.Millisecond)
+	l, err := claimLease(st, ctx, "p", "old", "127.0.0.1:1", 0, 50*time.Millisecond)
 	if err != nil || l.Owner != "old" || l.Epoch != 1 {
 		t.Fatalf("%+v %v", l, err)
 	}
@@ -68,7 +68,7 @@ func TestPGUsageWriteFenced(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(80 * time.Millisecond)
-	l, err = st.ClaimLease(ctx, "p", "new", "127.0.0.1:2", 0, time.Minute)
+	l, err = claimLease(st, ctx, "p", "new", "127.0.0.1:2", 0, time.Minute)
 	if err != nil || l.Owner != "new" || l.Epoch != 2 {
 		t.Fatalf("takeover: %+v %v", l, err)
 	}
@@ -80,10 +80,12 @@ func TestPGUsageWriteFenced(t *testing.T) {
 		t.Fatalf("%+v %v", got, err)
 	}
 	// Renewal keeps the epoch; the old owner cannot renew.
-	if l, _ = st.ClaimLease(ctx, "p", "new", "127.0.0.1:2", 2, time.Minute); l.Epoch != 2 || l.Owner != "new" {
+	if l, _ = claimLease(st, ctx, "p", "new", "127.0.0.1:2", 2, time.Minute); l.Epoch != 2 || l.Owner != "new" {
 		t.Fatalf("renewal: %+v", l)
 	}
-	if l, _ = st.ClaimLease(ctx, "p", "old", "127.0.0.1:1", 1, time.Minute); l.Owner != "new" {
+	if l, _ = claimLease(st, ctx, "p", "old", "127.0.0.1:1", 1, time.Minute); l.Owner != "new" {
 		t.Fatalf("the old owner renewed a lease it lost: %+v", l)
 	}
 }
+
+func TestPGLeaseYield(t *testing.T) { testLeaseYield(t, pgStore(t)) }

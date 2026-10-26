@@ -146,7 +146,8 @@ preemption of the largest `(priority, arrival)`) with closed-loop clients:
 
 Without an `ha` block nothing changes: one replica, the fair-share state in
 its memory. With one, several replicas share the pools, and PostgreSQL stays
-the only shared component (no etcd, no Redis). Design and discussion:
+the only shared component (no etcd, no Redis). First released in v0.14.0;
+v0.13.1, tagged afterwards on a later commit, contains it too. Design and discussion:
 [#74](https://github.com/go-llmflow/gateway/issues/74).
 
 ```hcl
@@ -540,7 +541,7 @@ They do **not** go through the fair-share pool. A guard call is the gateway chec
 
 All guard answers are parsed defensively and fuzzed (`FuzzParseGuardAnswers`), as are the hold-back (`FuzzHoldback`: streamed in any pieces equals masked whole), the SSE rewriter (`FuzzStreamFilter`: no secret in any released string) and the request mapping (`FuzzMapRequest`).
 
-## Project attribution, labs and users (v0.13.0)
+## Project attribution, labs and users (v0.12.1)
 
 Coding clients do not say which project a request belongs to:
 
@@ -781,7 +782,7 @@ third-party asset is loaded.
 | Keys | list per team; create (the secret is shown **once**, on a page not cached), rotate with a grace period, revoke |
 | Budgets | budgets with spent and limit; set and delete |
 | Spend | GPU-hours (or a provider's currency), requests and tokens over a period, grouped by org, team, project, key, model, pool or tag |
-| Reports (since v0.13.0) | see below |
+| Reports (since v0.12.1) | see below |
 | Fair share | live state per pool: reservation, in flight, borrowing, LF and rank |
 | Audit | entries page by page, and a button that verifies the chain (status of the checkpoints and the anchor) |
 
@@ -806,7 +807,7 @@ its own; the two are never added together. The page reads
 sees their organisation only. The charts are inline SVG with presentation
 attributes only (no `style` attribute, no script), so the policy above is
 unchanged; every label is escaped. Every chart is drawn by
-[go-plot/plot](https://github.com/go-plot/plot) v0.3.0 (since v0.14.2) with
+[go-plot/plot](https://github.com/go-plot/plot) v0.3.0 (since v0.15.1; v0.13.0 to v0.15.0 used go-plot v0.2.0) with
 `ParseMath(false)` on the figure and `PlainText()` on every call that
 draws a name (tick labels, axis labels, titles). An org called
 `$\input{/etc/passwd}$`, `$5 and $6` or `<script>` therefore stays a
@@ -1365,7 +1366,13 @@ model "llama" {
 - Every membership change re-apportions the organisations' integer reservations with the same Hamilton method (`fairshare.Pool.SetCapacity`).
 - Every change is audited: `slurm.member_added`, `slurm.member_drained` (with the reason), `slurm.member_removed`, and `pool.capacity` (before, after, reservations).
 - Requests in flight keep their within-share or borrowing status.
-- Not yet with an `ha` block: a shared pool's C is fixed by its owner replica, so the configuration refuses the combination.
+
+**With an `ha` block (since v0.16.0).**
+- Every replica runs its own discovery and its own health checks, for its own routing. Publishing the healthy set through PostgreSQL was the alternative; it was not chosen because it ties every replica's routing to the owner's liveness and to PostgreSQL, and because what is healthy depends on the replica's network path to the instance.
+- Only the pool's owner's view sets C. The owner decides with it, and publishes C and the integer reservations with the lease's epoch (`llmflow_pool_capacity` shows the decided C on every replica). Forwarded decisions therefore use the owner's membership, and a replica that sees fewer instances still routes only to those it sees.
+- A replica takes a pool only after its discovery has read the members once. Until then, as after a takeover before that, requests are admitted at the lowest priority (or refused with `on_owner_unreachable = "reject"`), as when no owner answers.
+- An owner whose slurmrestd stays unreadable past `stale_after` yields: a replica that still reads the jobs takes the lease (epoch + 1) and stays quiet for one `lease_ttl`, until the previous owner's validity has surely ended. If no replica reads slurmrestd, the owner keeps the pool with its last known members.
+- Chaos (real PostgreSQL): the owner killed while a job joins (the survivor owns with the new C, epoch + 1); slurmrestd lost by the owner only (handover after 1.2 s, never two owners in ~950 samples, the test fails without the quiet period); two replicas that disagree (each routes to what it sees, the fair share is the owner's). The sum of the reservations never exceeded C in any sample.
 
 **Safety.**
 - Only the configured accounts and partitions (and users) are trusted. Without this, anyone could submit a job named `llmflow:llama:8000` and capture prompts.

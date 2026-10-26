@@ -89,6 +89,12 @@ type Config struct {
 	// OnDecide, if set, is called for every decision this node makes as
 	// an owner, with the pool's lock held (tests).
 	OnDecide func(pool string, epoch int64, instance string)
+	// Membership says whether this replica knows the pool's members
+	// (ready: its Slurm discovery has read them once; fresh: and still
+	// does, #75). A replica takes an expired lease only when ready, a
+	// yielded one only when fresh, and an owner that is no longer fresh
+	// yields. Nil: always ready and fresh (a pool of fixed upstreams).
+	Membership func(pool string) (ready, fresh bool)
 }
 
 // ErrNoOwner: no owner could be reached and the configuration refuses
@@ -150,8 +156,18 @@ type poolState struct {
 	owner      bool
 	epoch      int64
 	validUntil time.Time // monotonic
-	eng        *engine
-	lastSave   time.Time
+	// notBefore: after taking a yielded lease, the previous owner may
+	// still decide until its validity ends; this one waits a lease.
+	notBefore time.Time
+	eng       *engine
+	lastSave  time.Time
+	// capacity is C as this replica's own discovery sees it: the owner
+	// decides with it and publishes it with the lease.
+	capacity int
+	// published C and reservations (JSON) of the current owner, from the
+	// lease (-1: none).
+	pubCapacity int
+	pubReserved string
 	// the lease as last read
 	leaseOwner, leaseAddr string
 	leaseEpoch            int64
@@ -189,7 +205,7 @@ func New(cfg Config, st store.HAStore) (*Node, error) {
 		seqs: map[string]*atomic.Uint64{}, pools: map[string]*poolState{}, kick: make(chan struct{}, 1),
 	}
 	for _, p := range cfg.Pools {
-		n.pools[p.Name] = &poolState{spec: p, local: map[string]*localGrant{}}
+		n.pools[p.Name] = &poolState{spec: p, local: map[string]*localGrant{}, capacity: p.Capacity, pubCapacity: -1}
 		n.order = append(n.order, p.Name)
 	}
 	return n, nil
@@ -214,7 +230,7 @@ func newID() string {
 
 // valid: this node may decide for the pool now.
 func (ps *poolState) valid(now time.Time) bool {
-	return ps.owner && ps.eng != nil && now.Before(ps.validUntil)
+	return ps.owner && ps.eng != nil && now.Before(ps.validUntil) && !now.Before(ps.notBefore)
 }
 
 func (ps *poolState) observe(epoch int64) {
@@ -417,15 +433,22 @@ func (n *Node) leaseLoop(ctx context.Context) {
 
 // claim renews the lease this node holds, or takes an expired one.
 func (n *Node) claim(ctx context.Context, ps *poolState) {
+	ready, fresh := true, true
+	if n.cfg.Membership != nil {
+		ready, fresh = n.cfg.Membership(ps.spec.Name)
+		fresh = fresh && ready
+	}
 	ps.mu.Lock()
 	var held int64
 	if ps.owner {
 		held = ps.epoch
 	}
+	c, res := ps.capacity, ps.reservedJSON()
 	ps.mu.Unlock()
 	start := time.Now()
 	cctx, cancel := context.WithTimeout(ctx, n.cfg.LeaseTTL/3)
-	l, err := n.st.ClaimLease(cctx, ps.spec.Name, n.cfg.Instance, n.cfg.Advertise, held, n.cfg.LeaseTTL)
+	l, err := n.st.ClaimLease(cctx, store.Claim{Pool: ps.spec.Name, Owner: n.cfg.Instance, Addr: n.cfg.Advertise, Held: held, TTL: n.cfg.LeaseTTL,
+		MayTake: ready, MayTakeYielded: fresh, Yield: !fresh, Capacity: c, Reserved: res})
 	cancel()
 	if err != nil {
 		// The validity runs out by itself: no renewal, no decisions.
@@ -436,6 +459,10 @@ func (n *Node) claim(ctx context.Context, ps *poolState) {
 	ps.mu.Lock()
 	ps.observe(l.Epoch)
 	ps.leaseOwner, ps.leaseAddr, ps.leaseEpoch, ps.leaseLive = l.Owner, l.Addr, l.Epoch, l.Live
+	ps.pubCapacity, ps.pubReserved = l.Capacity, l.Reserved
+	if !l.Live {
+		ps.pubCapacity, ps.pubReserved = -1, ""
+	}
 	mine := l.Owner == n.cfg.Instance && l.Live
 	switch {
 	case !mine:
@@ -466,7 +493,11 @@ func (n *Node) claim(ctx context.Context, ps *poolState) {
 		n.cfg.Log.Warn("ha: cannot read the previous owner's state; not deciding", "pool", ps.spec.Name, "err", err)
 		return
 	}
-	eng := newEngine(ps.spec, l.Epoch, n.cfg.Now, n.cfg.MaxRequest, n.cfg.Heartbeat)
+	ps.mu.Lock()
+	spec := ps.spec
+	spec.Capacity = ps.capacity // this replica's own view of the members
+	ps.mu.Unlock()
+	eng := newEngine(spec, l.Epoch, n.cfg.Now, n.cfg.MaxRequest, n.cfg.Heartbeat)
 	wall := n.cfg.Now()
 	var margin int
 	for _, r := range rows {
@@ -485,7 +516,12 @@ func (n *Node) claim(ctx context.Context, ps *poolState) {
 	}
 	// This node's own grants, as a report.
 	eng.report(n.cfg.Instance, ps.localWire(), time.Now())
+	eng.pool.SetCapacity(ps.capacity) // changed while the state was read
 	ps.owner, ps.epoch, ps.eng, ps.validUntil, ps.lastSave = true, l.Epoch, eng, until, time.Now()
+	ps.notBefore = time.Time{}
+	if l.Quiet {
+		ps.notBefore = time.Now().Add(n.cfg.LeaseTTL)
+	}
 	n.cfg.Log.Info("ha: pool ownership taken", "pool", ps.spec.Name, "epoch", l.Epoch, "phantoms", margin)
 }
 
@@ -606,6 +642,97 @@ func (n *Node) Status(pool string) (owner bool, epoch int64) {
 	defer ps.mu.Unlock()
 	return ps.valid(time.Now()), ps.known
 }
+
+// reservedJSON is the integer reservations of the local C (Apportion: their
+// sum never exceeds C), as published with the lease.
+func (ps *poolState) reservedJSON() string {
+	names := make([]string, 0, len(ps.spec.Shares))
+	for k := range ps.spec.Shares {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	b, _ := json.Marshal(fairshare.Apportion(ps.capacity, names, ps.spec.Shares))
+	return string(b)
+}
+
+// SetCapacity sets the pool's C as this replica's discovery sees it (an
+// elastic pool, #75) and returns the previous value. It is what this
+// replica decides with when it owns the pool, and what it publishes with
+// the lease; another replica's view counts for nothing until it owns the
+// pool.
+func (n *Node) SetCapacity(pool string, c int) int {
+	ps := n.pools[pool]
+	if ps == nil {
+		return 0
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	old := ps.capacity
+	ps.capacity = max(c, 0)
+	if ps.eng != nil {
+		ps.eng.pool.SetCapacity(ps.capacity)
+	}
+	return old
+}
+
+// Capacity is the pool's C as decided: the engine's on the owner, the
+// published one elsewhere, this replica's own view when nothing is
+// published.
+func (n *Node) Capacity(pool string) int {
+	ps := n.pools[pool]
+	if ps == nil {
+		return 0
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	switch {
+	case ps.valid(time.Now()):
+		return ps.eng.pool.Capacity()
+	case ps.pubCapacity >= 0:
+		return ps.pubCapacity
+	}
+	return ps.capacity
+}
+
+// Reserved is the integer reservations as decided (see Capacity).
+func (n *Node) Reserved(pool string) map[string]int {
+	ps := n.pools[pool]
+	if ps == nil {
+		return nil
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.valid(time.Now()) {
+		return ps.eng.pool.Reserved()
+	}
+	src := ps.pubReserved
+	if ps.pubCapacity < 0 {
+		src = ps.reservedJSON()
+	}
+	var out map[string]int
+	_ = json.Unmarshal([]byte(src), &out)
+	return out
+}
+
+// Published is the lease as this replica last read it: the owner's epoch,
+// and the C and reservations published with it.
+func (n *Node) Published(pool string) store.Lease {
+	ps := n.pools[pool]
+	if ps == nil {
+		return store.Lease{}
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return store.Lease{Pool: pool, Owner: ps.leaseOwner, Addr: ps.leaseAddr, Epoch: ps.leaseEpoch, Live: ps.leaseLive,
+		Capacity: ps.pubCapacity, Reserved: ps.pubReserved}
+}
+
+// Instance names this replica's process.
+func (n *Node) Instance() string { return n.cfg.Instance }
+
+// Poke makes the lease loop look at the leases now (the membership became
+// known).
+func (n *Node) Poke() { n.poke() }
 
 // Snapshot returns the owner's view of a pool (nil on any other replica).
 func (n *Node) Snapshot(pool string) []fairshare.TeamStat {

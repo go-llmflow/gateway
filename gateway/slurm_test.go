@@ -404,7 +404,7 @@ model "m" {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	// Not with ha: a shared pool's capacity is its owner's, fixed.
+	// With ha too (since v0.16.0): the owner's view sets C.
 	withHA := ok + `
 store {
   kind      = "postgres"
@@ -417,7 +417,7 @@ ha {
   secret_file   = "/run/ha"
 }
 `
-	if _, err := config.Parse([]byte(withHA), "s.hcl"); err == nil || !strings.Contains(err.Error(), "not supported with an ha block") {
+	if _, err := config.Parse([]byte(withHA), "s.hcl"); err != nil {
 		t.Errorf("slurm discovery with ha: %v", err)
 	}
 	// capacity = 0 only for a pool fed by Slurm.

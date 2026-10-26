@@ -247,11 +247,59 @@ func TestLeaseRace(t *testing.T) {
 	testLeaseRace(t, NewMemStore(nil))
 }
 
+// claimLease is a claim of a replica that knows the pool's membership.
+func claimLease(st store.HAStore, ctx context.Context, pool, owner, addr string, held int64, ttl time.Duration) (store.Lease, error) {
+	return st.ClaimLease(ctx, store.Claim{Pool: pool, Owner: owner, Addr: addr, Held: held, TTL: ttl, MayTake: true, MayTakeYielded: true, Capacity: -1})
+}
+
+// The lease's membership rules (#75): a replica that does not know the
+// members takes no lease; an owner that cannot read them any more yields
+// to one that can, which keeps quiet for a lease; C and the reservations
+// are published with the epoch.
+func TestLeaseYield(t *testing.T) { testLeaseYield(t, NewMemStore(nil)) }
+
+func testLeaseYield(t *testing.T, st store.HAStore) {
+	ctx := context.Background()
+	c := func(owner string, held int64, ready, fresh bool) store.Lease {
+		t.Helper()
+		l, err := st.ClaimLease(ctx, store.Claim{Pool: "y", Owner: owner, Addr: "127.0.0.1:1", Held: held, TTL: time.Minute,
+			MayTake: ready, MayTakeYielded: fresh && ready, Yield: !fresh, Capacity: 4, Reserved: `{"a":2,"b":2}`})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	if l := c("blind", 0, false, false); l.Live {
+		t.Fatalf("a replica without membership took the lease: %+v", l)
+	}
+	l := c("a", 0, true, true)
+	if l.Owner != "a" || l.Epoch != 1 || l.Quiet || l.Capacity != 4 || l.Reserved != `{"a":2,"b":2}` {
+		t.Fatalf("first claim: %+v", l)
+	}
+	if l := c("b", 0, true, true); l.Owner != "a" {
+		t.Fatalf("a live lease that does not yield was taken: %+v", l)
+	}
+	// a loses its view of the members: it yields at its renewal.
+	if l := c("a", 1, true, false); l.Owner != "a" || !l.Yield || l.Epoch != 1 {
+		t.Fatalf("yielding renewal: %+v", l)
+	}
+	if l := c("stale", 0, true, false); l.Owner != "a" {
+		t.Fatalf("a replica as blind as the owner took its yielded lease: %+v", l)
+	}
+	l = c("b", 0, true, true)
+	if l.Owner != "b" || l.Epoch != 2 || !l.Quiet || l.Yield {
+		t.Fatalf("handover to a replica that sees the members: %+v", l)
+	}
+	if l := c("a", 1, true, false); l.Owner != "b" {
+		t.Fatalf("the yielding owner renewed a lease it handed over: %+v", l)
+	}
+}
+
 func testLeaseRace(t *testing.T, st store.HAStore) {
 	ctx := context.Background()
 	for round := range 20 {
 		pool := "race" + string(rune('a'+round))
-		if _, err := st.ClaimLease(ctx, pool, "old", "127.0.0.1:1", 0, time.Millisecond); err != nil {
+		if _, err := claimLease(st, ctx, pool, "old", "127.0.0.1:1", 0, time.Millisecond); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -261,7 +309,7 @@ func testLeaseRace(t *testing.T, st store.HAStore) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				l, err := st.ClaimLease(ctx, pool, "r"+string(rune('0'+i)), "127.0.0.1:2", 0, time.Minute)
+				l, err := claimLease(st, ctx, pool, "r"+string(rune('0'+i)), "127.0.0.1:2", 0, time.Minute)
 				if err != nil {
 					t.Error(err)
 				}
