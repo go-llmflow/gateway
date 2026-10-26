@@ -120,14 +120,10 @@ func Rewrite(body []byte, resolve func(model string) (string, error), iso Isolat
 		salt, _ := json.Marshal(iso.CacheSalt)
 		m["cache_salt"] = salt
 	}
-	if iso.ScopeUUID != nil {
-		if raw, ok := m["messages"]; ok {
-			scoped, err := scopeUUIDs(raw, iso.ScopeUUID)
-			if err != nil {
-				return nil, req, err
-			}
-			m["messages"] = scoped
-		}
+	// Chat and completions carry messages; embeddings also accept batched
+	// messages and chat messages in "input" (vLLM pooling/embed/protocol.py).
+	if err := scopeFields(m, iso.ScopeUUID, "messages", "input"); err != nil {
+		return nil, req, err
 	}
 
 	if raw, ok := m["stream"]; ok && !isNull(raw) {
@@ -179,24 +175,83 @@ func isNull(raw json.RawMessage) bool { return bytes.Equal(bytes.TrimSpace(raw),
 // ErrBadUUID reports a multimodal uuid that is not a string.
 var ErrBadUUID = errors.New(`a content part "uuid" must be a string`)
 
-// scopeUUIDs rewrites messages[].content[].uuid through scope. Messages
-// and parts are re-encoded from their parsed form, like the body.
-func scopeUUIDs(raw json.RawMessage, scope func(string) string) (json.RawMessage, error) {
-	var msgs []json.RawMessage
-	if err := json.Unmarshal(raw, &msgs); err != nil {
-		return raw, nil // not an array: vLLM will reject it; nothing to scope
+// scopeFields scopes the multimodal uuids of the named top-level members
+// (nothing when scope is nil).
+func scopeFields(m map[string]json.RawMessage, scope func(string) string, fields ...string) error {
+	if scope == nil {
+		return nil
 	}
-	changed := false
-	for i, mr := range msgs {
-		var msg map[string]json.RawMessage
-		if err := json.Unmarshal(mr, &msg); err != nil || msg == nil {
+	for _, f := range fields {
+		raw, ok := m[f]
+		if !ok {
 			continue
 		}
-		var parts []json.RawMessage
-		if err := json.Unmarshal(msg["content"], &parts); err != nil {
-			continue // string content carries no uuid
+		scoped, changed, err := scopeIn(raw, scope, 0)
+		if err != nil {
+			return err
 		}
-		partChanged := false
+		if changed {
+			m[f] = scoped
+		}
+	}
+	return nil
+}
+
+// scopeUUIDs rewrites the content parts' uuids of a list of messages.
+func scopeUUIDs(raw json.RawMessage, scope func(string) string) (json.RawMessage, error) {
+	out, _, err := scopeIn(raw, scope, 0)
+	return out, err
+}
+
+// maxScopeDepth bounds the arrays walked to reach content parts: a list of
+// messages, a list of lists (batched messages), a list of score inputs.
+const maxScopeDepth = 3
+
+// scopeIn rewrites through scope the "uuid" of every content part reachable
+// as value.content[] where value is the given object or, recursively, an
+// element of the given array: the shapes of chat messages, batched
+// messages, and vLLM's score inputs ({"content": [parts]}). What is changed
+// is re-encoded from its parsed form, like the body, so duplicate or escaped
+// keys cannot survive. A uuid that is not a string (nor null) is refused.
+func scopeIn(raw json.RawMessage, scope func(string) string, depth int) (json.RawMessage, bool, error) {
+	t := bytes.TrimLeft(raw, " \t\r\n")
+	if len(t) == 0 {
+		return raw, false, nil
+	}
+	switch t[0] {
+	case '[':
+		if depth >= maxScopeDepth {
+			return raw, false, nil
+		}
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return raw, false, nil // vLLM will reject it; nothing to scope
+		}
+		changed := false
+		for i, it := range items {
+			out, c, err := scopeIn(it, scope, depth+1)
+			if err != nil {
+				return nil, false, err
+			}
+			if c {
+				items[i], changed = out, true
+			}
+		}
+		if !changed {
+			return raw, false, nil
+		}
+		out, err := json.Marshal(items)
+		return out, err == nil, err
+	case '{':
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+			return raw, false, nil
+		}
+		var parts []json.RawMessage
+		if err := json.Unmarshal(obj["content"], &parts); err != nil {
+			return raw, false, nil // string content carries no uuid
+		}
+		changed := false
 		for j, pr := range parts {
 			var part map[string]json.RawMessage
 			if err := json.Unmarshal(pr, &part); err != nil || part == nil {
@@ -208,20 +263,18 @@ func scopeUUIDs(raw json.RawMessage, scope func(string) string) (json.RawMessage
 			}
 			var s string
 			if err := json.Unmarshal(u, &s); err != nil {
-				return nil, ErrBadUUID
+				return nil, false, ErrBadUUID
 			}
 			part["uuid"], _ = json.Marshal(scope(s))
 			parts[j], _ = json.Marshal(part)
-			partChanged = true
-		}
-		if partChanged {
-			msg["content"], _ = json.Marshal(parts)
-			msgs[i], _ = json.Marshal(msg)
 			changed = true
 		}
+		if !changed {
+			return raw, false, nil
+		}
+		obj["content"], _ = json.Marshal(parts)
+		out, err := json.Marshal(obj)
+		return out, err == nil, err
 	}
-	if !changed {
-		return raw, nil
-	}
-	return json.Marshal(msgs)
+	return raw, false, nil
 }

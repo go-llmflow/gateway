@@ -78,10 +78,13 @@ func RewriteFor(ep Endpoint, body []byte, resolve func(model string) (string, er
 	case Messages:
 		return rewriteMessages(body, resolve, iso)
 	case Rerank:
-		return rewritePlain(body, resolve, iso.CacheSalt)
+		// Query and documents may be score inputs with content parts
+		// (vllm/entrypoints/pooling/scoring: parse_chat_message_content_parts).
+		return rewritePlain(body, resolve, iso, "query", "documents")
 	case Tokenize, Detokenize:
-		// No cache_salt field there (vllm/entrypoints/serve/tokenize).
-		return rewritePlain(body, resolve, "")
+		// No cache_salt field there (vllm/entrypoints/serve/tokenize), but
+		// chat messages are rendered, media included: their uuids are scoped.
+		return rewritePlain(body, resolve, Isolation{ScopeUUID: iso.ScopeUUID}, "messages")
 	case Transcriptions:
 		return rewriteTranscription(body, resolve)
 	default:
@@ -117,16 +120,10 @@ func RewriteFor(ep Endpoint, body []byte, resolve func(model string) (string, er
 	if iso.CacheSalt != "" {
 		m["cache_salt"], _ = json.Marshal(iso.CacheSalt)
 	}
-	if iso.ScopeUUID != nil {
-		if raw, ok := m["input"]; ok {
-			// Input items have the shape of chat messages: content parts
-			// may carry a multimodal uuid.
-			scoped, err := scopeUUIDs(raw, iso.ScopeUUID)
-			if err != nil {
-				return nil, req, err
-			}
-			m["input"] = scoped
-		}
+	// Input items have the shape of chat messages: content parts may carry
+	// a multimodal uuid.
+	if err := scopeFields(m, iso.ScopeUUID, "input"); err != nil {
+		return nil, req, err
 	}
 	if raw, ok := m["stream"]; ok && !isNull(raw) {
 		if err := json.Unmarshal(raw, &req.Stream); err != nil {

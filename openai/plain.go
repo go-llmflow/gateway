@@ -16,7 +16,12 @@ import (
 // document}, usage.total_tokens; vllm/entrypoints/serve/tokenize/protocol.py
 // — TokenizeCompletionRequest {prompt}, TokenizeChatRequest {messages,
 // chat_template, chat_template_kwargs…}, DetokenizeRequest {tokens}.
-func rewritePlain(body []byte, resolve func(string) (string, error), salt string) ([]byte, Request, error) {
+//
+// Multimodal uuids in the named fields are scoped like a chat request's
+// (security audit 2026-10-26: rerank and tokenize parse content parts with
+// vLLM's chat parser, so an unscoped uuid named another tenant's media).
+func rewritePlain(body []byte, resolve func(string) (string, error), iso Isolation, uuidFields ...string) ([]byte, Request, error) {
+	salt := iso.CacheSalt
 	var req Request
 	m, err := decodeObject(body)
 	if err != nil {
@@ -38,6 +43,9 @@ func rewritePlain(body []byte, resolve func(string) (string, error), salt string
 	}
 	if salt != "" {
 		m["cache_salt"], _ = json.Marshal(salt)
+	}
+	if err := scopeFields(m, iso.ScopeUUID, uuidFields...); err != nil {
+		return nil, req, err
 	}
 	out, err := json.Marshal(m)
 	if err != nil {
