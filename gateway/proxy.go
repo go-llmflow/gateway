@@ -115,6 +115,16 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			span.SetAttributes(attribute.Bool("llmflow.authenticated", false))
 			return
 		}
+		// The project the request is charged to (X-Llmflow-Project, #68):
+		// from here on key.Project is the effective project, for budgets,
+		// guardrails, the record and the request log alike.
+		project, perr := s.resolveProject(r, key)
+		if perr != nil {
+			s.met.denied.add(1, key.Team, "project")
+			apiError(w, http.StatusForbidden, "permission_denied", errProjectRefused.Error())
+			return
+		}
+		key.Project = project
 		span.SetAttributes(attribute.String("llmflow.org", key.Org), attribute.String("llmflow.team", key.Team),
 			attribute.String("llmflow.key", key.ID))
 		pol := s.policyFor(key)
@@ -348,6 +358,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			}
 			rec := store.Record{
 				ID: rid, Time: end.UTC(), Org: key.Org, Team: key.Team, Project: key.Project, KeyID: key.ID, Model: g.cfg.Name, Pool: g.cfg.Pool,
+				User: recordUser(key), Lab: s.cfg.LabOf(key.Team),
 				Upstream: upstreamLabel, PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
 				CachedTokens: usage.Cached(), Cost: cost, Unit: g.cfg.Cost.Unit, LatencyMS: float64(end.Sub(t0).Microseconds()) / 1000,
 				Status: status, Priority: grant.Priority, Borrowing: grant.Borrowing, Stream: req.Stream,

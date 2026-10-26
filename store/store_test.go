@@ -370,7 +370,7 @@ func contract(t *testing.T, s Store) {
 	if us, err := s.Report(ctx, t0.AddDate(1, 0, 0), t0.AddDate(1, 0, 1), nil); err != nil || len(us) != 0 {
 		t.Fatalf("empty period %+v %v", us, err)
 	}
-	if _, err := s.Report(ctx, t0, t0, []string{"user"}); err == nil {
+	if _, err := s.Report(ctx, t0, t0, []string{"planet"}); err == nil {
 		t.Fatal("unknown dimension accepted")
 	}
 

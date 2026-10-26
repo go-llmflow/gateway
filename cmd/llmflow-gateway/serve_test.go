@@ -105,7 +105,7 @@ func TestExport(t *testing.T) {
 		{"--from", "bad", "--to", "2026-11-01"},
 		{"--from", "2026-10-01", "--to", "bad"},
 		{"--from", "2026-11-01", "--to", "2026-10-01"},
-		{"--from", "2026-10-01", "--to", "2026-11-01", "--group-by", "user"},
+		{"--from", "2026-10-01", "--to", "2026-11-01", "--group-by", "planet"},
 		{"--from", "2026-10-01", "--to", "2026-11-01", "--format", "xml"},
 	} {
 		if _, err := run(t, append([]string{"export", "-c", cfg}, args...)...); err == nil {

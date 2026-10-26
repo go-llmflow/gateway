@@ -215,11 +215,16 @@ func (m *Memory) ListProjects(_ context.Context, team string) ([]Project, error)
 	}
 	out := []Project{}
 	for _, p := range m.projects {
-		if p.Team == team {
+		if team == "" || p.Team == team { // "": every team's
 			out = append(out, *p)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Team != out[j].Team {
+			return out[i].Team < out[j].Team
+		}
+		return out[i].Name < out[j].Name
+	})
 	return out, nil
 }
 

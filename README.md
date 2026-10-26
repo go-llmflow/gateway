@@ -416,6 +416,51 @@ They do **not** go through the fair-share pool. A guard call is the gateway chec
 
 All guard answers are parsed defensively and fuzzed (`FuzzParseGuardAnswers`), as are the hold-back (`FuzzHoldback`: streamed in any pieces equals masked whole), the SSE rewriter (`FuzzStreamFilter`: no secret in any released string) and the request mapping (`FuzzMapRequest`).
 
+## Project attribution, labs and users (v0.13.0)
+
+Coding clients do not say which project a request belongs to:
+
+- Claude Code sends its session, agent, prompt and request-class headers, but no project. It does send whatever is set in `ANTHROPIC_CUSTOM_HEADERS` (see Claude Code's [LLM gateway connection guide](https://code.claude.com/docs/en/llm-gateway-connect.md)).
+- Continue sends the headers listed in `requestOptions.headers`.
+
+So a request can name its project in a header:
+
+```sh
+export ANTHROPIC_CUSTOM_HEADERS="X-Llmflow-Project: climate-sim"   # Claude Code
+```
+
+```hcl
+attribution {
+  project_header  = "X-Llmflow-Project"  # the default
+  default_project = "general"            # optional
+}
+org "etabA" {
+  share = 0.5
+  team "physics-1" { lab = "physics" }   # optional lab: org → lab → team → project
+}
+```
+
+**What the gateway accepts in the header:**
+
+- The value is a project **name**, looked up in the key's own team only, so another team's or organisation's project cannot even be named.
+- The project must exist and be enabled.
+- A key pinned to a project accepts only that project.
+- For a key with an owner, the owner must still hold a stored `member`, `team_admin`, `org_admin` or `proxy_admin` role on the team. For a JWT, its team comes from its verified `map`.
+- Every refusal is the same 403, "project not allowed for this key", counted in `llmflow_denied_total{reason="project"}`.
+
+**Without the header,** the key's project applies, then `default_project` if the team has a project of that name, else none.
+
+**What happens to the effective project:** it is charged, budgeted, written to the request log and recorded. The lookups read state loaded with the budgets, so the request path does not read the store.
+
+**SSO roles do not count.** A role that comes only from SSO ID-token claims is not stored, so it does not count for this check: grant the role in the gateway, or through SCIM.
+
+**Reports gain two dimensions:**
+
+- `lab` is optional and set as an attribute on a configured team. It is an accounting level only: RBAC does not use it. It is stamped on each record at request time, so moving a team to another lab does not rewrite history.
+- `user` is the key owner, or a JWT's username when it is a valid gateway user name, otherwise the JWT's stable synthetic key id. It is never a token.
+
+A lab is an attribute rather than an `org { lab { team {} } }` nesting so that every existing configuration stays valid and a team keeps a single declaration.
+
 ## Durable accounting
 
 Usage is billed between institutions, so a record must survive a PostgreSQL outage and a crash of the gateway. With `kind = "postgres"`, `store.spool_dir` is therefore required (since v0.10.0):
@@ -805,7 +850,7 @@ entries, and checkpoints sign a self-describing message
 | `PUT /admin/keys/{id}/rotation` | scheduled rotation `{"every":"720h","grace_period":"24h","target":"vault:secret/llmflow/keys/<team>/<name>#key"}` (`every` between `1h` and `8784h`; `grace_period` above 0 and shorter than `every`; `{"every":"0s"}` clears it). Needs a `key_rotation { vault_prefix = "secret/llmflow/keys", check_interval = "1h" }` block and a `vault` block whose token may `patch` and `create` under the prefix. Every `check_interval`, a due key gets a new secret, written into that KV v2 field (merge patch, so other fields stay) where the client reads it; the old secret stays valid for the grace period. The target must lie under `vault_prefix/<the key's team>/`, so a team admin writes only where the team's secrets live. Replicas rotate a key once (the rotation is conditional on the current secret); if the write fails the rotation is undone, the old secret keeps working and the key is retried at the next check. Audit events `key.rotation_scheduled`, `key.rotated`, `key.rotation_failed` |
 | `GET /admin/budgets`, `PUT /admin/budgets`, `DELETE /admin/budgets?kind=&name=&model=` | budgets on any scope (see below), listed with their current `spent` and effective `limit` |
 | `POST /admin/budgets/increase` | temporary increase `{"kind","name","model","amount","expires_at"}` (RFC 3339, within a year) |
-| `GET /admin/spend?from=&to=&group_by=&format=` | spend report: requests, prompt / completion / cached tokens, GPU-hours and estimated requests, grouped by any of `org`, `team`, `project`, `key`, `model`, `pool`, `tag` (default `org,team`), as `json`, `csv` or `parsable2` (pipe-delimited like `sreport --parsable2`). Filtered to what the caller may see: an org admin sees their organisation, a member their own keys. A request with several tags counts once under each tag |
+| `GET /admin/spend?from=&to=&group_by=&format=` | spend report: requests, prompt / completion / cached tokens, GPU-hours and estimated requests, grouped by any of `org`, `lab`, `team`, `project`, `user`, `key`, `model`, `pool`, `tag` (default `org,team`), as `json`, `csv` or `parsable2` (pipe-delimited like `sreport --parsable2`). Filtered to what the caller may see: an org admin sees their organisation, a member their own keys. A request with several tags counts once under each tag |
 | `GET /admin/usage.csv?from=&to=` | the v0.1 export: `group_by=team,pool`, CSV |
 | `GET /admin/fairshare` | reservations, in-flight, borrowing, usage, LF and rank per pool and organisation |
 | `GET /admin/audit?from=&limit=` | audit entries with sequence ≥ `from` (default 1), at most `limit` (default 50, ≤ 200), as a JSON list; proxy admins and viewers only |

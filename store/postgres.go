@@ -79,6 +79,8 @@ ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS org text NOT NULL DEFAULT '';
 ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS project text NOT NULL DEFAULT '';
 ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS record_id text;
 CREATE UNIQUE INDEX IF NOT EXISTS llmflow_usage_record_id ON llmflow_usage (record_id);
+ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS user_name text NOT NULL DEFAULT '';
+ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS lab text NOT NULL DEFAULT '';
 `
 
 // OpenPostgres connects and creates or upgrades the schema. The error
@@ -273,7 +275,8 @@ func (p *Postgres) CreateProject(ctx context.Context, team, name string) error {
 }
 
 func (p *Postgres) ListProjects(ctx context.Context, team string) ([]Project, error) {
-	rows, err := p.pool.Query(ctx, `SELECT team, name, created_at, disabled FROM llmflow_projects WHERE team = $1 ORDER BY name`, team)
+	// "": every team's projects (the budget refresh loads them all).
+	rows, err := p.pool.Query(ctx, `SELECT team, name, created_at, disabled FROM llmflow_projects WHERE $1 = '' OR team = $1 ORDER BY team, name`, team)
 	if err != nil {
 		return nil, err
 	}
@@ -385,7 +388,8 @@ func (p *Postgres) KeyByHash(ctx context.Context, h [32]byte) (Key, error) {
 }
 
 var usageCols = []string{"record_id", "ts", "org", "team", "project", "key_id", "model", "pool", "upstream", "prompt_tokens",
-	"completion_tokens", "cached_tokens", "cost", "unit", "latency_ms", "status", "priority", "borrowing", "stream", "estimated", "tags"}
+	"completion_tokens", "cached_tokens", "cost", "unit", "latency_ms", "status", "priority", "borrowing", "stream", "estimated", "tags",
+	"user_name", "lab"}
 
 // InsertRecords writes a batch: COPY into a temporary table, then one
 // INSERT that skips the records whose ID is already stored, so a batch
@@ -402,7 +406,8 @@ func (p *Postgres) InsertRecords(ctx context.Context, recs []Record) error {
 			id = r.ID
 		}
 		rows[i] = []any{id, r.Time, r.Org, r.Team, r.Project, r.KeyID, r.Model, r.Pool, r.Upstream, r.PromptTokens,
-			r.CompletionTokens, r.CachedTokens, r.Cost, r.Unit, r.LatencyMS, r.Status, r.Priority, r.Borrowing, r.Stream, r.Estimated, tags}
+			r.CompletionTokens, r.CachedTokens, r.Cost, r.Unit, r.LatencyMS, r.Status, r.Priority, r.Borrowing, r.Stream, r.Estimated, tags,
+			r.User, r.Lab}
 	}
 	cols := strings.Join(usageCols, ", ")
 	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
