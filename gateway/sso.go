@@ -68,6 +68,9 @@ type ssoState struct {
 	sessions map[[32]byte]*session // by SHA-256 of the cookie value
 	logins   map[string]pendingLogin
 	perNet   map[netip.Prefix]int
+	// shared, with an ha block, keeps logins and sessions in PostgreSQL
+	// instead of the maps above (hastate.go).
+	shared *sharedSSO
 }
 
 var errSSOFull = errors.New("too many logins in progress")
@@ -96,6 +99,15 @@ func (s *Server) startSSO(ctx context.Context) error {
 		return fmt.Errorf("gateway: sso: %w", err)
 	}
 	s.sso = &ssoState{client: cl, sessions: map[[32]byte]*session{}, logins: map[string]pendingLogin{}, perNet: map[netip.Prefix]int{}}
+	if s.shared != nil {
+		// Several replicas: a login started on one finishes on another, a
+		// session outlives the replica that created it.
+		se, err := newSealer([]byte(s.secrets.HASecret))
+		if err != nil {
+			return err
+		}
+		s.sso.shared = &sharedSSO{st: s.shared, sealer: se}
+	}
 	return nil
 }
 
@@ -146,22 +158,15 @@ func (s *Server) ssoLogin(w http.ResponseWriter, r *http.Request) {
 	now := s.now()
 	cn, _ := clientNet(r)
 	st := s.sso
-	st.mu.Lock()
-	if len(st.logins) >= maxLogins || st.perNet[cn] >= maxLoginsPerNet {
-		st.purgeLocked(now)
-	}
-	// One network cannot hold more than a few logins in progress, so a
-	// flood from one place cannot lock everybody else out of logging in.
-	full := len(st.logins) >= maxLogins || st.perNet[cn] >= maxLoginsPerNet
-	if !full {
-		st.logins[f.State] = pendingLogin{flow: f, browser: sha256.Sum256([]byte(browser)), expires: now.Add(loginTTL), net: cn,
-			ui: r.URL.Query().Get("next") == "ui"}
-		st.perNet[cn]++
-	}
-	st.mu.Unlock()
-	if full {
-		s.log.Warn("sso: login refused", "reason", errSSOFull)
-		apiError(w, http.StatusServiceUnavailable, "service_unavailable", errSSOFull.Error())
+	err := s.putLogin(r.Context(), f.State, pendingLogin{flow: f, browser: sha256.Sum256([]byte(browser)), expires: now.Add(loginTTL), net: cn,
+		ui: r.URL.Query().Get("next") == "ui"})
+	if err != nil {
+		s.log.Warn("sso: login refused", "reason", err)
+		msg := errSSOFull.Error()
+		if !errors.Is(err, errSSOFull) {
+			msg = "session store unreachable"
+		}
+		apiError(w, http.StatusServiceUnavailable, "service_unavailable", msg)
 		return
 	}
 	setCookie(w, loginCookie, browser, int(loginTTL/time.Second))
@@ -204,11 +209,13 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st := s.sso
-	st.mu.Lock()
-	pl, ok := st.logins[state]
-	st.dropLoginLocked(state) // one use, whatever happens next
-	st.mu.Unlock()
-	if !ok || s.now().After(pl.expires) {
+	pl, ok, err := s.takeLogin(r.Context(), state) // one use, whatever happens next
+	if err != nil {
+		s.log.Error("sso: login store unreachable", "err", err)
+		apiError(w, http.StatusServiceUnavailable, "service_unavailable", "session store unreachable")
+		return
+	}
+	if !ok {
 		fail(http.StatusBadRequest, "unknown, used or expired state", nil)
 		return
 	}
@@ -251,18 +258,13 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	value := randomToken()
 	now := s.now()
-	st.mu.Lock()
-	if len(st.sessions) >= maxSessions {
-		st.purgeLocked(now)
-	}
-	full := len(st.sessions) >= maxSessions
-	if !full {
-		st.sessions[sha256.Sum256([]byte(value))] = &session{user: user, bindings: bindings, csrf: randomToken(), expires: now.Add(s.cfg.SSO.SessionTTL)}
-	}
-	st.mu.Unlock()
-	if full {
-		s.log.Warn("sso: session refused", "reason", "too many sessions")
-		apiError(w, http.StatusServiceUnavailable, "service_unavailable", "too many sessions")
+	if err := s.putSession(ctx, sha256.Sum256([]byte(value)), session{user: user, bindings: bindings, csrf: randomToken(), expires: now.Add(s.cfg.SSO.SessionTTL)}); err != nil {
+		s.log.Warn("sso: session refused", "reason", err)
+		msg := "too many sessions"
+		if !errors.Is(err, errSessionsFull) {
+			msg = "session store unreachable"
+		}
+		apiError(w, http.StatusServiceUnavailable, "service_unavailable", msg)
 		return
 	}
 	s.audit("sso.login", "by", user, "user", user)
@@ -298,20 +300,13 @@ func (s *Server) sessionPrincipal(w http.ResponseWriter, r *http.Request) (p *pr
 		return nil, "", false
 	}
 	h := sha256.Sum256([]byte(ck.Value))
-	now := s.now()
-	st := s.sso
-	st.mu.Lock()
-	se := st.sessions[h]
-	if se != nil && now.After(se.expires) {
-		delete(st.sessions, h)
-		se = nil
+	cp, found, err := s.getSession(r.Context(), h)
+	if err != nil {
+		s.log.Error("sso: session store unreachable", "err", err)
+		apiError(w, http.StatusServiceUnavailable, "service_unavailable", "session store unreachable")
+		return nil, "", true
 	}
-	var cp session
-	if se != nil {
-		cp = *se
-	}
-	st.mu.Unlock()
-	if se == nil {
+	if !found {
 		setCookie(w, sessionCookie, "", -1)
 		apiError(w, http.StatusUnauthorized, "authentication_error", "session expired or unknown; log in again at /admin/login")
 		return nil, "", true
@@ -336,9 +331,7 @@ func (s *Server) sessionPrincipal(w http.ResponseWriter, r *http.Request) (p *pr
 		apiError(w, http.StatusServiceUnavailable, "service_unavailable", "user store unreachable")
 		return nil, "", true
 	case u.Disabled:
-		st.mu.Lock()
-		delete(st.sessions, h)
-		st.mu.Unlock()
+		s.dropSession(r.Context(), h)
 		setCookie(w, sessionCookie, "", -1)
 		apiError(w, http.StatusUnauthorized, "authentication_error", "user disabled")
 		return nil, "", true
@@ -395,9 +388,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if p == nil {
 		return
 	}
-	s.sso.mu.Lock()
-	delete(s.sso.sessions, p.session)
-	s.sso.mu.Unlock()
+	s.dropSession(r.Context(), p.session)
 	s.audit("sso.logout", "by", p.name, "user", p.name)
 	setCookie(w, sessionCookie, "", -1)
 	writeJSON(w, http.StatusOK, map[string]any{"end_session_url": s.sso.client.EndSessionURL("")})

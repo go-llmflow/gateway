@@ -24,7 +24,11 @@ func (s *Server) onSoftLimit(alerts []softAlert) {
 		}
 		s.met.softAlerts.add(1, string(al.b.Kind))
 		s.log.Warn("soft budget reached", "budget", al.b.BudgetKey.String(), "spent", al.spent, "soft_limit", al.b.SoftLimit)
-		if s.alerts != nil {
+		if s.alerts != nil && s.shared != nil {
+			// Several replicas: the outbox in PostgreSQL survives a restart,
+			// and any replica delivers it (hastate.go).
+			s.enqueueAlert(al)
+		} else if s.alerts != nil {
 			al := al
 			s.bg.Add(1)
 			go func() {

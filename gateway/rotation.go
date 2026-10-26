@@ -164,10 +164,10 @@ func (s *Server) rotateScheduled(ctx context.Context, k store.Key, now time.Time
 		if uerr != nil {
 			s.log.Error("key rotation: undo failed; the key's new secret was not delivered", "key", k.ID, "err", uerr)
 		}
-		s.keys.forget(func(c store.Key) bool { return c.ID == k.ID })
+		s.dropCached("key", k.ID, "")
 		return false
 	}
-	s.keys.forget(func(c store.Key) bool { return c.ID == k.ID })
+	s.dropCached("key", k.ID, "")
 	s.audit("key.rotated", "key", k.ID, "team", k.Team, "by", "schedule", "grace_period", time.Duration(k.Rotation.Grace).String(), "target", k.Rotation.Target)
 	return true
 }
