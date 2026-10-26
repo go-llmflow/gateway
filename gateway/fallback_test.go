@@ -90,6 +90,30 @@ func TestFallbackOnSaturation(t *testing.T) {
 	}
 }
 
+// Security audit 2026-10-26 (verified, no finding): a request moved to a
+// fallback keeps its own tenant's cache salt and scoped uuids (two
+// organisations still never share a salt in the target pool), and the
+// client's salt does not survive the second rewrite.
+func TestFallbackKeepsTenantIsolation(t *testing.T) {
+	a, b := newFakeVLLM(t), newFakeVLLM(t)
+	e := newEnv(t, fallbackConfig(t, a.URL(), b.URL()))
+	_, ka := e.newKey("etabA")
+	_, kb := e.newKey("etabB")
+	saltDirect := saltOf(t, e, a, ka, mmChat)
+	a.mu.Lock()
+	a.status = 503
+	a.mu.Unlock()
+	saltA := saltOf(t, e, b, ka, mmChat)
+	uuidA := b.last().Body["messages"].([]any)[0].(map[string]any)["content"].([]any)[1].(map[string]any)["uuid"]
+	saltB := saltOf(t, e, b, kb, mmChat)
+	if saltA != saltDirect || saltA == saltB || saltA == "client-chosen" || saltB == "client-chosen" {
+		t.Fatalf("salts: direct %q, fallback A %q, fallback B %q", saltDirect, saltA, saltB)
+	}
+	if u, _ := uuidA.(string); !strings.HasPrefix(u, "llmf-") {
+		t.Fatalf("uuid on the fallback: %v", uuidA)
+	}
+}
+
 func TestFallbackOnUpstreamDown(t *testing.T) {
 	a, b := newFakeVLLM(t), newFakeVLLM(t)
 	cfg := fallbackConfig(t, a.URL(), b.URL())
