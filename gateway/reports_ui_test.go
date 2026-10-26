@@ -1,14 +1,18 @@
 package gateway
 
 import (
+	"bytes"
 	"math"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-llmflow/gateway/store"
+	"github.com/go-plot/plot"
+	"github.com/go-plot/plot/text"
 )
 
 func TestUIReports(t *testing.T) {
@@ -106,7 +110,9 @@ func TestPlotPie(t *testing.T) {
 		// The two pies on one page under the UI's policy, and a control page
 		// with a planted inline style the policy must refuse.
 		head := `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="` + uiCSP + `"></head><body>`
-		_ = os.WriteFile(p+".html", []byte(head+a+b+"</body></html>"), 0o600)
+		bars := c.Bars("bars", "GPU-hours", []chartBar{{Label: in[0].Label, Current: 3, Previous: 2}, {Label: in[1].Label, Current: 2, Previous: 4}})
+		series := c.Series("series", "GPU-hours", []chartPoint{{X: "2026-10-01", Y: 1}, {X: "2026-10-02", Y: 3}, {X: "2026-10-03", Y: 2}})
+		_ = os.WriteFile(p+".html", []byte(head+a+b+string(bars)+string(series)+"</body></html>"), 0o600)
 		_ = os.WriteFile(p+".control.html", []byte(head+`<p style="color:red">x</p>`+a+"</body></html>"), 0o600)
 	}
 	if !strings.Contains(a, "xmlns:xlink") || strings.Count(a, "<svg") != 2 {
@@ -129,7 +135,7 @@ func TestPlotPie(t *testing.T) {
 }
 
 func TestCharts(t *testing.T) {
-	var c chartRenderer = svgCharts{}
+	var c chartRenderer = plotCharts{}
 	var many []chartSlice
 	for i := 0; i < 30; i++ {
 		many = append(many, chartSlice{Label: "<&\"'>" + string(rune('a'+i%26)), Value: float64(i)})
@@ -139,20 +145,99 @@ func TestCharts(t *testing.T) {
 		string(c.Pie("t<", "GPU-hours", many)),
 		string(c.Pie("one", "USD", []chartSlice{{Label: "x", Value: 1}})),
 		string(c.Pie("none", "USD", nil)),
-		string(c.Bars("b", "GPU-hours", []chartBar{{Label: "<x>", Current: 1, Previous: 2}})),
-		string(c.Series("s", "GPU-hours", []chartPoint{{X: "<d>", Y: 1}, {X: "d2", Y: 0}})),
+		string(c.Bars("b", "GPU-hours", []chartBar{{Label: "<x>", Current: 1, Previous: 2}, {Label: "y", Current: math.NaN()}})),
+		string(c.Bars("b", "GPU-hours", nil)),
+		string(c.Series("s", "GPU-hours", []chartPoint{{X: "<d>", Y: 1}, {X: "d2", Y: math.Inf(1)}, {X: "d3", Y: 0}})),
+		string(c.Series("s", "GPU-hours", []chartPoint{{X: "d", Y: 1}})),
 		string(c.Series("s", "GPU-hours", nil)),
 	}
-	for _, s := range out {
+	for i, s := range out {
 		if strings.Contains(s, "<&") || strings.Contains(s, "<x>") || strings.Contains(s, "<d>") || strings.Contains(s, "style=") ||
-			strings.Contains(s, "NaN") || !strings.HasPrefix(s, "<svg") || !strings.HasSuffix(s, "</svg>") {
-			t.Errorf("bad svg: %s", s)
+			strings.Contains(s, "<script") || strings.Contains(s, "NaN") || !strings.HasPrefix(s, "<svg") || !strings.HasSuffix(s, "</svg>") {
+			t.Errorf("bad svg %d: %.300s", i, s)
 		}
 	}
 	if !strings.Contains(out[0], ">other —") {
 		t.Error("small slices not folded into other")
 	}
-	if !strings.Contains(out[1], "<circle") {
-		t.Error("a single slice is a full circle")
+	for _, i := range []int{3, 5, 6} {
+		if !strings.Contains(out[i], "xmlns:xlink") {
+			t.Errorf("chart %d not drawn by go-plot", i)
+		}
+	}
+	for _, i := range []int{2, 4, 7} {
+		if !strings.Contains(out[i], "no data") {
+			t.Errorf("chart %d: want no data", i)
+		}
+	}
+}
+
+// texSpy records which strings go-plot laid out as TeX and which as plain
+// text.
+type texSpy struct {
+	*text.Default
+	mu          sync.Mutex
+	math, plain []string
+}
+
+func (s *texSpy) Layout(str string, px float64) text.Layout {
+	s.mu.Lock()
+	s.math = append(s.math, str)
+	s.mu.Unlock()
+	return s.Default.Layout(str, px)
+}
+
+func (s *texSpy) LayoutPlain(str string, px float64) text.Layout {
+	s.mu.Lock()
+	s.plain = append(s.plain, str)
+	s.mu.Unlock()
+	return s.Default.LayoutPlain(str, px)
+}
+
+// TestChartsNoTeX: no string from the data reaches go-plot's TeX layout,
+// on any chart; the control proves the spy sees the TeX path.
+func TestChartsNoTeX(t *testing.T) {
+	hostile := []string{`$\input{/etc/passwd}$`, "<script>alert(1)</script>", "$5 and $6", `100$`}
+	spy := &texSpy{Default: text.NewDefault()}
+	figureHook = func(f *plot.Figure) { f.Text = spy }
+	defer func() { figureHook = nil }()
+	var c chartRenderer = plotCharts{}
+	var slices []chartSlice
+	var bars []chartBar
+	var points []chartPoint
+	for i, h := range hostile {
+		slices = append(slices, chartSlice{Label: h, Value: float64(i + 1)})
+		bars = append(bars, chartBar{Label: h, Current: float64(i + 1), Previous: 1})
+		points = append(points, chartPoint{X: h, Y: float64(i)})
+	}
+	unit := `$\alpha$`
+	_ = c.Pie(hostile[0], unit, slices)
+	_ = c.Bars(hostile[0], unit, bars)
+	_ = c.Series(hostile[0], unit, points)
+	// Only go-plot's own numbers (tick values, percentages) may take the
+	// TeX path; nothing with a dollar or a backslash, nothing of ours.
+	for _, m := range spy.math {
+		if strings.ContainsAny(m, `$\<`) {
+			t.Fatalf("%q was laid out as TeX", m)
+		}
+	}
+	seen := strings.Join(spy.plain, "\n")
+	for _, want := range []string{`$\input{/etc/passwd}$`, "$5 and $6", unit} {
+		if !strings.Contains(seen, want) {
+			t.Errorf("%q not laid out as plain text (plain: %q)", want, spy.plain)
+		}
+	}
+	// Control: the same tick label without PlainText, on a figure that
+	// parses math, reaches the TeX layout, and the spy sees it.
+	ctl := &texSpy{Default: text.NewDefault()}
+	f := plot.NewFigure()
+	f.Text = ctl
+	ax := f.AddAxes(0.1, 0.1, 0.8, 0.8)
+	ax.Barh([]float64{0}, []float64{1})
+	ax.SetYTickLabels([]float64{0}, []string{unit})
+	var b bytes.Buffer
+	_ = f.SaveSVG(&b)
+	if !strings.Contains(strings.Join(ctl.math, "\n"), unit) {
+		t.Fatalf("the control did not reach TeX: math %q plain %q", ctl.math, ctl.plain)
 	}
 }

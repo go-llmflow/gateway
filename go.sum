@@ -65,8 +65,8 @@ github.com/go-pdfkit/pdfkit v0.19.0 h1:ZDfHbwWQEClPqprQH1M8p93zBd7NryTmItJsOtHJr
 github.com/go-pdfkit/pdfkit v0.19.0/go.mod h1:zJ8WZRhl12uEqF2rsOnCQYJN1+zG0Qdom+tbuTRWrcw=
 github.com/go-pdfkit/reader v0.9.0 h1:4U2oZXozJl+1bRyzK90sb6pQB+Qm6dCPjBAk4c71tqU=
 github.com/go-pdfkit/reader v0.9.0/go.mod h1:EYHHREPKT/orDzlGiFPnPVPPuaRDLiAYezIr0cCFXaA=
-github.com/go-plot/plot v0.2.0 h1:EOIL3Nvrp2kos6uhoECTMA8tQSSQv50xGVuMqVVoJG4=
-github.com/go-plot/plot v0.2.0/go.mod h1:+uBqMFBVLL8kAeJ7hcPfThYKV1n26Crqi3eSruc1+qg=
+github.com/go-plot/plot v0.3.0 h1:++Op5Z3HngvLNRl/ASU9AXlSwRoEzC0idHbudFUyBIo=
+github.com/go-plot/plot v0.3.0/go.mod h1:+uBqMFBVLL8kAeJ7hcPfThYKV1n26Crqi3eSruc1+qg=
 github.com/go-richdoc/richdoc v0.7.0 h1:vhHypa0y26ulrOz6Aw1RIzeLjSMsFJyU1SzK5jd90lg=
 github.com/go-richdoc/richdoc v0.7.0/go.mod h1:RhxAcqwoUg1pnTYCiRdKILzOZwOmraO0dMJI4N6yY70=
 github.com/go-simd/highway v0.0.14 h1:O3HPG00qgLGlrQyYBlMGyLYsuzZrqHA4+XNptPjV5gs=
