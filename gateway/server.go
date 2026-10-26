@@ -540,7 +540,7 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	}
 	data := make([]map[string]any, 0, len(s.gorder))
 	for _, n := range s.gorder {
-		if s.groups[n].cfg.Class != config.Guard && s.budget.modelAllowed(key.Team, n) {
+		if s.groups[n].cfg.Class != config.Guard && s.budget.modelAllowed(key.Team, n) && externalVisible(s.groups[n], key) {
 			data = append(data, map[string]any{"id": n, "object": "model", "owned_by": "llmflow"})
 		}
 	}

@@ -118,6 +118,9 @@ func (v *validator) external(raw *fileHCL, c *Config) {
 				v.errf(m.Cost.DefRange, "Invalid cost", "costs must be finite and non-negative")
 			}
 			g.Cost.CacheWrite5mPerMTok, g.Cost.CacheWrite1hPerMTok = f64(m.Cost.CacheWrite5m), f64(m.Cost.CacheWrite1h)
+			if (m.Cost.CacheWrite5m == nil) != (m.Cost.CacheWrite1h == nil) {
+				v.errf(m.Cost.DefRange, "Incomplete cache prices", "%s: set both cache_write_5m_per_mtok and cache_write_1h_per_mtok (a write of the other lifetime would be free)", where)
+			}
 			if lc := m.Cost.LongContext; lc != nil {
 				if lc.AboveInputTokens <= 0 {
 					v.errf(lc.AboveRange, "Invalid long_context", "%s: above_input_tokens must be positive", where)

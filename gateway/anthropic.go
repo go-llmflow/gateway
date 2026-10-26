@@ -75,8 +75,7 @@ type extRuntime struct {
 	until   map[string]time.Time // org → provider back-off end
 	ws      map[string]string    // org → anthropic-workspace-id seen
 	wsOrg   map[string]string    // workspace → org
-	poison  map[string]bool      // orgs refused: shared workspace
-	betaOut []string             // for tests: last forwarded betas
+	poison map[string]bool      // orgs refused: shared workspace
 }
 
 func newExtRuntime(g config.ModelGroup, keys map[string]string, isolated bool) (*extRuntime, error) {
