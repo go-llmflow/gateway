@@ -33,6 +33,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -83,7 +84,17 @@ type team struct {
 	usage          float64 // decayed concurrency·seconds
 	lf             float64
 	rank           int
+	// phantoms are requests that may be in flight but that no live grant
+	// stands for (a replica that died, or the in-flight count a previous
+	// owner persisted, see package ha): each is the time it stops counting.
+	// They count as in flight within the reservation, the conservative
+	// side: they never let a new request in "within share" that the
+	// missing ones might have taken.
+	phantoms []time.Time
 }
+
+// busy is the team's in flight, phantoms included.
+func (t *team) busy() int { return t.inflight + len(t.phantoms) }
 
 // NewPool returns a pool of capacity C with the given team shares. A
 // halfLife of 0 disables decay (usage accumulates forever). now may be nil
@@ -170,6 +181,7 @@ func (p *Pool) Capacity() int { return p.capacity }
 type Grant struct {
 	pool      *Pool
 	team      *team
+	teamName  string
 	tokens    int64
 	Priority  int
 	Borrowing bool
@@ -177,16 +189,142 @@ type Grant struct {
 	// requests in flight (the gateway's own view of saturation, #58).
 	Saturated bool
 	released  bool
+	// remote, for a grant decided by another process (NewRemoteGrant):
+	// called once by Release instead of updating a local pool.
+	remote     func(consumed float64)
+	remoteDone atomic.Bool
 }
 
-// inflightLocked is the pool's requests in flight.
+// NewRemoteGrant returns a grant decided elsewhere (by the replica that
+// owns the pool, package ha). Release calls release once, with the
+// consumption; the grant is not counted in any local Pool.
+func NewRemoteGrant(teamName string, priority int, borrowing, saturated bool, release func(consumed float64)) *Grant {
+	return &Grant{teamName: teamName, Priority: priority, Borrowing: borrowing, Saturated: saturated, remote: release}
+}
+
+// inflightLocked is the pool's requests in flight, phantoms included.
 func (p *Pool) inflightLocked() int {
 	n := 0
 	for _, t := range p.order {
-		n += t.inflight
+		n += t.busy()
 	}
 	return n
 }
+
+// expireLocked drops the phantoms whose time has come.
+func (p *Pool) expireLocked(now time.Time) {
+	for _, t := range p.order {
+		k := 0
+		for _, until := range t.phantoms {
+			if now.Before(until) {
+				t.phantoms[k] = until
+				k++
+			}
+		}
+		t.phantoms = t.phantoms[:k]
+	}
+}
+
+func (p *Pool) teamLocked(name string) *team {
+	t := p.teams[name]
+	if t == nil {
+		t = p.addTeam(name, 0, 0)
+	}
+	return t
+}
+
+// AddPhantoms counts n requests of a team as in flight until the given
+// time, without grants: requests that may still run but that nobody can
+// release (their replica died, or a previous owner's in-flight count).
+func (p *Pool) AddPhantoms(teamName string, n int, until time.Time) {
+	if n <= 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	t := p.teamLocked(teamName)
+	for range n {
+		t.phantoms = append(t.phantoms, until)
+	}
+}
+
+// DropPhantom removes the team's phantom that would last longest and
+// reports whether there was one: a request it stood for turned out to be
+// a live grant after all.
+func (p *Pool) DropPhantom(teamName string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	t := p.teams[teamName]
+	if t == nil || len(t.phantoms) == 0 {
+		return false
+	}
+	j := 0
+	for i, u := range t.phantoms {
+		if u.After(t.phantoms[j]) {
+			j = i
+		}
+	}
+	t.phantoms = append(t.phantoms[:j], t.phantoms[j+1:]...)
+	return true
+}
+
+// Adopt counts a request decided before (by a previous owner of the pool,
+// or admitted without one) as in flight with the standing it was given,
+// and returns its grant. Nothing is decided: the priority is the one the
+// request already runs with.
+func (p *Pool) Adopt(teamName string, priority int, borrowing bool, estTokens int64) *Grant {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	t := p.teamLocked(teamName)
+	t.inflight++
+	t.inflightTokens += estTokens
+	if borrowing {
+		t.borrowing++
+	}
+	return &Grant{pool: p, team: t, teamName: teamName, tokens: estTokens, Priority: priority, Borrowing: borrowing}
+}
+
+// Charge adds consumption to a team's usage without a grant (the release
+// of a request this pool never counted, package ha).
+func (p *Pool) Charge(teamName string, consumed float64) {
+	if !(consumed > 0) || math.IsInf(consumed, 1) {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.advance()
+	p.teamLocked(teamName).usage += consumed
+}
+
+// Usage returns every team's decayed usage and in-flight count (phantoms
+// included), decayed to now: what an owner persists for the next one.
+func (p *Pool) Usage() (usage map[string]float64, inflight map[string]int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.advance()
+	p.expireLocked(p.now())
+	usage, inflight = make(map[string]float64, len(p.order)), make(map[string]int, len(p.order))
+	for _, t := range p.order {
+		usage[t.name] = t.usage
+		inflight[t.name] = t.busy()
+	}
+	return usage, inflight
+}
+
+// SetUsage sets a team's decayed usage (restored from a previous owner).
+// Negative, NaN and infinite values count as 0.
+func (p *Pool) SetUsage(teamName string, usage float64) {
+	if !(usage > 0) || math.IsInf(usage, 1) {
+		usage = 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.advance()
+	p.teamLocked(teamName).usage = usage
+}
+
+// Lambda is the decay rate ln2/half-life in 1/s (0: no decay).
+func (p *Pool) Lambda() float64 { return p.lambda }
 
 // TryAcquire is Acquire only when the pool has room (fewer than C requests
 // in flight), decided and recorded atomically: a fallback that moves a
@@ -207,16 +345,14 @@ func (p *Pool) Acquire(teamName string, class Class, estTokens int64) *Grant {
 func (p *Pool) acquire(teamName string, class Class, estTokens int64, needRoom bool) (*Grant, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.expireLocked(p.now())
 	busy := p.inflightLocked()
 	if needRoom && busy >= p.capacity {
 		return nil, false
 	}
 	p.advance()
-	t := p.teams[teamName]
-	if t == nil {
-		t = p.addTeam(teamName, 0, 0)
-	}
-	g := &Grant{pool: p, team: t, tokens: estTokens, Saturated: busy >= p.capacity}
+	t := p.teamLocked(teamName)
+	g := &Grant{pool: p, team: t, teamName: teamName, tokens: estTokens, Saturated: busy >= p.capacity}
 	// The test is on the number of within-share requests in flight, not
 	// on the total: a team that keeps more requests in flight than its
 	// reservation (any closed-loop client pool larger than share × C)
@@ -224,7 +360,7 @@ func (p *Pool) acquire(teamName string, class Class, estTokens int64, needRoom b
 	// reservation again, and every request after the first ones would be
 	// sent as a borrower. TestSaturationConvergesToShares fails with the
 	// total-count rule (B obtains 4 % instead of 18.75 %).
-	if t.inflight-t.borrowing < t.reserved {
+	if t.inflight-t.borrowing+len(t.phantoms) < t.reserved {
 		g.Priority = WithinShareBase + int(class)
 	} else {
 		p.rank()
@@ -250,6 +386,12 @@ func (p *Pool) acquire(teamName string, class Class, estTokens int64, needRoom b
 // nothing, and charging it made a flooding team look as consumed as the
 // team it was starving (TestSaturationConvergesToShares caught it).
 func (g *Grant) Release(consumed float64) {
+	if g.remote != nil {
+		if g.remoteDone.CompareAndSwap(false, true) {
+			g.remote(consumed)
+		}
+		return
+	}
 	p := g.pool
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -269,7 +411,7 @@ func (g *Grant) Release(consumed float64) {
 }
 
 // Team returns the team name of the grant.
-func (g *Grant) Team() string { return g.team.name }
+func (g *Grant) Team() string { return g.teamName }
 
 // advance decays usage up to now: usage *= e^{-λΔt}.
 func (p *Pool) advance() {
@@ -346,6 +488,10 @@ type TeamStat struct {
 	Usage          float64
 	LevelFairshare float64
 	Rank           int
+	// Phantoms are requests counted in flight without a grant (package ha:
+	// a failover's safety margin, a silent replica's requests); InFlight
+	// does not include them.
+	Phantoms int
 }
 
 // Snapshot returns the current state of every team, in a stable order.
@@ -353,13 +499,14 @@ func (p *Pool) Snapshot() []TeamStat {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.advance()
+	p.expireLocked(p.now())
 	p.rank()
 	out := make([]TeamStat, 0, len(p.order))
 	for _, t := range p.order {
 		out = append(out, TeamStat{
 			Team: t.name, Share: t.share, Reserved: t.reserved,
 			InFlight: t.inflight, Borrowing: t.borrowing, InFlightTokens: t.inflightTokens,
-			Usage: t.usage, LevelFairshare: t.lf, Rank: t.rank,
+			Usage: t.usage, LevelFairshare: t.lf, Rank: t.rank, Phantoms: len(t.phantoms),
 		})
 	}
 	return out

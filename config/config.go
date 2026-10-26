@@ -84,6 +84,10 @@ type Config struct {
 	KeyRotation *KeyRotation
 	// SCIM, when set, serves SCIM 2.0 provisioning at /scim/v2.
 	SCIM *SCIM
+	// HA, when set, runs this gateway as one of several replicas sharing
+	// the pools through PostgreSQL (pool ownership by lease, package ha).
+	// Absent: one replica, everything in its memory, as before.
+	HA *HA
 	// Audit configures the audit log's signed checkpoints. The log itself
 	// is always kept.
 	Audit Audit
@@ -245,6 +249,32 @@ type SCIM struct {
 // SCIMGroup gives the members of a provisioned group Role on Team.
 type SCIMGroup struct {
 	Name, Team, Role string
+}
+
+// HA configures several replicas (see package ha).
+type HA struct {
+	// ReplicaID names the replica in logs and leases (a random suffix is
+	// added at start: a restarted replica is a new instance).
+	ReplicaID string
+	// Listen is the internal listener (replicas only: admission
+	// forwarding); Advertise is the IP:port the others reach it at
+	// (default: Listen).
+	Listen, Advertise string
+	// PeerNetworks are the networks replicas live in: an owner address
+	// read from the database outside them is never dialled.
+	PeerNetworks []netip.Prefix
+	// SecretFile holds the shared secret (at least 32 bytes) that
+	// authenticates the internal channel; the SSO session key is derived
+	// from it too.
+	SecretFile string
+	// LeaseTTL is the pool lease's duration (renewed every third);
+	// Heartbeat how often replicas report their grants to owners;
+	// ForwardTimeout bounds one call to an owner; UsagePersist how often an
+	// owner persists the decayed usage.
+	LeaseTTL, Heartbeat, ForwardTimeout, UsagePersist time.Duration
+	// OnOwnerUnreachable: "lowest_priority" (default) admits at the lowest
+	// borrowing priority, "reject" answers 503.
+	OnOwnerUnreachable string
 }
 
 // KeyRotation configures scheduled key rotation.

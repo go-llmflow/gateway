@@ -40,7 +40,7 @@ func (u *upstream) available(now time.Time) bool {
 type group struct {
 	cfg       config.ModelGroup
 	upstreams []*upstream
-	pool      *fairshare.Pool
+	pool      admitter
 	class     fairshare.Class
 	// ext is set for a model of an external provider (anthropic.go).
 	ext *extRuntime

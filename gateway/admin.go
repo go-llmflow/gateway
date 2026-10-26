@@ -1038,7 +1038,7 @@ func (s *Server) fairshareState(w http.ResponseWriter, _ *http.Request, p *princ
 	out := map[string][]orgOut{}
 	for _, pool := range s.porder {
 		out[pool] = []orgOut{}
-		for _, t := range s.pools[pool].Snapshot() {
+		for _, t := range s.pools[pool].snapshot() {
 			if !p.orgView(t.Team) {
 				continue
 			}

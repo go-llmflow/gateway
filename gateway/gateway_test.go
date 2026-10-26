@@ -223,7 +223,7 @@ func TestBorrowingPriorityAndBatchClass(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 	}
-	st := e.srv.pools["b300"].Snapshot()
+	st := e.srv.pools["b300"].snapshot()
 	if st[1].Team != "etabB" || st[1].InFlight != 2 || st[1].Borrowing != 1 {
 		t.Fatalf("snapshot %+v", st[1])
 	}

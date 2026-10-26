@@ -65,7 +65,7 @@ func TestStreamAbortedBeforeUsageIsCharged(t *testing.T) {
 	}
 	waitIdle(t, e)
 
-	if u := e.srv.pools["b300"].Snapshot()[0].Usage; !(u > 0) {
+	if u := e.srv.pools["b300"].snapshot()[0].Usage; !(u > 0) {
 		t.Fatalf("fair-share usage not charged: %v", u)
 	}
 	if spent, ok := e.srv.budget.spent(store.BudgetKey{Kind: store.ScopeTeam, Name: "etabA"}); !ok || !(spent > 0) {

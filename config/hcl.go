@@ -65,6 +65,7 @@ type fileHCL struct {
 	SSO                  *ssoHCL         `hcl:"sso,block"`
 	KeyRotation          *rotHCL         `hcl:"key_rotation,block"`
 	SCIM                 *scimHCL        `hcl:"scim,block"`
+	HA                   *haHCL          `hcl:"ha,block"`
 	Policies             []policyHCL     `hcl:"policy,block"`
 	Audit                *auditHCL       `hcl:"audit,block"`
 	Exports              []exportHCL     `hcl:"export,block"`
@@ -170,6 +171,109 @@ type scimGroupHCL struct {
 	TeamRange hcl.Range `hcl:"team,attr_value_range"`
 	Role      *string   `hcl:"role,optional"`
 	DefRange  hcl.Range `hcl:",def_range"`
+}
+
+type haHCL struct {
+	ReplicaID           *string   `hcl:"replica_id,optional"`
+	ReplicaIDRange      hcl.Range `hcl:"replica_id,attr_value_range"`
+	Listen              string    `hcl:"listen"`
+	ListenRange         hcl.Range `hcl:"listen,attr_value_range"`
+	Advertise           *string   `hcl:"advertise,optional"`
+	AdvertiseRange      hcl.Range `hcl:"advertise,attr_value_range"`
+	PeerNetworks        []string  `hcl:"peer_networks"`
+	PeerNetworksRange   hcl.Range `hcl:"peer_networks,attr_value_range"`
+	SecretFile          string    `hcl:"secret_file"`
+	SecretFileRange     hcl.Range `hcl:"secret_file,attr_value_range"`
+	LeaseTTL            *string   `hcl:"lease_ttl,optional"`
+	LeaseTTLRange       hcl.Range `hcl:"lease_ttl,attr_value_range"`
+	Heartbeat           *string   `hcl:"heartbeat,optional"`
+	HeartbeatRange      hcl.Range `hcl:"heartbeat,attr_value_range"`
+	ForwardTimeout      *string   `hcl:"forward_timeout,optional"`
+	ForwardTimeoutRange hcl.Range `hcl:"forward_timeout,attr_value_range"`
+	UsagePersist        *string   `hcl:"usage_persist,optional"`
+	UsagePersistRange   hcl.Range `hcl:"usage_persist,attr_value_range"`
+	OnUnreachable       *string   `hcl:"on_owner_unreachable,optional"`
+	OnUnreachableRange  hcl.Range `hcl:"on_owner_unreachable,attr_value_range"`
+	DefRange            hcl.Range `hcl:",def_range"`
+}
+
+// HA defaults.
+const (
+	DefaultLeaseTTL       = 6 * time.Second
+	DefaultHeartbeat      = time.Second
+	DefaultForwardTimeout = 250 * time.Millisecond
+	DefaultUsagePersist   = 10 * time.Second
+)
+
+// buildHA validates the ha block: PostgreSQL is the only shared component,
+// so it needs the postgres store; the advertised address is an IP literal
+// inside peer_networks (an owner's address is read from the database and
+// dialled only there); the lease outlives three heartbeats and a forward
+// timeout fits in a heartbeat.
+func (v *validator) buildHA(h *haHCL, c *Config) *HA {
+	out := &HA{
+		ReplicaID: strOr(h.ReplicaID, ""), Listen: h.Listen, SecretFile: h.SecretFile,
+		LeaseTTL:           v.dur(h.LeaseTTL, h.LeaseTTLRange, "lease_ttl", DefaultLeaseTTL),
+		Heartbeat:          v.dur(h.Heartbeat, h.HeartbeatRange, "heartbeat", DefaultHeartbeat),
+		ForwardTimeout:     v.dur(h.ForwardTimeout, h.ForwardTimeoutRange, "forward_timeout", DefaultForwardTimeout),
+		UsagePersist:       v.dur(h.UsagePersist, h.UsagePersistRange, "usage_persist", DefaultUsagePersist),
+		OnOwnerUnreachable: strOr(h.OnUnreachable, "lowest_priority"),
+	}
+	out.Advertise = strOr(h.Advertise, h.Listen)
+	if out.ReplicaID != "" && !ValidName(out.ReplicaID) {
+		v.errf(h.ReplicaIDRange, "Invalid replica_id", "replica_id %q: want [A-Za-z0-9_.-]{1,64}", out.ReplicaID)
+	}
+	if c.Store.Kind != "postgres" {
+		v.errf(h.DefRange, "HA without PostgreSQL", "the ha block shares state through PostgreSQL: set store { kind = \"postgres\" }")
+	}
+	if _, _, err := net.SplitHostPort(h.Listen); err != nil {
+		v.errf(h.ListenRange, "Invalid listen", "listen %q: want host:port", h.Listen)
+	}
+	if h.Listen == c.Listen {
+		v.errf(h.ListenRange, "Internal listener on the client one", "ha listen %q must differ from the client listener", h.Listen)
+	}
+	if h.SecretFile == "" {
+		v.errf(h.SecretFileRange, "Missing secret_file", "the ha block needs secret_file (a shared secret of at least 32 bytes)")
+	}
+	out.PeerNetworks = v.prefixes(h.PeerNetworks, h.PeerNetworksRange, "peer_networks")
+	if len(h.PeerNetworks) == 0 {
+		v.errf(h.PeerNetworksRange, "Missing peer_networks", "peer_networks must list the networks the replicas live in")
+	}
+	r := h.AdvertiseRange
+	if h.Advertise == nil {
+		r = h.ListenRange
+	}
+	ap, err := netip.ParseAddrPort(out.Advertise)
+	switch {
+	case err != nil || ap.Port() == 0 || ap.Addr().IsUnspecified():
+		v.errf(r, "Invalid advertise address", "advertise %q: want the IP:port other replicas reach this one at (an IP literal, not 0.0.0.0)", out.Advertise)
+	default:
+		in := false
+		for _, p := range out.PeerNetworks {
+			in = in || p.Contains(ap.Addr().Unmap())
+		}
+		if !in && len(out.PeerNetworks) > 0 {
+			v.errf(r, "Advertise address outside peer_networks", "advertise %q is in none of peer_networks: the other replicas would refuse to dial it", out.Advertise)
+		}
+	}
+	if out.LeaseTTL < time.Second || out.LeaseTTL > 5*time.Minute {
+		v.errf(h.LeaseTTLRange, "Invalid lease_ttl", "lease_ttl %v: between 1s and 5m", out.LeaseTTL)
+	}
+	if out.Heartbeat*3 > out.LeaseTTL {
+		v.errf(h.HeartbeatRange, "Invalid heartbeat", "heartbeat %v: at most a third of lease_ttl (%v)", out.Heartbeat, out.LeaseTTL)
+	}
+	if out.ForwardTimeout > out.Heartbeat || out.ForwardTimeout > 5*time.Second {
+		v.errf(h.ForwardTimeoutRange, "Invalid forward_timeout", "forward_timeout %v: at most the heartbeat (%v) and 5s", out.ForwardTimeout, out.Heartbeat)
+	}
+	if out.UsagePersist < out.Heartbeat || out.UsagePersist > time.Hour {
+		v.errf(h.UsagePersistRange, "Invalid usage_persist", "usage_persist %v: between the heartbeat and 1h", out.UsagePersist)
+	}
+	switch out.OnOwnerUnreachable {
+	case "lowest_priority", "reject":
+	default:
+		v.errf(h.OnUnreachableRange, "Invalid on_owner_unreachable", "on_owner_unreachable %q: want \"lowest_priority\" or \"reject\"", out.OnOwnerUnreachable)
+	}
+	return out
 }
 
 type rotHCL struct {
@@ -1099,6 +1203,9 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		}
 		c.SSO = cs
 	}
+	if raw.HA != nil {
+		c.HA = v.buildHA(raw.HA, c)
+	}
 	if kr := raw.KeyRotation; kr != nil {
 		ck := &KeyRotation{VaultPrefix: strings.Trim(kr.VaultPrefix, "/"),
 			CheckInterval: v.dur(kr.CheckInterval, kr.CheckIntervalRange, "check_interval", time.Hour)}
@@ -1347,6 +1454,9 @@ func (c *Config) SecretRefs() []string {
 	}
 	if c.SCIM != nil {
 		add(c.SCIM.TokenFile)
+	}
+	if c.HA != nil {
+		add(c.HA.SecretFile)
 	}
 	add(c.Audit.SigningKeyFile)
 	for _, e := range c.Exports {
