@@ -566,7 +566,7 @@ type modelHCL struct {
 	Cost               *costHCL      `hcl:"cost,block"`
 	Upstreams          []upstreamHCL `hcl:"upstream,block"`
 	// Upstreams discovered from Slurm jobs (slurm.go).
-	Slurm *slurmHCL `hcl:"slurm,block"`
+	Slurm *slurmJobsHCL `hcl:"slurm,block"`
 	// An external provider (external.go).
 	Provider          *string     `hcl:"provider,optional"`
 	ProviderRange     hcl.Range   `hcl:"provider,attr_value_range"`
@@ -940,7 +940,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			if m.Provider != nil {
 				v.errf(m.Slurm.DefRange, "Slurm and provider", "model %q: an external provider's model cannot be discovered from Slurm", m.Name)
 			}
-			g.Slurm = v.slurm(m.Slurm, m.Name, strOr(m.KeyFile, ""))
+			g.Slurm = v.slurmJobs(m.Slurm, m.Name, strOr(m.KeyFile, ""))
 			slurmPools[g.Pool] = true
 		}
 		if len(m.Upstreams) == 0 && m.Slurm == nil {

@@ -10,9 +10,11 @@ import (
 	"github.com/hashicorp/hcl/v2"
 )
 
-// Slurm makes the running Slurm jobs of a convention the upstreams of a
-// model (#75): vLLM instances run as long jobs of a service account and
-// come and go with the cluster's schedule; the gateway follows them.
+// SlurmJobs (a model's slurm block; the top-level slurm block is the
+// accounting input, Slurm) makes the running Slurm jobs of a convention
+// the upstreams of a model (#75): vLLM instances run as long jobs of a
+// service account and come and go with the cluster's schedule; the
+// gateway follows them.
 //
 // References opened 2026-10-26: Slurm master
 // src/slurmrestd/plugins/openapi/slurmctld/api.c (GET
@@ -21,7 +23,7 @@ import (
 // partition, user_name, batch_host, job_state), src/slurmrestd/plugins/
 // auth/jwt/jwt.c (X-SLURM-USER-TOKEN, X-SLURM-USER-NAME), and
 // slurm.schedmd.com/jwt.html.
-type Slurm struct {
+type SlurmJobs struct {
 	// URL is slurmrestd's base URL (configuration only: never derived
 	// from anything a job or client says).
 	URL string
@@ -58,7 +60,7 @@ type Slurm struct {
 // DefaultSlurmAPIVersion is Slurm 25.05's data_parser.
 const DefaultSlurmAPIVersion = "v0.0.44"
 
-type slurmHCL struct {
+type slurmJobsHCL struct {
 	URL                 string    `hcl:"url"`
 	URLRange            hcl.Range `hcl:"url,attr_value_range"`
 	APIVersion          *string   `hcl:"api_version,optional"`
@@ -92,8 +94,8 @@ var (
 )
 
 // slurm converts and checks a model's slurm block.
-func (v *validator) slurm(s *slurmHCL, model, keyFile string) *Slurm {
-	out := &Slurm{
+func (v *validator) slurmJobs(s *slurmJobsHCL, model, keyFile string) *SlurmJobs {
+	out := &SlurmJobs{
 		URL: strings.TrimRight(s.URL, "/"), APIVersion: strOr(s.APIVersion, DefaultSlurmAPIVersion), TokenFile: s.TokenFile,
 		UserName: strOr(s.UserName, ""), KeyFile: keyFile, Accounts: s.Accounts, Partitions: s.Partitions, Users: s.Users,
 		Interval:   v.dur(s.Interval, s.IntervalRange, "interval", 15*time.Second),

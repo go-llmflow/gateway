@@ -557,7 +557,7 @@ type ModelGroup struct {
 	Upstreams     []Upstream
 	// Slurm, when set, adds the running Slurm jobs of the convention
 	// llmflow:<model>:<port>[:<capacity>] as upstreams (#75).
-	Slurm *Slurm
+	Slurm *SlurmJobs
 	Cost  Cost
 	// Fallbacks are tried in order when no upstream of this group can take
 	// the request (all down, or vLLM answers 429/503) before anything was

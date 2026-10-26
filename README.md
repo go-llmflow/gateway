@@ -1320,7 +1320,7 @@ References opened on 2026-10-26:
 
 ### vLLM instances as Slurm jobs: elastic pools (#75)
 
-A model can take its upstreams from **Slurm**, instead of (or on top of) static `upstream` blocks. The vLLM instances run as long jobs of a service account, for example account `svc_llm` with QOS `service`. They can be stopped at night so that the GPUs can be lent to a borrowing QOS. The gateway **follows** the running jobs; it never starts or stops one. Slurm (scrontab) or the operator does that.
+A model can take its upstreams from **Slurm**, instead of (or on top of) static `upstream` blocks. This is the `slurm` block *inside a `model` block*. The top-level `slurm` block is a different thing: the accounting input of the reconciliation reports. The vLLM instances run as long jobs of a service account, for example account `svc_llm` with QOS `service`. They can be stopped at night so that the GPUs can be lent to a borrowing QOS. The gateway **follows** the running jobs; it never starts or stops one. Slurm (scrontab) or the operator does that.
 
 ```hcl
 pool "gpu" { capacity = 0 }   # 0: C is the sum of the instances' capacities

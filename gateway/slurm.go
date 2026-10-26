@@ -59,7 +59,7 @@ var hostRe = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252})$`)
 type slurmDiscovery struct {
 	s     *Server
 	g     *group
-	cfg   config.Slurm
+	cfg   config.SlurmJobs
 	key   string // the instances' vLLM --api-key
 	token string // slurmrestd's JWT
 	// static is the group's configured upstreams, always kept.

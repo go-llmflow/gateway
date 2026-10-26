@@ -341,7 +341,7 @@ func FuzzSlurmQualify(f *testing.F) {
 		f.Add(s[0], s[1])
 	}
 	d := &slurmDiscovery{s: &Server{log: slog.New(slog.DiscardHandler), met: newMetrics()}, g: &group{cfg: config.ModelGroup{Name: "llama"}},
-		cfg:     config.Slurm{Accounts: []string{"svc"}, Partitions: []string{"gpu"}, Scheme: "http", InstanceCapacity: 1, MaxInstanceCapacity: 8},
+		cfg:     config.SlurmJobs{Accounts: []string{"svc"}, Partitions: []string{"gpu"}, Scheme: "http", InstanceCapacity: 1, MaxInstanceCapacity: 8},
 		ignored: map[string]bool{}}
 	f.Fuzz(func(t *testing.T, name, host string) {
 		c, ok := d.qualify(slurmJob{JobID: 1, Name: name, Account: "svc", Partition: "gpu", BatchHost: host, JobState: json.RawMessage(`["RUNNING"]`)})
