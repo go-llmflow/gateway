@@ -424,9 +424,24 @@ func (s *Server) Handler() http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/ui/") {
 			uiHeaders(w)
 		}
+		// Administration (API, UI, SSO, SCIM) reads the store on every
+		// request: bounded, so a partitioned store answers 503 instead of
+		// holding requests (A6). The chain verification reads the whole log.
+		if p := r.URL.Path; strings.HasPrefix(p, "/admin/") || strings.HasPrefix(p, "/ui/") || strings.HasPrefix(p, "/scim/") {
+			d := adminTimeout
+			if p == "/admin/audit/verify" || p == "/ui/audit/verify" {
+				d = s.cfg.Limits.MaxRequestDuration
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), d)
+			defer cancel()
+			r = r.WithContext(ctx)
+		}
 		mux.ServeHTTP(w, r)
 	})
 }
+
+// adminTimeout bounds an administration request.
+const adminTimeout = 60 * time.Second
 
 // writeGrace lets the error answer of a request that reached
 // max_request_duration still be written.
