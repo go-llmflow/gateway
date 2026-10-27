@@ -3,6 +3,7 @@ package config
 import (
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/hcl/v2"
@@ -39,6 +40,16 @@ const (
 	// stays far inside the integers the escrow adds (security audit #87:
 	// overflow).
 	MaxPrice = 1e6
+	// ContextBetaPrefix names Anthropic's context-window betas
+	// (context-1m-2025-08-07, platform.claude.com/docs/en/release-notes/overview),
+	// which widened the window to ContextBetaWindow tokens.
+	ContextBetaPrefix = "context-1m-"
+	ContextBetaWindow = 1_000_000
+	// CompactBetaPrefix names Anthropic's compaction betas: threshold
+	// compaction (compact-2026-01-12) adds a sampling step that the
+	// top-level usage does not report (build-with-claude/compaction-threshold,
+	// "Understanding usage"); on-demand compaction is compact-2026-09-04.
+	CompactBetaPrefix = "compact-"
 )
 
 type budgetsHCL struct {
@@ -92,6 +103,17 @@ func (v *validator) budgets(raw *fileHCL, c *Config) {
 				v.errf(m.MaxModelLenRange, "Invalid max_model_len", "%s: a provider's model sets context_window, not max_model_len", where)
 			}
 			g.MaxModelLen = tokens(m.ContextWindow, m.ContextWindowRange, "context_window")
+			// A beta may widen the window past the bound (review F1):
+			// context-1m-2025-08-07 gave Claude Sonnet 4 and 4.5 a 1M-token
+			// window (release notes, 2026-03-30 and 2026-04-30).
+			for _, b := range m.AnthropicBetas {
+				if (b == "*" || strings.HasPrefix(b, ContextBetaPrefix)) && g.MaxModelLen < ContextBetaWindow {
+					v.errf(m.BetasRange, "Context beta wider than context_window",
+						"%s: anthropic_betas admits %q, which can extend the context window to %d tokens: set context_window = %d (or more), or do not allow the beta; a budget's bound would otherwise be too small",
+						where, b, ContextBetaWindow, ContextBetaWindow)
+					break
+				}
+			}
 		} else {
 			if m.ContextWindow != nil {
 				v.errf(m.ContextWindowRange, "Invalid context_window", "%s: a vLLM model sets max_model_len (or reads it from /v1/models), not context_window", where)

@@ -3,6 +3,7 @@ package gateway
 import (
 	"math"
 	"math/bits"
+	"strings"
 
 	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/openai"
@@ -209,6 +210,29 @@ func (p groupPrices) worstCase(sh openai.Shape, l, m int64, provider bool) (int6
 		}
 	}
 	return per.mulSmall(inputs).perMillion(), true
+}
+
+// betaUnbounded returns why the Anthropic betas a request carries (those
+// the model forwards) break the bound of a budgeted request, or "": a
+// context beta wider than the configured context_window, or a compaction
+// beta, whose extra sampling step the top-level usage does not report
+// (config.CompactBetaPrefix). Review F1 of #87.
+func betaUnbounded(g *group, betas []string) string {
+	if g.cfg.External == nil {
+		return ""
+	}
+	for _, b := range betas {
+		if !g.cfg.External.AllowsBeta(b) {
+			continue // not forwarded
+		}
+		switch {
+		case strings.HasPrefix(b, config.ContextBetaPrefix) && g.cfg.MaxModelLen < config.ContextBetaWindow:
+			return "the beta " + b + " widens the context window beyond this model's context_window"
+		case strings.HasPrefix(b, config.CompactBetaPrefix):
+			return "the beta " + b + " adds a compaction step whose tokens the response's top-level usage does not report"
+		}
+	}
+	return ""
 }
 
 // largestFit returns the largest output bound in [lo, hi] whose W fits in

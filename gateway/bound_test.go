@@ -1,9 +1,11 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/openai"
@@ -101,17 +103,72 @@ func TestContextLenFromModels(t *testing.T) {
 	if l := e.srv.groups["llama-batch"].contextLen(); l != 64 {
 		t.Fatalf("configured %d", l)
 	}
-	g := &group{}
-	g.noteLen(100)
-	g.noteLen(50)
-	g.noteLen(-1)
-	g.noteLen(1 << 40)
-	if g.contextLen() != 100 {
-		t.Fatalf("kept %d", g.contextLen())
+	// Review F2: an upstream that joined (or came back) since the last read
+	// neither sets the bound nor serves a request held on it.
+	g := e.srv.groups["llama"]
+	read := g.members()[0]
+	fresh := newUpstream("http://127.0.0.1:1", "k")
+	big := []modelCard{{ID: "meta/llama", MaxModelLen: 4096}}
+	g.setMembers([]*upstream{read, fresh})
+	if l := g.contextLen(); l != 128 {
+		t.Fatalf("an unread upstream changed the bound: %d", l)
+	}
+	for i := 0; i < 5; i++ {
+		read.inflight.Store(100) // the unread one is less loaded
+		if u := g.pick(map[*upstream]bool{}, time.Now(), true); u != read {
+			t.Fatal("a held request went to an upstream whose context length is unknown")
+		}
+		if u := g.pick(map[*upstream]bool{read: true}, time.Now(), true); u != nil {
+			t.Fatal("the unread upstream served as a last resort")
+		}
+	}
+	fresh.cards.Store(&big)
+	if l := g.contextLen(); l != 4096 {
+		t.Fatalf("the largest known bound: %d", l)
+	}
+	read.inflight.Store(0)
+	// A failed probe forgets the cards.
+	e.srv.probeAll(context.Background())
+	if _, ok := fresh.cardLen("meta/llama"); ok {
+		t.Fatal("cards kept after a failed health check")
+	}
+	if _, ok := read.cardLen("meta/llama"); !ok {
+		t.Fatal("cards of a healthy upstream lost")
 	}
 	cards := []modelCard{{ID: "a", MaxModelLen: 10}, {ID: "b", MaxModelLen: 30}}
 	if lenFor(cards, "a") != 10 || lenFor(cards, "lora") != 30 || lenFor(nil, "a") != 0 {
 		t.Fatal("lenFor")
+	}
+}
+
+func TestBetaUnbounded(t *testing.T) {
+	g := &group{cfg: config.ModelGroup{MaxModelLen: 200000, External: &config.External{Betas: []string{"*"}}}}
+	for _, c := range []struct {
+		betas []string
+		bad   bool
+	}{
+		{nil, false},
+		{[]string{"context-management-2025-06-27"}, false},
+		{[]string{"context-management-2025-06-27", "context-1m-2025-08-07"}, true},
+		{[]string{"compact-2026-01-12"}, true},
+		{[]string{"compact-2026-09-04"}, true},
+	} {
+		if got := betaUnbounded(g, c.betas); (got != "") != c.bad {
+			t.Errorf("%v: %q", c.betas, got)
+		}
+	}
+	// A window that covers the beta, a beta that is not forwarded, a vLLM
+	// model: nothing to refuse.
+	g.cfg.MaxModelLen = 1_000_000
+	if betaUnbounded(g, []string{"context-1m-2025-08-07"}) != "" {
+		t.Error("a covered context beta refused")
+	}
+	g.cfg.External.Betas = []string{"context-management-2025-06-27"}
+	if betaUnbounded(g, []string{"compact-2026-01-12"}) != "" {
+		t.Error("a beta that is not forwarded refused")
+	}
+	if betaUnbounded(&group{}, []string{"compact-2026-01-12"}) != "" {
+		t.Error("a vLLM model refused for a beta")
 	}
 }
 

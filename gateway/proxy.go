@@ -617,7 +617,7 @@ func (s *Server) sendTyped(ctx context.Context, g *group, path string, body []by
 		}
 	}
 	for attempt := 0; attempt <= s.cfg.Retries; attempt++ {
-		u := g.pick(tried, s.now())
+		u := g.pick(tried, s.now(), boundOnly(ctx) && g.learnedLen())
 		if u == nil {
 			break
 		}

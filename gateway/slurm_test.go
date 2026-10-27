@@ -288,7 +288,7 @@ func TestSlurmDrainWaitsForInflight(t *testing.T) {
 	if len(g.members()) != 1 || !u.draining.Load() || e.srv.poolCapacity("gpu") != 0 {
 		t.Fatalf("draining with a request in flight: %d members, draining %v, C %d", len(g.members()), u.draining.Load(), e.srv.poolCapacity("gpu"))
 	}
-	if g.pick(map[*upstream]bool{}, time.Now()) != nil {
+	if g.pick(map[*upstream]bool{}, time.Now(), false) != nil {
 		t.Fatal("a draining instance was picked")
 	}
 	u.inflight.Add(-1)
