@@ -73,6 +73,7 @@ type fileHCL struct {
 	Guardrails           []guardrailHCL  `hcl:"guardrail,block"`
 	Tracing              *tracingHCL     `hcl:"tracing,block"`
 	MCPServers           []mcpServerHCL  `hcl:"mcp_server,block"`
+	Budgets              *budgetsHCL     `hcl:"budgets,block"`
 }
 
 type loggingHCL struct {
@@ -626,7 +627,14 @@ type modelHCL struct {
 	AnthropicBetas    []string    `hcl:"anthropic_betas,optional"`
 	BetasRange        hcl.Range   `hcl:"anthropic_betas,attr_value_range"`
 	OrgKeys           []orgKeyHCL `hcl:"org_key,block"`
-	DefRange          hcl.Range   `hcl:",def_range"`
+	// The bound of a request's usage (hard budgets, budgets.go).
+	MaxModelLen          *int64    `hcl:"max_model_len,optional"`
+	MaxModelLenRange     hcl.Range `hcl:"max_model_len,attr_value_range"`
+	ContextWindow        *int64    `hcl:"context_window,optional"`
+	ContextWindowRange   hcl.Range `hcl:"context_window,attr_value_range"`
+	MaxOutputTokens      *int64    `hcl:"max_output_tokens,optional"`
+	MaxOutputTokensRange hcl.Range `hcl:"max_output_tokens,attr_value_range"`
+	DefRange             hcl.Range `hcl:",def_range"`
 }
 
 // Error is a configuration error: HCL diagnostics with file:line:column
@@ -1487,6 +1495,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	c.Tracing = v.tracing(raw.Tracing)
 	c.MCPServers = v.mcpServers(raw.MCPServers)
 	v.external(raw, c)
+	v.budgets(raw, c)
 	// Every *_file attribute is a secret reference: a file, or a field of
 	// an OpenBao/Vault KV v2 secret (package secret).
 	for _, ref := range c.SecretRefs() {

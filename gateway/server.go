@@ -212,7 +212,7 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 	// one object, so its in-flight count and cooldown are shared too.
 	ups := map[[2]string]*upstream{}
 	for _, g := range cfg.ModelGroups {
-		gr := &group{cfg: g, pool: s.pools[g.Pool], class: fairshare.Interactive}
+		gr := &group{cfg: g, pool: s.pools[g.Pool], class: fairshare.Interactive, prices: pricesFor(g.Cost)}
 		if g.Class == config.Batch {
 			gr.class = fairshare.Batch
 		}

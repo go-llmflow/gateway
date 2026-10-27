@@ -30,6 +30,12 @@ model "claude-sonnet" {
   allow_external  = true
   orgs            = ["etabA", "etabB"]
   anthropic_betas = ["context-management-2025-06-27"]
+  # Under a budget, a request is held at its worst-case cost before it is
+  # sent (hard budgets): its input is bounded by the context window and its
+  # output by max_tokens. Claude Sonnet 5.5: a 1M-token window by default,
+  # up to 128k output tokens (platform.claude.com/docs/en/build-with-claude/context-windows).
+  context_window    = 1000000
+  max_output_tokens = 128000
   cost {
     # USD per million tokens, from platform.claude.com/docs/en/about-claude/pricing
     unit                    = "USD"

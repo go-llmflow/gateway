@@ -3,6 +3,7 @@ package gateway
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"io"
 	"math"
 	"net/http"
@@ -34,6 +35,22 @@ type upstream struct {
 	// or it failed health, slurm.go): it takes no new request, not even as
 	// the last resort of pick, and is removed once idle.
 	draining atomic.Bool
+	// cards are the model cards of its /v1/models, read by the health
+	// check that found it healthy; nil when unread since it last became
+	// healthy (a new or restarted instance, a failed read). A request held
+	// under a budget on a learned context length goes only to an upstream
+	// whose cards are known (#87, review F2).
+	cards atomic.Pointer[[]modelCard]
+}
+
+// cardLen is the max_model_len the upstream reported for model, and
+// whether its cards are known.
+func (u *upstream) cardLen(model string) (int64, bool) {
+	p := u.cards.Load()
+	if p == nil {
+		return 0, false
+	}
+	return lenFor(*p, model), true
 }
 
 func (u *upstream) available(now time.Time) bool {
@@ -50,7 +67,42 @@ type group struct {
 	ext *extRuntime
 	// disc is set when Slurm jobs provide upstreams (slurm.go).
 	disc *slurmDiscovery
+	// prices are the cost's prices as integers (bound.go).
+	prices groupPrices
 }
+
+// contextLen is the context length that bounds a request's input: the
+// configured one, else the largest max_model_len that the upstreams whose
+// cards are known report for the model (a request held on it is routed to
+// those only, see boundOnly); 0 when unknown.
+func (g *group) contextLen() int64 {
+	if g.cfg.MaxModelLen > 0 {
+		return g.cfg.MaxModelLen
+	}
+	var best int64
+	for _, u := range g.members() {
+		if n, ok := u.cardLen(g.cfg.UpstreamModel); ok && n <= config.MaxTokensBound {
+			best = max(best, n)
+		}
+	}
+	return best
+}
+
+// learnedLen reports whether the group's context length is learned from
+// the upstreams rather than configured.
+func (g *group) learnedLen() bool { return g.cfg.MaxModelLen == 0 && g.ext == nil }
+
+type boundOnlyKey struct{}
+
+// withBoundOnly marks a request held under a budget on a learned context
+// length: it may only go to an upstream whose cards are known, never to one
+// that joined or came back since the last read (whose context could be
+// larger than the bound).
+func withBoundOnly(ctx context.Context) context.Context {
+	return context.WithValue(ctx, boundOnlyKey{}, true)
+}
+
+func boundOnly(ctx context.Context) bool { b, _ := ctx.Value(boundOnlyKey{}).(bool); return b }
 
 // members is the group's current upstream set: static for a configured
 // group, replaced as a whole (never modified in place) by discovery.
@@ -84,11 +136,19 @@ func (g *group) queueSaturated() bool {
 // skipping those already tried. When none is available (all unhealthy or
 // cooling down) it falls back to the least loaded untried one: a stale
 // health verdict must not turn into a full outage.
-func (g *group) pick(tried map[*upstream]bool, now time.Time) *upstream {
+//
+// With known set (a request held on a learned context length), only the
+// upstreams whose cards are known qualify, even as the last resort.
+func (g *group) pick(tried map[*upstream]bool, now time.Time, known bool) *upstream {
 	var best, fallback *upstream
 	for _, u := range g.members() {
 		if tried[u] || u.draining.Load() {
 			continue
+		}
+		if known {
+			if _, ok := u.cardLen(g.cfg.UpstreamModel); !ok {
+				continue
+			}
 		}
 		if fallback == nil || u.inflight.Load() < fallback.inflight.Load() {
 			fallback = u
@@ -141,6 +201,17 @@ func (s *Server) probeAll(ctx context.Context) {
 			}
 		}
 	}
+	// The context lengths (hard budgets): the /v1/models of each upstream
+	// of a model that does not configure max_model_len, read in the same
+	// pass that finds it healthy, before it is marked healthy.
+	learn := map[*upstream]bool{}
+	for _, g := range s.groups {
+		if g.learnedLen() {
+			for _, u := range g.members() {
+				learn[u] = true
+			}
+		}
+	}
 	seen := map[*upstream]bool{}
 	for _, g := range s.groups {
 		for _, u := range g.members() {
@@ -148,12 +219,71 @@ func (s *Server) probeAll(ctx context.Context) {
 				continue
 			}
 			seen[u] = true
-			u.healthy.Store(s.probe(ctx, u))
+			ok := s.probe(ctx, u)
+			switch {
+			case !ok:
+				u.cards.Store(nil)
+			case learn[u]:
+				if cs := s.readModels(ctx, u); cs != nil {
+					u.cards.Store(&cs)
+				} else {
+					u.cards.Store(nil)
+				}
+			}
+			u.healthy.Store(ok)
 			if scrape[u] {
 				u.waiting.Store(s.scrapeWaiting(ctx, u))
 			}
 		}
 	}
+}
+
+// modelCard is the part of vLLM's ModelCard the gateway reads
+// (vllm/entrypoints/openai/models/protocol.py, served by GET /v1/models;
+// serving.py fills max_model_len from the model config).
+type modelCard struct {
+	ID          string `json:"id"`
+	MaxModelLen int64  `json:"max_model_len"`
+}
+
+// readModels reads an upstream's model cards; nil when it cannot.
+func (s *Server) readModels(ctx context.Context, u *upstream) []modelCard {
+	ctx, cancel := context.WithTimeout(ctx, s.cfg.Health.Timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.joinURL("/v1/models"), nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+u.apiKey)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var list struct {
+		Data []modelCard `json:"data"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, maxModelsBody)).Decode(&list) != nil {
+		return nil
+	}
+	return list.Data
+}
+
+// lenFor returns the max_model_len of the card named model, or, when no
+// card has that name (a LoRA naming scheme, an alias), the largest of all:
+// the bound must not be too small. 0 when none reports one.
+func lenFor(cards []modelCard, model string) int64 {
+	var best int64
+	for _, c := range cards {
+		if c.ID == model && c.MaxModelLen > 0 {
+			return c.MaxModelLen
+		}
+		best = max(best, c.MaxModelLen)
+	}
+	return best
 }
 
 func (s *Server) probe(ctx context.Context, u *upstream) bool {

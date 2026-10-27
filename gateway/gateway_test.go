@@ -762,12 +762,12 @@ func TestHealthChecks(t *testing.T) {
 	if ms[0].healthy.Load() || !ms[1].healthy.Load() {
 		t.Fatal("health verdicts wrong")
 	}
-	if u := g.pick(map[*upstream]bool{}, time.Now()); u != ms[1] {
+	if u := g.pick(map[*upstream]bool{}, time.Now(), false); u != ms[1] {
 		t.Fatal("picked the unhealthy upstream")
 	}
 	// All unavailable: fall back rather than fail.
 	ms[1].healthy.Store(false)
-	if u := g.pick(map[*upstream]bool{}, time.Now()); u == nil {
+	if u := g.pick(map[*upstream]bool{}, time.Now(), false); u == nil {
 		t.Fatal("no fallback")
 	}
 	if redactURL("http://h:1/x?y") != "http://h:1" || redactURL("%") != "invalid" {

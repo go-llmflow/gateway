@@ -1,0 +1,11 @@
+go test fuzz v1
+int(88)
+[]byte("{}")
+int64(512)
+int64(-3)
+float64(0.02)
+float64(0)
+float64(0)
+float64(0)
+int64(0)
+bool(false)
