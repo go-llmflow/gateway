@@ -73,6 +73,12 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	if r.URL.Path == "/v1/models" {
+		// vLLM's ModelList (max_model_len read at health check, #87).
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"object":"list","data":[{"id":"meta/llama","object":"model","max_model_len":128}]}`)
+		return
+	}
 	raw, _ := io.ReadAll(r.Body)
 	var body map[string]any
 	_ = json.Unmarshal(raw, &body)

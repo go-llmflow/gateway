@@ -30,6 +30,11 @@ model "claude-sonnet" {
   allow_external  = true
   orgs            = ["etabA", "etabB"]
   anthropic_betas = ["context-management-2025-06-27"]
+  # Under a budget, a request is held at its worst-case cost before it is
+  # sent (hard budgets): its input is bounded by the context window (the
+  # largest any allowed beta can reach) and its output by max_tokens.
+  context_window    = 200000
+  max_output_tokens = 64000
   cost {
     # USD per million tokens, from platform.claude.com/docs/en/about-claude/pricing
     unit                    = "USD"

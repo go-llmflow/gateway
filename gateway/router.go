@@ -3,6 +3,7 @@ package gateway
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"io"
 	"math"
 	"net/http"
@@ -50,6 +51,35 @@ type group struct {
 	ext *extRuntime
 	// disc is set when Slurm jobs provide upstreams (slurm.go).
 	disc *slurmDiscovery
+	// prices are the cost's prices as integers (bound.go).
+	prices groupPrices
+	// seenLen is the largest max_model_len the upstreams' /v1/models
+	// reported for this model (0: none yet), used when the configuration
+	// does not set max_model_len.
+	seenLen atomic.Int64
+}
+
+// contextLen is the context length that bounds a request's input: the
+// configured one, else the largest an upstream reported; 0 when unknown.
+func (g *group) contextLen() int64 {
+	if g.cfg.MaxModelLen > 0 {
+		return g.cfg.MaxModelLen
+	}
+	return g.seenLen.Load()
+}
+
+// noteLen records a max_model_len an upstream reported: the group keeps
+// the largest, since a request may be served by any of its upstreams.
+func (g *group) noteLen(n int64) {
+	if n <= 0 || n > config.MaxTokensBound {
+		return
+	}
+	for {
+		cur := g.seenLen.Load()
+		if n <= cur || g.seenLen.CompareAndSwap(cur, n) {
+			return
+		}
+	}
 }
 
 // members is the group's current upstream set: static for a configured
@@ -154,6 +184,73 @@ func (s *Server) probeAll(ctx context.Context) {
 			}
 		}
 	}
+	// The context lengths (hard budgets): each healthy upstream's
+	// /v1/models, once per pass, for the models that do not configure one.
+	cards := map[*upstream][]modelCard{}
+	for _, g := range s.groups {
+		if g.cfg.MaxModelLen > 0 || g.ext != nil {
+			continue
+		}
+		for _, u := range g.members() {
+			if u.external || !u.healthy.Load() {
+				continue
+			}
+			cs, ok := cards[u]
+			if !ok {
+				cs = s.readModels(ctx, u)
+				cards[u] = cs
+			}
+			g.noteLen(lenFor(cs, g.cfg.UpstreamModel))
+		}
+	}
+}
+
+// modelCard is the part of vLLM's ModelCard the gateway reads
+// (vllm/entrypoints/openai/models/protocol.py, served by GET /v1/models;
+// serving.py fills max_model_len from the model config).
+type modelCard struct {
+	ID          string `json:"id"`
+	MaxModelLen int64  `json:"max_model_len"`
+}
+
+// readModels reads an upstream's model cards; nil when it cannot.
+func (s *Server) readModels(ctx context.Context, u *upstream) []modelCard {
+	ctx, cancel := context.WithTimeout(ctx, s.cfg.Health.Timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.joinURL("/v1/models"), nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+u.apiKey)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var list struct {
+		Data []modelCard `json:"data"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, maxModelsBody)).Decode(&list) != nil {
+		return nil
+	}
+	return list.Data
+}
+
+// lenFor returns the max_model_len of the card named model, or, when no
+// card has that name (a LoRA naming scheme, an alias), the largest of all:
+// the bound must not be too small. 0 when none reports one.
+func lenFor(cards []modelCard, model string) int64 {
+	var best int64
+	for _, c := range cards {
+		if c.ID == model && c.MaxModelLen > 0 {
+			return c.MaxModelLen
+		}
+		best = max(best, c.MaxModelLen)
+	}
+	return best
 }
 
 func (s *Server) probe(ctx context.Context, u *upstream) bool {

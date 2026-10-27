@@ -84,6 +84,8 @@ type Config struct {
 	KeyRotation *KeyRotation
 	// SCIM, when set, serves SCIM 2.0 provisioning at /scim/v2.
 	SCIM *SCIM
+	// Budgets tunes the hard budgets' escrow (budgets.go).
+	Budgets Budgets
 	// HA, when set, runs this gateway as one of several replicas sharing
 	// the pools through PostgreSQL (pool ownership by lease, package ha).
 	// Absent: one replica, everything in its memory, as before.
@@ -581,6 +583,15 @@ type ModelGroup struct {
 	// External is set for a model served by an external provider
 	// (external.go); nil for vLLM.
 	External *External
+	// MaxModelLen is the context length that bounds a request's input (hard
+	// budgets): max_model_len for vLLM (0: read from the upstreams'
+	// /v1/models), context_window for an external provider (0: unknown, so
+	// the model is refused under a budget).
+	MaxModelLen int64
+	// MaxOutputTokens, when > 0, caps the max_tokens a request may ask for:
+	// a larger one is refused, a missing one becomes this cap (or less, to
+	// fit a budget).
+	MaxOutputTokens int64
 }
 
 // FallsBackOn reports whether the group takes its fallbacks on reason.

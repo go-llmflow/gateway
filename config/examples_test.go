@@ -21,6 +21,9 @@ func TestAnthropicExample(t *testing.T) {
 	if g == nil || g.External == nil || g.External.Provider != ProviderAnthropic || !g.External.RequireGuardrails {
 		t.Fatalf("claude-sonnet: %+v", g)
 	}
+	if g.MaxModelLen != 200000 || g.MaxOutputTokens != 64000 {
+		t.Fatalf("token bounds %d %d", g.MaxModelLen, g.MaxOutputTokens)
+	}
 	if g.Cost.Unit != "USD" || g.Cost.PriceDate != "2026-10-26" || g.Cost.CacheWrite1hPerMTok != 4 {
 		t.Fatalf("cost %+v", g.Cost)
 	}
