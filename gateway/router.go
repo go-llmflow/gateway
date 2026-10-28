@@ -98,11 +98,16 @@ type boundOnlyKey struct{}
 // length: it may only go to an upstream whose cards are known, never to one
 // that joined or came back since the last read (whose context could be
 // larger than the bound).
-func withBoundOnly(ctx context.Context) context.Context {
-	return context.WithValue(ctx, boundOnlyKey{}, true)
+// held says, when the upstream is picked, whether the request is held (it
+// can move to a fallback, with another hold, in between).
+func withBoundOnly(ctx context.Context, held func() bool) context.Context {
+	return context.WithValue(ctx, boundOnlyKey{}, held)
 }
 
-func boundOnly(ctx context.Context) bool { b, _ := ctx.Value(boundOnlyKey{}).(bool); return b }
+func boundOnly(ctx context.Context) bool {
+	f, _ := ctx.Value(boundOnlyKey{}).(func() bool)
+	return f != nil && f()
+}
 
 // members is the group's current upstream set: static for a configured
 // group, replaced as a whole (never modified in place) by discovery.

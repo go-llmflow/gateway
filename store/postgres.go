@@ -389,25 +389,32 @@ func (p *Postgres) KeyByHash(ctx context.Context, h [32]byte) (Key, error) {
 
 var usageCols = []string{"record_id", "ts", "org", "team", "project", "key_id", "model", "pool", "upstream", "prompt_tokens",
 	"completion_tokens", "cached_tokens", "cost", "unit", "latency_ms", "status", "priority", "borrowing", "stream", "estimated", "tags",
-	"user_name", "lab"}
+	"user_name", "lab", "cost_nano", "admitted_at"}
 
 // InsertRecords writes a batch: COPY into a temporary table, then one
 // INSERT that skips the records whose ID is already stored, so a batch
-// replayed from the accounting spool is never billed twice.
+// replayed from the accounting spool is never billed twice. The holds of
+// the records it inserted are settled in the same transaction (ledger.go):
+// a replayed record settles nothing twice either.
 func (p *Postgres) InsertRecords(ctx context.Context, recs []Record) error {
 	rows := make([][]any, len(recs))
+	byID := make(map[string]Record, len(recs))
 	for i, r := range recs {
 		tags := r.Tags
 		if tags == nil {
 			tags = []string{}
 		}
-		var id any
+		var id, admitted any
 		if r.ID != "" {
 			id = r.ID
+			byID[r.ID] = r
+		}
+		if !r.AdmittedAt.IsZero() {
+			admitted = r.AdmittedAt
 		}
 		rows[i] = []any{id, r.Time, r.Org, r.Team, r.Project, r.KeyID, r.Model, r.Pool, r.Upstream, r.PromptTokens,
 			r.CompletionTokens, r.CachedTokens, r.Cost, r.Unit, r.LatencyMS, r.Status, r.Priority, r.Borrowing, r.Stream, r.Estimated, tags,
-			r.User, r.Lab}
+			r.User, r.Lab, RecordCostNano(r), admitted}
 	}
 	cols := strings.Join(usageCols, ", ")
 	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
@@ -417,8 +424,21 @@ func (p *Postgres) InsertRecords(ctx context.Context, recs []Record) error {
 		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"llmflow_usage_in"}, usageCols, pgx.CopyFromRows(rows)); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO llmflow_usage (`+cols+`) SELECT `+cols+` FROM llmflow_usage_in ON CONFLICT (record_id) DO NOTHING`)
-		return err
+		ins, err := tx.Query(ctx, `INSERT INTO llmflow_usage (`+cols+`) SELECT `+cols+` FROM llmflow_usage_in ON CONFLICT (record_id) DO NOTHING RETURNING record_id`)
+		if err != nil {
+			return err
+		}
+		ids, err := pgx.CollectRows(ins, pgx.RowTo[*string])
+		if err != nil {
+			return err
+		}
+		s := settlement{spent: map[ledgerKey]int64{}, dec: map[ledgerKey]map[Holder]int64{}}
+		for _, id := range ids {
+			if id != nil {
+				s.add(byID[*id])
+			}
+		}
+		return s.apply(ctx, tx)
 	})
 }
 

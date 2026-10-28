@@ -153,6 +153,7 @@ model "claude" {
   allow_external = true
   orgs           = ["etabA", "etabB"]
   anthropic_betas = ["context-management-2025-06-27"]
+  context_window  = 1000
   cost {
     unit                    = "USD"
     price_date              = "2026-10-26"
@@ -332,11 +333,34 @@ func TestAnthropicBudgetInUSD(t *testing.T) {
 			t.Fatalf("a GPU-hours budget refused a USD request: %d", resp.StatusCode)
 		}
 	}
+	// A budget created mid-period starts from the usage already stored.
+	e.waitRecords(2)
 	e.setBudget(`{"kind":"org","name":"etabA","period":"day","max_cost":0.0003,"unit":"USD"}`)
 	n := up.count()
 	resp := e.do("POST", "/v1/messages", keyA, anthMsg(false))
 	if readAll(t, resp); resp.StatusCode != 429 || up.count() != n {
 		t.Fatalf("over the USD budget (2 × %v > 0.0003): %d, provider calls %d → %d", fakeAnthCost, resp.StatusCode, n, up.count())
+	}
+	// Hard budgets: a request is held at its worst case, L·p_in + M·p_out =
+	// 1000 × 4 + 16 × 10 per million = 0.00416 USD, before it leaves.
+	e.setBudget(`{"kind":"org","name":"etabA","period":"day","max_cost":0.0046,"unit":"USD"}`)
+	if resp := e.do("POST", "/v1/messages", keyA, anthMsg(false)); readAll(t, resp) == "" || resp.StatusCode != 429 || up.count() != n {
+		t.Fatalf("a worst case above the room left was sent: %d", resp.StatusCode)
+	}
+	e.setBudget(`{"kind":"org","name":"etabA","period":"day","max_cost":1,"unit":"USD"}`)
+	if resp := e.do("POST", "/v1/messages", keyA, anthMsg(false)); readAll(t, resp) == "" || resp.StatusCode != 200 {
+		t.Fatalf("under a large budget: %d", resp.StatusCode)
+	}
+	// Review F1: a compaction beta adds iterations the usage does not
+	// report, and a context beta could widen the window: refused under a
+	// budget when the model forwards them.
+	n = up.count()
+	for _, beta := range []string{"compact-2026-01-12", "context-1m-2025-08-07"} {
+		e.srv.groups["claude"].cfg.External.Betas = []string{"*"}
+		resp := e.do("POST", "/v1/messages", keyA, anthMsg(false), "Anthropic-Beta", beta)
+		if body := readAll(t, resp); resp.StatusCode != 400 || !strings.Contains(body, beta) || up.count() != n {
+			t.Fatalf("%s under a budget: %d %s", beta, resp.StatusCode, body)
+		}
 	}
 }
 

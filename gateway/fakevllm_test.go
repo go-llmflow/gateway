@@ -108,7 +108,9 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"boom"}`, status)
 		return
 	}
-	usage := `{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,"prompt_tokens_details":{"cached_tokens":40}}`
+	// Like vLLM, never more output than the request's bound (#87).
+	comp := outputTokens(body)
+	usage := fmt.Sprintf(`{"prompt_tokens":100,"completion_tokens":%d,"total_tokens":%d,"prompt_tokens_details":{"cached_tokens":40}}`, comp, 100+comp)
 	if r.URL.Path == "/v1/responses" {
 		f.serveResponses(w, body, reply)
 		return
@@ -188,6 +190,19 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	cb, _ := json.Marshal(content)
 	fmt.Fprintf(w, `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":%s}}],"usage":%s}`, cb, usage)
+}
+
+// outputTokens is the fake's output: 20 tokens, or fewer when the request's
+// bound (max_completion_tokens, max_tokens, max_output_tokens) is smaller.
+func outputTokens(body map[string]any) int {
+	out := 20
+	for _, k := range []string{"max_completion_tokens", "max_tokens", "max_output_tokens"} {
+		if v, ok := body[k].(float64); ok {
+			out = min(out, int(v))
+			break
+		}
+	}
+	return out
 }
 
 // parseFakeForm reads a multipart form into its fields as strings, with

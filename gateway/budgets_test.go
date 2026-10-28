@@ -18,7 +18,14 @@ import (
 )
 
 // Each chat request of the fake upstream costs 0.164 GPU-hours with the
-// test prices: (60 uncached × 1000 + 40 cached × 100 + 20 × 5000) / 1e6.
+// test prices: (60 uncached × 1000 + 40 cached × 100 + 20 × 5000) / 1e6,
+// or less when its max_tokens is below 20 (the fake honours it).
+//
+// Hard budgets (#87): its worst case, with max_model_len 128 (the fake's
+// /v1/models) and max_tokens M, is W = 0.128 + 0.004·M. Without a
+// max_tokens the gateway picks the largest M that fits the room left, at
+// least 16 (W = 0.192): a budget of 0.2 admits one request (M = 18, cost
+// 0.154), a budget of 0.4 two.
 
 func (e *env) chatWith(key, body string, hdr ...string) int {
 	e.t.Helper()
@@ -46,6 +53,18 @@ func (e *env) createKey(body string) string {
 	return k.Key
 }
 
+// waitRecords waits until the store holds n usage records.
+func (e *env) waitRecords(n int) {
+	e.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(e.st.Records()) < n {
+		if time.Now().After(deadline) {
+			e.t.Fatalf("%d records stored, want %d", len(e.st.Records()), n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func expect(t *testing.T, what string, got int, want ...int) {
 	t.Helper()
 	for _, w := range want {
@@ -63,11 +82,11 @@ func TestTagBudgets(t *testing.T) {
 	e := newEnv(t, cfg)
 	tagged := e.createKey(`{"team":"etabA","tags":["eval"]}`)
 	plain := e.createKey(`{"team":"etabA"}`)
-	e.setBudget(`{"kind":"tag","name":"eval","period":"day","max_cost":0.2}`)
-	e.setBudget(`{"kind":"tag","name":"prod","period":"day","max_cost":0.1}`)
+	e.setBudget(`{"kind":"tag","name":"eval","period":"day","max_cost":0.4}`)
+	e.setBudget(`{"kind":"tag","name":"prod","period":"day","max_cost":0.2}`)
 
 	expect(t, "first eval", e.chatWith(tagged, chat), 200)
-	expect(t, "second eval (0.164 < 0.2)", e.chatWith(tagged, chat), 200)
+	expect(t, "second eval (0.236 left ≥ 0.192)", e.chatWith(tagged, chat), 200)
 	expect(t, "third eval", e.chatWith(tagged, chat), 429)
 	expect(t, "untagged key", e.chatWith(plain, chat), 200)
 	// Request tags from the allow-listed header.
@@ -101,8 +120,8 @@ func TestModelAndScopeBudgets(t *testing.T) {
 		}
 	}
 	batch := strings.Replace(chat, `"llama"`, `"llama-batch"`, 1)
-	e.setBudget(fmt.Sprintf(`{"kind":"key","name":%q,"model":"llama-batch","period":"week","max_cost":0.1}`, keyID))
-	e.setBudget(`{"kind":"project","name":"etabA/eval","period":"month","max_cost":0.1}`)
+	e.setBudget(fmt.Sprintf(`{"kind":"key","name":%q,"model":"llama-batch","period":"week","max_cost":0.2}`, keyID))
+	e.setBudget(`{"kind":"project","name":"etabA/eval","period":"month","max_cost":0.2}`)
 
 	expect(t, "batch 1", e.chatWith(key, batch), 200)
 	expect(t, "batch 2", e.chatWith(key, batch), 429)
@@ -111,7 +130,9 @@ func TestModelAndScopeBudgets(t *testing.T) {
 	expect(t, "project 2", e.chatWith(proj, chat), 429)
 	expect(t, "team key outside the project", e.chatWith(key, chat), 200)
 
-	// An organisation budget covers every team of the organisation.
+	// An organisation budget covers every team of the organisation; created
+	// mid-period, it starts from the usage already stored.
+	e.waitRecords(4)
 	e.setBudget(`{"kind":"org","name":"etabA","period":"day","max_cost":0.5}`)
 	expect(t, "org exhausted", e.chatWith(key, chat), 429)
 	out := readAll(t, e.do("GET", "/admin/budgets", master, ""))
@@ -131,7 +152,7 @@ func TestTemporaryIncrease(t *testing.T) {
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 	e := newEnv(t, testConfig(up.URL()), WithClock(clock))
 	key := e.createKey(`{"team":"etabA"}`)
-	e.setBudget(`{"kind":"team","name":"etabA","period":"month","max_cost":0.1}`)
+	e.setBudget(`{"kind":"team","name":"etabA","period":"month","max_cost":0.2}`)
 	expect(t, "first", e.chatWith(key, chat), 200)
 	expect(t, "exhausted", e.chatWith(key, chat), 429)
 
@@ -156,7 +177,7 @@ func TestTemporaryIncrease(t *testing.T) {
 	}
 	expect(t, "during the increase", e.chatWith(key, chat), 200)
 	// Re-setting the budget keeps the increase.
-	e.setBudget(`{"kind":"team","name":"etabA","period":"month","max_cost":0.1}`)
+	e.setBudget(`{"kind":"team","name":"etabA","period":"month","max_cost":0.2}`)
 	expect(t, "after re-set", e.chatWith(key, chat), 200)
 	mu.Lock()
 	now = now.Add(2 * time.Hour)
@@ -246,7 +267,7 @@ func TestRefreshKeepsUnwrittenSpend(t *testing.T) {
 	up := newFakeVLLM(t)
 	e := newEnv(t, testConfig(up.URL()))
 	key := e.createKey(`{"team":"etabA"}`)
-	e.setBudget(`{"kind":"team","name":"etabA","period":"day","max_cost":0.1}`)
+	e.setBudget(`{"kind":"team","name":"etabA","period":"day","max_cost":0.2}`)
 	expect(t, "first", e.chatWith(key, chat), 200)
 	if len(e.st.Records()) != 0 {
 		t.Skip("record already written; the race this test needs did not happen")
@@ -260,7 +281,7 @@ func TestRefreshKeepsUnwrittenSpend(t *testing.T) {
 	if err := e.srv.budget.refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if spent, _ := e.srv.budget.spent(store.BudgetKey{Kind: store.ScopeTeam, Name: "etabA"}); spent < 0.164 || spent > 0.165 {
+	if spent, _ := e.srv.budget.spent(store.BudgetKey{Kind: store.ScopeTeam, Name: "etabA"}); spent < 0.154 || spent > 0.155 {
 		t.Fatalf("spent after write and refresh: %v (counted twice or lost)", spent)
 	}
 }
@@ -272,6 +293,9 @@ func TestHeaderSafe(t *testing.T) {
 }
 
 func TestRequestScopeKeys(t *testing.T) {
+	if n := len((reqScope{org: "o", team: "t", key: "k", user: "alice", model: "m"}).keys()); n != 8 {
+		t.Fatalf("with a user: %d keys", n)
+	}
 	r := reqScope{org: "o", team: "t", project: "p", key: "k", model: "m", tags: []string{"x"}}
 	ks := r.keys()
 	if len(ks) != 10 || ks[1].Model != "m" || ks[0].Model != "" {

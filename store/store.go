@@ -120,6 +120,19 @@ func (p Period) Start(now time.Time) time.Time {
 	}
 }
 
+// End returns the end of the period that starts at start (the next one's
+// start): when a budget of this period resets.
+func (p Period) End(start time.Time) time.Time {
+	switch p {
+	case Week:
+		return start.AddDate(0, 0, 7)
+	case Month:
+		return start.AddDate(0, 1, 0)
+	default:
+		return start.AddDate(0, 0, 1)
+	}
+}
+
 // Record is one finished request.
 type Record struct {
 	// ID identifies the record: inserting a record whose ID is already
@@ -159,6 +172,19 @@ type Record struct {
 	// gone before the final usage chunk or before a non-streaming answer)
 	// and the tokens were estimated by the gateway.
 	Estimated bool
+
+	// Hard budgets (#87). CostNano is the cost in nano-units of Unit, as
+	// the budget ledger counts it. A request admitted under budgets carries
+	// its holds: the budget periods it was held against (Holds), by which
+	// holder (HoldReplica, HoldIncarnation), for HoldNano, its worst-case
+	// cost. Storing the record settles them in the same transaction:
+	// spent += CostNano, the holder's grant -= min(CostNano, HoldNano).
+	CostNano        int64
+	AdmittedAt      time.Time
+	HoldReplica     string
+	HoldIncarnation string
+	HoldNano        int64
+	Holds           []HoldRef
 }
 
 // Store is the persistence contract.
@@ -286,5 +312,6 @@ type Store interface {
 	// Report aggregates the records in [from, to) by the given dimensions
 	// (see ReportDims), sorted.
 	Report(ctx context.Context, from, to time.Time, dims []string) ([]ReportRow, error)
+	BudgetLedger
 	Close()
 }

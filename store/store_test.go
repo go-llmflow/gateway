@@ -279,7 +279,7 @@ func contract(t *testing.T, s Store) {
 	must(s.SetBudget(ctx, Budget{BudgetKey: BudgetKey{Kind: ScopeKey, Name: id, Model: "m"}, Period: Week, MaxCost: 2}))
 	for _, bad := range []Budget{
 		{BudgetKey: teamB, Period: "year", MaxCost: 5},
-		{BudgetKey: BudgetKey{Kind: "user", Name: "x"}, Period: Day},
+		{BudgetKey: BudgetKey{Kind: "person", Name: "x"}, Period: Day},
 		{BudgetKey: BudgetKey{Kind: ScopeTag, Name: ""}, Period: Day},
 		{BudgetKey: teamB, Period: Day, MaxCost: -1},
 		{BudgetKey: teamB, Period: Day, SoftLimit: -1},
@@ -578,6 +578,7 @@ func TestPostgresContract(t *testing.T) {
 	}
 	contractAllowlists(t, p)
 	contractUnits(t, p)
+	contractLedger(t, p)
 
 	if _, err := OpenPostgres(ctx, "postgres://u:hunter2@[::1"); err == nil || strings.Contains(err.Error(), "hunter2") {
 		t.Fatalf("bad DSN error leaks or passes: %v", err)
@@ -587,7 +588,7 @@ func TestPostgresContract(t *testing.T) {
 func dropAll(t *testing.T, p *Postgres) {
 	t.Helper()
 	if _, err := p.pool.Exec(context.Background(),
-		`DROP TABLE IF EXISTS llmflow_audit, llmflow_audit_checkpoints, llmflow_scim,llmflow_allowlists,llmflow_budgets_v2, llmflow_team_models, llmflow_team_tools,llmflow_bindings, llmflow_user_tokens, llmflow_users,
+		`DROP TABLE IF EXISTS llmflow_budget_ledger, llmflow_budget_grants, llmflow_audit, llmflow_audit_checkpoints, llmflow_scim,llmflow_allowlists,llmflow_budgets_v2, llmflow_team_models, llmflow_team_tools,llmflow_bindings, llmflow_user_tokens, llmflow_users,
 		 llmflow_usage, llmflow_budgets, llmflow_keys, llmflow_projects, llmflow_teams, llmflow_orgs`); err != nil {
 		t.Fatal(err)
 	}

@@ -22,10 +22,19 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// fallback is a fallback model a request may move to: the body rewritten
+// for it and the request's budget hold there.
+type fallback struct {
+	g   *group
+	out []byte
+	adm *admission
+}
+
 // nextFallback returns the next fallback of primary the key may use and
-// afford (its team allowed the model, no budget of the model exceeded), or
-// nil; idx walks primary's list.
-func (s *Server) nextFallback(primary *group, idx *int, key store.Key, scope reqScope) *group {
+// afford (its team allowed the model, every budget of the model can hold
+// the request's worst-case cost there), or nil; idx walks primary's list.
+// The caller releases the returned admission if it does not use it.
+func (s *Server) nextFallback(ctx context.Context, ep openai.Endpoint, primary *group, idx *int, key store.Key, scope reqScope, body []byte, betas []string) *fallback {
 	for *idx < len(primary.cfg.Fallbacks) {
 		name := primary.cfg.Fallbacks[*idx]
 		*idx++
@@ -33,12 +42,18 @@ func (s *Server) nextFallback(primary *group, idx *int, key store.Key, scope req
 		if g == nil || g.cfg.Class == config.Guard || !s.budget.modelAllowed(key.Team, name) {
 			continue
 		}
-		sc := scope
-		sc.model, sc.unit = name, g.cfg.Cost.Unit
-		if s.budget.check(sc) != nil {
+		target := g.cfg.UpstreamModel
+		out, _, err := openai.RewriteFor(ep, body, func(string) (string, error) { return target, nil }, s.isoFor(g, key))
+		if err != nil {
 			continue
 		}
-		return g
+		sc := scope
+		sc.model, sc.unit = name, g.cfg.Cost.Unit
+		adm, out, err := s.admitBudget(ctx, ep, g, sc, out, betas)
+		if err != nil {
+			continue
+		}
+		return &fallback{g: g, out: out, adm: adm}
 	}
 	return nil
 }
@@ -196,17 +211,22 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			apiError(w, http.StatusBadRequest, "invalid_request_error", msg)
 			return
 		}
-		scope := reqScope{org: key.Org, team: key.Team, project: key.Project, key: key.ID, model: g.cfg.Name, tags: tags, unit: g.cfg.Cost.Unit}
-		switch err := s.budget.check(scope); {
-		case errors.Is(err, errBudgetExceeded):
-			s.met.denied.add(1, key.Team, "budget")
-			apiError(w, http.StatusTooManyRequests, "insufficient_quota", err.Error())
-			return
-		case err != nil:
-			s.met.denied.add(1, key.Team, "store_unavailable")
-			apiError(w, http.StatusServiceUnavailable, "service_unavailable", err.Error())
+		scope := reqScope{org: key.Org, team: key.Team, project: key.Project, key: key.ID, user: recordUser(key), model: g.cfg.Name, tags: tags, unit: g.cfg.Cost.Unit}
+		// For an external provider: the organisation (its key) and the
+		// client's Anthropic headers, filtered when the request is built.
+		eg := clientEgress(r, key.Org)
+		// Hard budgets (#87): the request's worst-case cost is held on
+		// every budget of its scope before anything else is spent on it.
+		adm, held, aerr := s.admitBudget(r.Context(), ep, g, scope, out, eg.betas)
+		if aerr != nil {
+			s.writeAdmitError(w, key.Team, aerr)
 			return
 		}
+		out = held
+		// Released at the end with the request's cost (a no-op once a
+		// fallback replaced it, or when finish released it).
+		defer func() { adm.release(0) }()
+		adm.header(w.Header())
 		if err := s.limiter.admit(key.ID, key.RPM, key.TPM, key.MaxInFlight); err != nil {
 			s.met.denied.add(1, key.Team, "rate_limit")
 			apiError(w, http.StatusTooManyRequests, "rate_limit_exceeded", err.Error())
@@ -255,7 +275,10 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			if !bytes.Equal(masked, body) {
 				// vLLM gets the masked prompt; so does the request log.
 				body = masked
-				if out, req, err = openai.RewriteFor(ep, body, resolve, s.isoFor(g, key)); err != nil {
+				if out, req, err = openai.RewriteFor(ep, body, resolve, s.isoFor(g, key)); err == nil {
+					out, err = adm.apply(ep, out)
+				}
+				if err != nil {
 					s.limiter.release(key.ID, 0)
 					apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 					return
@@ -279,22 +302,21 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		// and with no room anywhere it simply queues where it is.
 		if movesOnSaturation(g, grant) {
 			idx := 0
-			for next := s.nextFallback(g, &idx, key, scope); next != nil; next = s.nextFallback(g, &idx, key, scope) {
+			for fb := s.nextFallback(r.Context(), ep, g, &idx, key, scope, body, eg.betas); fb != nil; fb = s.nextFallback(r.Context(), ep, g, &idx, key, scope, body, eg.betas) {
+				next := fb.g
 				tg, ok := next.pool.tryAcquire(key.Org, next.class, promptEst+req.MaxTokens)
 				if !ok {
+					fb.adm.release(0)
 					continue
 				}
-				target := next.cfg.UpstreamModel
-				moved, _, rerr := openai.RewriteFor(ep, body, func(string) (string, error) { return target, nil }, s.isoFor(next, key))
-				if rerr != nil {
-					tg.Release(0)
-					break
-				}
 				grant.Release(0)
+				adm.release(0)
 				s.met.fallbacks.add(1, g.cfg.Name, next.cfg.Name, "saturated")
-				g, grant, out = next, tg, moved
+				g, grant, out, adm = next, tg, fb.out, fb.adm
 				scope.model, scope.unit = g.cfg.Name, g.cfg.Cost.Unit
 				w.Header().Set("X-Llmflow-Model", g.cfg.Name)
+				w.Header().Del("X-Llmflow-Max-Tokens")
+				adm.header(w.Header())
 				break
 			}
 		}
@@ -328,9 +350,18 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				haveUsage, estimated = true, true
 				s.met.estimated.add(1, key.Team, g.cfg.Name)
 			}
-			cost, consumed := 0.0, 0.0
+			cost, consumed, costNano := 0.0, 0.0, int64(0)
 			if haveUsage {
 				cost = g.cost(usage)
+				costNano = g.prices.costNano(usage)
+				if estimated && adm != nil && adm.hold != nil && costNano > adm.hold.w {
+					// The estimate (prompt bytes / 4, plus forwarded deltas,
+					// which hold the echoed prompt with echo) is not the
+					// truth: within the bound, vLLM could not have spent
+					// more than W (#87).
+					costNano = adm.hold.w
+					cost = float64(costNano) / nanoPerUnit
+				}
 				consumed = cost
 				if consumed == 0 {
 					// No price configured: rank fair share by tokens.
@@ -348,7 +379,13 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				s.met.requests.add(1, key.Team, g.cfg.Name, strconv.Itoa(status))
 			}
 			if !worked && status == 0 {
+				adm.release(0) // no record: nothing to settle
 				return
+			}
+			if adm.release(costNano) {
+				s.log.Error("a request cost more than its worst-case bound W: charged in full (a bug in the bound; llmflow_budget_hold_exceeded_total)",
+					"request_id", rid, "model", g.cfg.Name, "cost_nano", costNano, "hold_nano", adm.hold.w)
+				s.raise(context.Background(), "budget_hold_exceeded", map[string]any{"model": g.cfg.Name, "cost_nano": costNano, "hold_nano": adm.hold.w})
 			}
 			end := time.Now()
 			if !tUpEnd.IsZero() {
@@ -374,6 +411,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				Status: status, Priority: grant.Priority, Borrowing: grant.Borrowing, Stream: req.Stream,
 				Estimated: estimated, Tags: tags,
 			}
+			s.recordHolds(&rec, adm, costNano)
 			s.rec.record(rec)
 			s.logRequest(rec, rid, body, respBody, respCut)
 		}()
@@ -384,13 +422,13 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		// The upstream span covers the call and the response (the stream,
 		// for a stream); its context is what vLLM receives as traceparent.
 		ctx, upSpan := s.trace.tracer.Start(ctx, "upstream", trace.WithSpanKind(trace.SpanKindClient))
-		// For an external provider: the organisation (its key) and the
-		// client's Anthropic headers, filtered when the request is built.
-		eg := clientEgress(r, key.Org)
 		// Counting has its own rate limits upstream: the messages back-off
 		// neither stops it nor is set by it.
 		eg.count = ep == openai.CountTokens
 		ctx = withEgress(ctx, eg)
+		// A request held on a learned context length goes only to the
+		// upstreams that reported it (review F2 of #87).
+		ctx = withBoundOnly(ctx, func() bool { return adm != nil && adm.hold != nil })
 		defer upSpan.End()
 		var resp *http.Response
 		sendOnce := func() error {
@@ -425,10 +463,11 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			if err == nil && !saturated || r.Context().Err() != nil || !primary.cfg.FallsBackOn("unavailable") {
 				break
 			}
-			next := s.nextFallback(primary, &fallbackIdx, key, scope)
-			if next == nil {
+			fb := s.nextFallback(r.Context(), ep, primary, &fallbackIdx, key, scope, body, eg.betas)
+			if fb == nil {
 				break
 			}
+			next := fb.g
 			if resp != nil {
 				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 				resp.Body.Close()
@@ -438,7 +477,9 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			s.met.fallbacks.add(1, g.cfg.Name, next.cfg.Name, "unavailable")
 			upSpan.AddEvent("fallback", trace.WithAttributes(attribute.String("from", g.cfg.Name), attribute.String("to", next.cfg.Name)))
 			grant.Release(0)
-			g = next
+			// Nothing was computed where it was held: the old hold goes.
+			adm.release(0)
+			g, out, adm = next, fb.out, fb.adm
 			scope.model, scope.unit = g.cfg.Name, g.cfg.Cost.Unit
 			ng, aerr := g.pool.acquire(key.Org, g.class, promptEst+req.MaxTokens)
 			if aerr != nil {
@@ -449,13 +490,9 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				return
 			}
 			grant = ng
-			target := g.cfg.UpstreamModel
-			if out, _, err = openai.RewriteFor(ep, body, func(string) (string, error) { return target, nil }, s.isoFor(g, key)); err != nil {
-				status = http.StatusBadRequest
-				apiError(w, status, "invalid_request_error", err.Error())
-				return
-			}
 			w.Header().Set("X-Llmflow-Model", g.cfg.Name)
+			w.Header().Del("X-Llmflow-Max-Tokens")
+			adm.header(w.Header())
 		}
 		pre = tUp.Sub(t0)
 		if err != nil {

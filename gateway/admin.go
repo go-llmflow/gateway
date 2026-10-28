@@ -68,6 +68,7 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	h("GET /admin/budgets", s.listBudgets)
 	h("PUT /admin/budgets", s.setBudget)
 	h("POST /admin/budgets/increase", s.increaseBudget)
+	h("POST /admin/budgets/release-replica", s.releaseReplica)
 	h("DELETE /admin/budgets", s.deleteBudget)
 	h("GET /admin/spend", s.spendReport)
 	h("GET /admin/usage.csv", s.usageCSV)
@@ -862,8 +863,53 @@ func (s *Server) budgetAccess(r *http.Request, p *principal, k store.BudgetKey) 
 			return false, false, store.ErrNotFound
 		}
 		return p.proxyView(), p.proxyAdmin(), nil
+	case store.ScopeUser:
+		return s.userBudgetAccess(r, p, k.Name)
 	}
 	return false, false, store.ErrNotFound
+}
+
+// userBudgetAccess: a user budget (#87, the scope of workload profiles) is
+// set by proxy admins, by the admins of an organisation the user belongs
+// to, and by the team admins of a team the user belongs to; the user reads
+// their own. A name that is not a stored user (a JWT's user) is the proxy
+// roles'.
+func (s *Server) userBudgetAccess(r *http.Request, p *principal, name string) (read, write bool, err error) {
+	ctx := r.Context()
+	if _, err := s.st.GetUser(ctx, name); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			return false, false, err
+		}
+		if !config.ValidUserName(name) && !strings.HasPrefix(name, "jwt-") {
+			return false, false, store.ErrNotFound
+		}
+		return p.proxyView() || p.name == name, p.proxyAdmin(), nil
+	}
+	read, write = p.proxyView() || p.name == name, p.proxyAdmin()
+	binds, err := s.st.Bindings(ctx, name)
+	if err != nil {
+		return false, false, err
+	}
+	for _, b := range binds {
+		switch {
+		case b.Team != "":
+			t, err := s.st.GetTeam(ctx, b.Team)
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return false, false, err
+			}
+			// Not the other members: a person's budget is not their
+			// colleagues' to read.
+			read = read || p.teamAdmin(t) || p.orgView(t.Org) || p.has(store.RoleViewer, "", t.Name)
+			write = write || p.teamAdmin(t)
+		case b.Org != "":
+			read = read || p.orgView(b.Org)
+			write = write || p.orgAdmin(b.Org)
+		}
+	}
+	return read, write, nil
 }
 
 type budgetOut struct {
@@ -872,6 +918,12 @@ type budgetOut struct {
 	Unit  string  `json:"unit"`
 	Spent float64 `json:"spent"`
 	Limit float64 `json:"limit"`
+	// The period's ledger (hard budgets): the cost committed by settled
+	// requests, and the grants the replicas hold for requests in flight
+	// (and their unused escrow). committed + held never exceeds the limit
+	// unless an administrator forced it lower.
+	Committed float64 `json:"committed"`
+	Held      float64 `json:"held"`
 }
 
 // budgetUnit normalises a budget's unit and refuses one no model costs in:
@@ -911,17 +963,81 @@ func (s *Server) listBudgets(w http.ResponseWriter, r *http.Request, p *principa
 			continue
 		}
 		spent, _ := s.budget.spent(b.BudgetKey)
-		out = append(out, budgetOut{b, store.UnitName(b.Unit), spent, b.Limit(now)})
+		led, err := s.st.Ledger(r.Context(), b.BudgetKey, b.Period.Start(now))
+		if err != nil {
+			storeError(w, err)
+			return
+		}
+		out = append(out, budgetOut{b, store.UnitName(b.Unit), spent, b.Limit(now),
+			float64(led.Spent) / nanoPerUnit, float64(led.Granted) / nanoPerUnit})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
-func (s *Server) setBudget(w http.ResponseWriter, r *http.Request, p *principal) {
-	var b store.Budget
-	if !readJSON(w, r, &b) {
+// budgetOrg returns the organisation a budget belongs to ("" for a tag
+// budget, which crosses organisations).
+func (s *Server) budgetOrg(r *http.Request, k store.BudgetKey) (string, error) {
+	ctx := r.Context()
+	team := ""
+	switch k.Kind {
+	case store.ScopeOrg:
+		return k.Name, nil
+	case store.ScopeTeam:
+		team = k.Name
+	case store.ScopeProject:
+		team, _, _ = strings.Cut(k.Name, "/")
+	case store.ScopeKey:
+		key, err := s.st.GetKey(ctx, k.Name)
+		if err != nil {
+			return "", err
+		}
+		team = key.Team
+	default:
+		return "", nil
+	}
+	t, err := s.st.GetTeam(ctx, team)
+	if err != nil {
+		return "", err
+	}
+	return t.Org, nil
+}
+
+// mayForce: forcing a limit below what a period committed, and releasing
+// a replica's grants, belong to proxy admins and to the budget's own
+// organisation admins (#87).
+func (s *Server) mayForce(r *http.Request, p *principal, k store.BudgetKey) (bool, error) {
+	if p.proxyAdmin() {
+		return true, nil
+	}
+	org, err := s.budgetOrg(r, k)
+	if err != nil {
+		return false, err
+	}
+	return org != "" && p.orgAdmin(org), nil
+}
+
+// budgetChangeError answers a refused change of limit.
+func budgetChangeError(w http.ResponseWriter, err error) {
+	var bc *store.BelowCommittedError
+	if errors.As(err, &bc) {
+		apiError(w, http.StatusConflict, "conflict", bc.Error())
 		return
 	}
-	b.TempIncrease, b.TempExpiry = 0, nil // only through /admin/budgets/increase
+	storeError(w, err)
+}
+
+func (s *Server) setBudget(w http.ResponseWriter, r *http.Request, p *principal) {
+	var in struct {
+		store.Budget
+		// Force lowers the limit below what the period committed: new
+		// admissions stop, what was admitted finishes.
+		Force bool `json:"force"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	b := in.Budget
+	b.TempIncrease, b.TempExpiry, b.Epoch = 0, nil, 0 // the increase only through /admin/budgets/increase
 	var err error
 	if b.Unit, err = s.budgetUnit(b.Unit); err != nil {
 		apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -940,13 +1056,84 @@ func (s *Server) setBudget(w http.ResponseWriter, r *http.Request, p *principal)
 		forbidden(w)
 		return
 	}
-	if err := s.st.SetBudget(r.Context(), b); err != nil {
-		storeError(w, err)
+	if in.Force {
+		if ok, err := s.mayForce(r, p, b.BudgetKey); err != nil || !ok {
+			if err != nil {
+				storeError(w, err)
+			} else {
+				forbidden(w)
+			}
+			return
+		}
+	}
+	if err := s.st.SetBudgetChecked(r.Context(), b, s.now(), s.cfg.Limits.MaxRequestDuration, in.Force); err != nil {
+		budgetChangeError(w, err)
 		return
 	}
 	_ = s.budget.refresh(r.Context())
-	s.log.Info("budget set", "budget", b.BudgetKey.String(), "max_cost", b.MaxCost, "by", p.name)
+	s.escrow.forgetRoom()
+	s.log.Info("budget set", "budget", b.BudgetKey.String(), "max_cost", b.MaxCost, "force", in.Force, "by", p.name)
+	if in.Force {
+		s.audit("budget.forced", "by", p.name, "budget", b.BudgetKey.String(), "max_cost", b.MaxCost)
+	}
 	writeJSON(w, http.StatusOK, b)
+}
+
+// releaseReplica drops the budget grants of a replica that will not come
+// back (its spool cannot be replayed): what its in-flight requests held is
+// given back to the budgets. Never automatic: a replica that is only
+// unreachable may still finish requests and store their records. A proxy
+// admin releases every grant of the replica; an organisation admin the
+// grants on that organisation's budgets only.
+func (s *Server) releaseReplica(w http.ResponseWriter, r *http.Request, p *principal) {
+	var in struct {
+		Replica string `json:"replica"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	if in.Replica == "" || len(in.Replica) > 256 {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", "replica: want the replica's name (ha.replica_id, or its host name)")
+		return
+	}
+	if in.Replica == s.escrow.holder.Replica {
+		apiError(w, http.StatusConflict, "conflict", "this is the replica serving the request: it is alive")
+		return
+	}
+	rows, err := s.st.Grants(r.Context())
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	var mine []store.GrantRow
+	denied := 0
+	for _, g := range rows {
+		if g.Holder.Replica != in.Replica {
+			continue
+		}
+		ok, err := s.mayForce(r, p, g.Key)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			storeError(w, err)
+			return
+		}
+		if !ok {
+			denied++
+			continue
+		}
+		mine = append(mine, g)
+	}
+	if len(mine) == 0 && denied > 0 {
+		forbidden(w)
+		return
+	}
+	n, err := s.st.ReleaseGrants(r.Context(), mine)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	s.escrow.forgetRoom()
+	s.audit("budget.release_replica", "by", p.name, "replica", in.Replica, "grants", len(mine), "released_nano", n)
+	writeJSON(w, http.StatusOK, map[string]any{"replica": in.Replica, "grants": len(mine), "released": store.FormatNano(n), "not_yours": denied})
 }
 
 // increaseBudget grants a temporary increase that ends at expires_at,
@@ -956,6 +1143,7 @@ func (s *Server) increaseBudget(w http.ResponseWriter, r *http.Request, p *princ
 		store.BudgetKey
 		Amount    float64   `json:"amount"`
 		ExpiresAt time.Time `json:"expires_at"`
+		Force     bool      `json:"force"`
 	}
 	if !readJSON(w, r, &in) {
 		return
@@ -979,11 +1167,22 @@ func (s *Server) increaseBudget(w http.ResponseWriter, r *http.Request, p *princ
 		forbidden(w)
 		return
 	}
-	if err := s.st.IncreaseBudget(r.Context(), in.BudgetKey, in.Amount, in.ExpiresAt); err != nil {
-		storeError(w, err)
+	if in.Force {
+		if ok, err := s.mayForce(r, p, in.BudgetKey); err != nil || !ok {
+			if err != nil {
+				storeError(w, err)
+			} else {
+				forbidden(w)
+			}
+			return
+		}
+	}
+	if err := s.st.IncreaseBudgetChecked(r.Context(), in.BudgetKey, in.Amount, in.ExpiresAt, now, s.cfg.Limits.MaxRequestDuration, in.Force); err != nil {
+		budgetChangeError(w, err)
 		return
 	}
 	_ = s.budget.refresh(r.Context())
+	s.escrow.forgetRoom()
 	s.log.Info("budget increased", "budget", in.BudgetKey.String(), "amount", in.Amount, "until", in.ExpiresAt, "by", p.name)
 	writeJSON(w, http.StatusOK, map[string]any{"budget": in.BudgetKey, "amount": in.Amount, "expires_at": in.ExpiresAt.UTC()})
 }
