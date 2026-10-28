@@ -13,6 +13,8 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -101,12 +103,96 @@ const (
 	Month Period = "month"
 )
 
-// Valid reports whether p is a known period.
-func (p Period) Valid() bool { return p == Day || p == Week || p == Month }
+// Valid reports whether p is a known period: a calendar one, or a rolling
+// window (Rolling).
+func (p Period) Valid() bool {
+	if p == Day || p == Week || p == Month {
+		return true
+	}
+	_, ok := p.Rolling()
+	return ok
+}
+
+// Rolling windows (v0.18.0, workload profiles #90). A rolling period counts
+// the cost of the requests that ended in the last Window (ledger.go,
+// bucketAt, says why not their admission), kept in buckets of BucketWidth per
+// budget: the window's spent is the sum of the buckets that overlap it, so
+// it counts at most one bucket more than the window (never less). It is
+// spelled "rolling:5h" (hours, or minutes when not whole hours), from
+// BucketWidth to MaxRollingWindow, in whole buckets.
+//
+// Under the escrow (ledger.go) a rolling period is one ledger row, whose
+// period start is RollingStart: spent only falls as time passes, so the
+// invariant spent + Σ granted ≤ limit, true when a grant is made, stays true.
+const (
+	BucketWidth      = 5 * time.Minute
+	MaxRollingWindow = 7 * 24 * time.Hour
+	rollingPrefix    = "rolling:"
+)
+
+// RollingStart is the period start of every rolling budget's ledger row.
+var RollingStart = time.Unix(0, 0).UTC()
+
+// RollingPeriod spells a rolling window of d (d must be valid, see Valid).
+func RollingPeriod(d time.Duration) Period {
+	if d%time.Hour == 0 {
+		return Period(fmt.Sprintf("%s%dh", rollingPrefix, d/time.Hour))
+	}
+	return Period(fmt.Sprintf("%s%dm", rollingPrefix, d/time.Minute))
+}
+
+// Rolling returns a rolling period's window; ok is false for a calendar
+// period or an invalid spelling (only RollingPeriod's spelling is valid, so
+// that one window has one name).
+func (p Period) Rolling() (time.Duration, bool) {
+	s, ok := strings.CutPrefix(string(p), rollingPrefix)
+	if !ok || len(s) > 8 {
+		return 0, false
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < BucketWidth || d > MaxRollingWindow || d%BucketWidth != 0 || RollingPeriod(d) != p {
+		return 0, false
+	}
+	return d, true
+}
+
+// BucketOf is the start of the bucket holding t.
+func BucketOf(t time.Time) time.Time {
+	w := int64(BucketWidth / time.Second)
+	u := t.Unix()
+	u -= ((u % w) + w) % w
+	return time.Unix(u, 0).UTC()
+}
+
+// WindowStart is the first bucket a rolling window of d counts at now:
+// every bucket that overlaps (now-d, now].
+func WindowStart(now time.Time, d time.Duration) time.Time { return BucketOf(now.Add(-d)) }
+
+// SpendSince is when the cost a period counts at now starts: the period's
+// start, or the first bucket of a rolling window.
+func (p Period) SpendSince(now time.Time) time.Time {
+	if d, ok := p.Rolling(); ok {
+		return WindowStart(now, d)
+	}
+	return p.Start(now)
+}
+
+// ResetAt is when a budget of this period, at now, has its whole limit back:
+// the period's end, or, for a rolling window, once everything counted now
+// has left it.
+func (p Period) ResetAt(now time.Time) time.Time {
+	if d, ok := p.Rolling(); ok {
+		return BucketOf(now).Add(BucketWidth + d)
+	}
+	return p.End(p.Start(now))
+}
 
 // Start returns the start of the period containing now (UTC; weeks start
-// on Monday).
+// on Monday, as ISO 8601 weeks do). A rolling period's is RollingStart.
 func (p Period) Start(now time.Time) time.Time {
+	if _, ok := p.Rolling(); ok {
+		return RollingStart
+	}
 	now = now.UTC()
 	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	switch p {
@@ -121,8 +207,12 @@ func (p Period) Start(now time.Time) time.Time {
 }
 
 // End returns the end of the period that starts at start (the next one's
-// start): when a budget of this period resets.
+// start): when a budget of this period resets. A rolling period has none
+// (see ResetAt): its end is its start.
 func (p Period) End(start time.Time) time.Time {
+	if _, ok := p.Rolling(); ok {
+		return start
+	}
 	switch p {
 	case Week:
 		return start.AddDate(0, 0, 7)
@@ -185,6 +275,14 @@ type Record struct {
 	HoldIncarnation string
 	HoldNano        int64
 	Holds           []HoldRef
+
+	// Workload profiles (#90). Profile is the user's profile in force when
+	// the request was admitted ("" for none), for the reports. Overflow: the
+	// request was admitted beyond the profile's allowance, on its monthly
+	// overflow cap; it counts for the overflow budget and not for the
+	// weekly and session ones.
+	Profile  string
+	Overflow bool
 }
 
 // Store is the persistence contract.
@@ -313,5 +411,6 @@ type Store interface {
 	// (see ReportDims), sorted.
 	Report(ctx context.Context, from, to time.Time, dims []string) ([]ReportRow, error)
 	BudgetLedger
+	ProfileStore
 	Close()
 }

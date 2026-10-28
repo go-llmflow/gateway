@@ -159,7 +159,7 @@ func (s *Server) admitBudget(ctx context.Context, ep openai.Endpoint, g *group, 
 			return armingRefusal(nr.key)
 		}
 		if errors.As(err, &nr) {
-			return budgetRefusal(nr.key, nr.room, w, scope.unit, resetOf(refs, nr.key))
+			return budgetRefusal(nr.key, nr.room, w, scope.unit, nr.resetIn(refs))
 		}
 		return &admitError{http.StatusServiceUnavailable, "service_unavailable", "the budget ledger cannot be reached; requests under a budget are refused", "store_unavailable", time.Time{}}
 	}
@@ -195,7 +195,7 @@ func (s *Server) admitBudget(ctx context.Context, ep openai.Endpoint, g *group, 
 		next := g.prices.largestFit(sh, l, lo, m, nr.room, provider)
 		if next < 0 {
 			wlo, _ := g.prices.worstCase(sh, l, lo, provider)
-			return nil, nil, budgetRefusal(nr.key, nr.room, wlo, scope.unit, resetOf(refs, nr.key))
+			return nil, nil, budgetRefusal(nr.key, nr.room, wlo, scope.unit, nr.resetIn(refs))
 		}
 		if next == m {
 			next = m - 1 // the room shrank meanwhile

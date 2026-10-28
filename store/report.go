@@ -17,14 +17,16 @@ import (
 var reportDims = map[string]string{
 	"org": "org", "lab": "lab", "team": "team", "project": "project", "user": "user_name", "key": "key_id",
 	"model": "model", "pool": "pool", "tag": "tag",
+	// The workload profile in force when the request was admitted (#90).
+	"profile": "profile",
 	// The UTC day of the request, for time series.
 	"day": "to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD')",
 }
 
 // ReportDims lists the accepted dimensions, in canonical order: the
-// hierarchy org → lab → team → project, then user, key, model, pool, tag,
-// and day.
-var ReportDims = []string{"org", "lab", "team", "project", "user", "key", "model", "pool", "tag", "day"}
+// hierarchy org → lab → team → project, then user, profile, key, model,
+// pool, tag, and day.
+var ReportDims = []string{"org", "lab", "team", "project", "user", "profile", "key", "model", "pool", "tag", "day"}
 
 // MaxReportSpan bounds the period of one report: a report reads every
 // record of its period.
@@ -60,6 +62,7 @@ type ReportRow struct {
 	Team              string  `json:"team,omitempty"`
 	Project           string  `json:"project,omitempty"`
 	User              string  `json:"user,omitempty"`
+	Profile           string  `json:"profile,omitempty"`
 	Key               string  `json:"key,omitempty"`
 	Model             string  `json:"model,omitempty"`
 	Pool              string  `json:"pool,omitempty"`
@@ -97,6 +100,8 @@ func (r ReportRow) Dim(d string) string {
 		return r.Project
 	case "user":
 		return r.User
+	case "profile":
+		return r.Profile
 	case "key":
 		return r.Key
 	case "model":
@@ -123,6 +128,8 @@ func (r *ReportRow) setDim(d, v string) {
 		r.Project = v
 	case "user":
 		r.User = v
+	case "profile":
+		r.Profile = v
 	case "key":
 		r.Key = v
 	case "model":
@@ -198,7 +205,7 @@ func (m *Memory) Report(ctx context.Context, from, to time.Time, dims []string) 
 		if r.Time.Before(from) || !r.Time.Before(to) {
 			continue
 		}
-		base := ReportRow{Org: r.Org, Lab: r.Lab, Team: r.Team, Project: r.Project, User: r.User, Key: r.KeyID, Model: r.Model, Pool: r.Pool,
+		base := ReportRow{Org: r.Org, Lab: r.Lab, Team: r.Team, Project: r.Project, User: r.User, Profile: r.Profile, Key: r.KeyID, Model: r.Model, Pool: r.Pool,
 			Day:      r.Time.UTC().Format("2006-01-02"),
 			Requests: 1, PromptTokens: r.PromptTokens, CompletionTokens: r.CompletionTokens, CachedTokens: r.CachedTokens,
 			Cost: r.Cost, Unit: r.Unit}

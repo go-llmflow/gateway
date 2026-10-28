@@ -24,6 +24,14 @@ const (
 	// ScopeUser is a person (Name is the user as the reports name them: a
 	// key's owner, or a JWT's user): every key and token of theirs counts.
 	ScopeUser ScopeKind = "user"
+	// The budgets a workload profile becomes (#90), managed by the gateway
+	// (never through the budgets API), Name the user as for ScopeUser: the
+	// weekly allowance and the rolling session allowance count the
+	// requests admitted within the profile, the overflow cap (monthly) the
+	// requests admitted beyond it (Record.Overflow).
+	ScopeProfileWeek     ScopeKind = "profile_week"
+	ScopeProfileSession  ScopeKind = "profile_session"
+	ScopeProfileOverflow ScopeKind = "profile_overflow"
 )
 
 // Valid reports whether k is a known scope kind.
@@ -32,7 +40,12 @@ func (k ScopeKind) Valid() bool {
 	case ScopeOrg, ScopeTeam, ScopeProject, ScopeKey, ScopeTag, ScopeUser:
 		return true
 	}
-	return false
+	return k.Profile()
+}
+
+// Profile reports whether k is one of a workload profile's budgets.
+func (k ScopeKind) Profile() bool {
+	return k == ScopeProfileWeek || k == ScopeProfileSession || k == ScopeProfileOverflow
 }
 
 // BudgetKey identifies a budget: a scope, optionally restricted to one
@@ -120,6 +133,9 @@ func ValidateBudget(b Budget) error {
 	if !b.Kind.Valid() {
 		return fmt.Errorf("kind %q: want org, team, project, key, user or tag", b.Kind)
 	}
+	if _, rolling := b.Period.Rolling(); rolling && b.SoftLimit != 0 {
+		return fmt.Errorf("soft_limit: not with a rolling period (its alert is once per calendar period)")
+	}
 	if b.Name == "" || len(b.Name) > 140 || strings.ContainsAny(b.Name, "\x00\r\n") {
 		return fmt.Errorf("name %q is invalid", b.Name)
 	}
@@ -132,7 +148,7 @@ func ValidateBudget(b Budget) error {
 		return fmt.Errorf("unit %q: store GPU-hours as \"\" (NormalizeUnit)", b.Unit)
 	}
 	if !b.Period.Valid() {
-		return fmt.Errorf("period %q: want day, week or month", b.Period)
+		return fmt.Errorf("period %q: want day, week, month or rolling:<window> (5m..168h in whole 5m, e.g. rolling:5h)", b.Period)
 	}
 	if !validAmount(b.MaxCost) {
 		return fmt.Errorf("max_cost %v: want 0..1e15", b.MaxCost)
@@ -150,6 +166,7 @@ type SpendRow struct {
 	Tags                                   []string
 	Cost                                   float64
 	Unit                                   string
+	Overflow                               bool
 }
 
 // ---- memory ----
@@ -227,10 +244,11 @@ func (m *Memory) SpendRows(_ context.Context, since time.Time) ([]SpendRow, erro
 			continue
 		}
 		tags := dedupSorted(r.Tags)
-		k := strings.Join([]string{r.Org, r.Team, r.Project, r.KeyID, r.User, r.Model, strings.Join(tags, ","), r.Unit}, "\x00")
+		k := strings.Join([]string{r.Org, r.Team, r.Project, r.KeyID, r.User, r.Model, strings.Join(tags, ","), r.Unit, fmt.Sprint(r.Overflow)}, "\x00")
 		row := agg[k]
 		if row == nil {
-			row = &SpendRow{Org: r.Org, Team: r.Team, Project: r.Project, KeyID: r.KeyID, User: r.User, Model: r.Model, Tags: tags, Unit: r.Unit}
+			row = &SpendRow{Org: r.Org, Team: r.Team, Project: r.Project, KeyID: r.KeyID, User: r.User, Model: r.Model, Tags: tags, Unit: r.Unit,
+				Overflow: r.Overflow}
 			agg[k] = row
 		}
 		row.Cost += r.Cost
@@ -316,6 +334,19 @@ CREATE TABLE IF NOT EXISTS llmflow_budget_arming (
 	pre_nano    bigint NOT NULL CHECK (pre_nano >= 0),
 	PRIMARY KEY (kind, name, model, unit, incarnation)
 );
+-- v0.18.0, workload profiles (#90): a rolling window's spent, by bucket
+-- (ledger.go); the profile in force and the overflow flag of each record.
+CREATE TABLE IF NOT EXISTS llmflow_budget_buckets (
+	kind         text NOT NULL,
+	name         text NOT NULL,
+	model        text NOT NULL,
+	unit         text NOT NULL,
+	bucket_start timestamptz NOT NULL,
+	spent_nano   bigint NOT NULL CHECK (spent_nano >= 0),
+	PRIMARY KEY (kind, name, model, unit, bucket_start)
+);
+ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS profile text NOT NULL DEFAULT '';
+ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS overflow boolean NOT NULL DEFAULT false;
 `
 
 func (p *Postgres) SetBudget(ctx context.Context, b Budget) error {
@@ -374,14 +405,14 @@ func (p *Postgres) MarkSoftAlert(ctx context.Context, k BudgetKey, period time.T
 
 func (p *Postgres) SpendRows(ctx context.Context, since time.Time) ([]SpendRow, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT org, team, project, key_id, user_name, model, tags, unit, sum(cost) FROM llmflow_usage
-		WHERE ts >= $1 GROUP BY org, team, project, key_id, user_name, model, tags, unit`, since)
+		SELECT org, team, project, key_id, user_name, model, tags, unit, overflow, sum(cost) FROM llmflow_usage
+		WHERE ts >= $1 GROUP BY org, team, project, key_id, user_name, model, tags, unit, overflow`, since)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (SpendRow, error) {
 		var s SpendRow
-		err := r.Scan(&s.Org, &s.Team, &s.Project, &s.KeyID, &s.User, &s.Model, &s.Tags, &s.Unit, &s.Cost)
+		err := r.Scan(&s.Org, &s.Team, &s.Project, &s.KeyID, &s.User, &s.Model, &s.Tags, &s.Unit, &s.Overflow, &s.Cost)
 		s.Tags = dedupSorted(s.Tags)
 		return s, err
 	})

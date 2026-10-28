@@ -39,17 +39,38 @@ type reqScope struct {
 	user string
 	tags []string
 	unit string
+	// overflow: admitted beyond the user's workload profile (#90).
+	overflow bool
 }
 
 // keys lists the budget keys that may apply to a request: each scope it
 // belongs to, for every model and for its own model, in its unit.
 func (r reqScope) keys() []store.BudgetKey {
-	return store.ScopeKeys(store.Attrs{Org: r.org, Team: r.team, Project: r.project, KeyID: r.key, User: r.user, Model: r.model, Tags: r.tags, Unit: r.unit})
+	return store.ScopeKeys(store.Attrs{Org: r.org, Team: r.team, Project: r.project, KeyID: r.key, User: r.user, Model: r.model, Tags: r.tags, Unit: r.unit,
+		Overflow: r.overflow})
+}
+
+func rowAttrs(r store.SpendRow) store.Attrs {
+	return store.Attrs{Org: r.Org, Team: r.Team, Project: r.Project, KeyID: r.KeyID, User: r.User, Model: r.Model, Tags: r.Tags, Unit: r.Unit,
+		Overflow: r.Overflow}
 }
 
 // rowMatches reports whether spend row belongs to budget key k.
-func rowMatches(k store.BudgetKey, r store.SpendRow) bool {
-	return store.Matches(k, store.Attrs{Org: r.Org, Team: r.Team, Project: r.Project, KeyID: r.KeyID, User: r.User, Model: r.Model, Tags: r.Tags, Unit: r.Unit})
+func rowMatches(k store.BudgetKey, r store.SpendRow) bool { return store.Matches(k, rowAttrs(r)) }
+
+// rowKeys lists the budget keys a spend row counts for: exactly the keys
+// rowMatches accepts (TestRowKeysAreMatches), each once.
+func rowKeys(r store.SpendRow) []store.BudgetKey {
+	ks := store.ScopeKeys(rowAttrs(r))
+	out := ks[:0]
+	seen := make(map[store.BudgetKey]bool, len(ks))
+	for _, k := range ks {
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 type budgetState struct {
@@ -135,7 +156,7 @@ func (b *budgeter) refresh(ctx context.Context) error {
 	now := b.now()
 	rowsAt := map[time.Time][]store.SpendRow{}
 	for _, bg := range list {
-		start := bg.Period.Start(now)
+		start := bg.Period.SpendSince(now)
 		if _, ok := rowsAt[start]; ok {
 			continue
 		}
@@ -146,15 +167,25 @@ func (b *budgeter) refresh(ctx context.Context) error {
 		}
 		rowsAt[start] = rows
 	}
+	// Each row counts for the keys of its scope: one pass over the rows per
+	// distinct start, then a lookup per budget (workload profiles make
+	// budgets as many as users, #90; matching every row against every
+	// budget was their product).
+	spentAt := make(map[time.Time]map[store.BudgetKey]float64, len(rowsAt))
+	for start, rows := range rowsAt {
+		m := map[store.BudgetKey]float64{}
+		for _, r := range rows {
+			for _, k := range rowKeys(r) {
+				m[k] += r.Cost
+			}
+		}
+		spentAt[start] = m
+	}
 	budgets := make(map[store.BudgetKey]*budgetState, len(list))
 	var alerts []softAlert
 	for _, bg := range list {
 		st := &budgetState{b: bg, start: bg.Period.Start(now)}
-		for _, r := range rowsAt[st.start] {
-			if rowMatches(bg.BudgetKey, r) {
-				st.db += r.Cost
-			}
-		}
+		st.db = spentAt[bg.Period.SpendSince(now)][bg.BudgetKey]
 		budgets[bg.BudgetKey] = st
 		// Alerts use the stored spend only: it is what every gateway
 		// sees, and it cannot double-count records written meanwhile.
@@ -325,9 +356,16 @@ func (b *budgeter) refs(r reqScope) []budgetRef {
 	}
 	now := b.now()
 	var out []budgetRef
-	for _, k := range r.keys() {
+	for i, k := range r.keys() {
+		if r.model == "" && i%2 == 1 {
+			continue // without a model, each key is listed twice
+		}
 		if st := b.budgets[k]; st != nil {
-			out = append(out, budgetRef{key: k, start: st.b.Period.Start(now), epoch: st.b.Epoch, period: st.b.Period})
+			ref := budgetRef{key: k, start: st.b.Period.Start(now), epoch: st.b.Epoch, period: st.b.Period}
+			if _, ok := st.b.Period.Rolling(); ok {
+				ref.resetAt = st.b.Period.ResetAt(now)
+			}
+			out = append(out, ref)
 		}
 	}
 	return out
@@ -357,7 +395,8 @@ func (b *budgeter) persisted(recs []store.Record) {
 		if rec.Cost <= 0 {
 			continue
 		}
-		sc := reqScope{org: rec.Org, team: rec.Team, project: rec.Project, key: rec.KeyID, user: rec.User, model: rec.Model, tags: rec.Tags, unit: rec.Unit}
+		sc := reqScope{org: rec.Org, team: rec.Team, project: rec.Project, key: rec.KeyID, user: rec.User, model: rec.Model, tags: rec.Tags, unit: rec.Unit,
+			overflow: rec.Overflow}
 		for _, k := range sc.keys() {
 			b.pending[k] -= rec.Cost
 			if v := b.pending[k]; v < 1e-12 && v > -1e-12 {
