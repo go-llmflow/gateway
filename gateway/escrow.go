@@ -69,9 +69,12 @@ type grantCell struct {
 	// end of a temporary increase): what a request admitted before leaves
 	// unused then goes back to the store.
 	gen int64
-	// room is the store's room left as last seen (-1: unknown), at roomAt.
-	room   int64
-	roomAt time.Time
+	// room is the store's room left as last seen (-1: unknown), at roomAt;
+	// roomReset, for a rolling window the store refused, when that room
+	// grows back enough (store.NoRoomError.Reset).
+	room      int64
+	roomAt    time.Time
+	roomReset time.Time
 }
 
 // noRoomTTL is how long a growth the store refused is not asked again for
@@ -87,10 +90,19 @@ type budgetRef struct {
 	start  time.Time
 	epoch  int64
 	period store.Period
+	// resetAt, for a rolling window, is when it has its whole limit back,
+	// as of when the request read it (store.Period.ResetAt).
+	resetAt time.Time
 }
 
-// reset is when the budget period resets.
-func (r budgetRef) reset() time.Time { return r.period.End(r.start) }
+// reset is when the budget period resets (a rolling window: when it is
+// whole again).
+func (r budgetRef) reset() time.Time {
+	if !r.resetAt.IsZero() {
+		return r.resetAt
+	}
+	return r.period.End(r.start)
+}
 
 // tightest returns the reset of the budget with the least room left for
 // this process (the store's room as last seen plus its unused grant), or
@@ -168,9 +180,21 @@ type noRoom struct {
 	key    store.BudgetKey
 	room   int64 // nano-units this process could still get for it
 	arming bool  // the budget is arming (arming.go)
+	// reset, for a rolling window, is when enough has left it (zero: the
+	// budget's own reset).
+	reset time.Time
 }
 
 func (e *noRoom) Error() string { return "budget exhausted" }
+
+// resetIn is when the refusing budget has room again: a rolling window's
+// as the store computed it, else the budget's reset among refs.
+func (e *noRoom) resetIn(refs []budgetRef) time.Time {
+	if !e.reset.IsZero() {
+		return e.reset
+	}
+	return resetOf(refs, e.key)
+}
 
 func (e *escrow) cellFor(r budgetRef) *grantCell {
 	ck := cellKey{r.key, r.start.UnixNano()}
@@ -223,9 +247,10 @@ func (e *escrow) acquire(ctx context.Context, refs []budgetRef, w int64) (*hold,
 				if c.room >= 0 && need > c.room && time.Since(c.roomAt) < noRoomTTL {
 					// The store said there is not enough, a moment ago.
 					room := max(0, c.granted-c.admitted-c.pending) + c.room
+					reset := c.roomReset
 					e.mu.Unlock()
 					e.refused.Add(1)
-					return nil, &noRoom{key: r.key, room: room}
+					return nil, &noRoom{key: r.key, room: room, reset: reset}
 				}
 				reqs = append(reqs, store.GrantRequest{Key: r.key, Start: r.start, Need: need, Want: w, Share: e.share})
 			}
@@ -277,7 +302,7 @@ func (e *escrow) acquire(ctx context.Context, refs []budgetRef, w int64) (*hold,
 			for _, r := range refs {
 				if r.key == nr.Key {
 					c := e.cellFor(r)
-					c.room, c.roomAt = nr.Room, time.Now() // real time: a rate limit, not a period
+					c.room, c.roomAt, c.roomReset = nr.Room, time.Now(), nr.Reset // real time: a rate limit, not a period
 				}
 			}
 			e.mu.Unlock()
@@ -293,7 +318,7 @@ func (e *escrow) acquire(ctx context.Context, refs []budgetRef, w int64) (*hold,
 				e.mu.Unlock()
 				return nil, &noRoom{key: nr.Key, arming: true}
 			}
-			return nil, &noRoom{key: nr.Key, room: e.roomFor(refs)}
+			return nil, &noRoom{key: nr.Key, room: e.roomFor(refs), reset: nr.Reset}
 		case err != nil:
 			e.mu.Unlock()
 			return nil, err

@@ -105,6 +105,30 @@ type NoRoomError struct {
 	Key    BudgetKey
 	Room   int64
 	Arming bool
+	// Reset, for a rolling window, is when enough of what it counts has
+	// left it for the growth to fit (RollingReset); zero otherwise.
+	Reset time.Time
+}
+
+// bucketSpend is one bucket of a rolling window.
+type bucketSpend struct {
+	start time.Time
+	spent int64
+}
+
+// RollingReset is when a rolling window of d, whose buckets in the window
+// are bs (oldest first), has given back short nano-units: the bucket that
+// completes them leaves the window then. When the buckets cannot (the rest
+// is held by grants), it is when the whole window has emptied.
+func rollingReset(bs []bucketSpend, now time.Time, d time.Duration, short int64) time.Time {
+	var freed int64
+	for _, b := range bs {
+		freed += b.spent
+		if freed >= short {
+			return b.start.Add(BucketWidth + d)
+		}
+	}
+	return BucketOf(now).Add(BucketWidth + d)
 }
 
 func (e *NoRoomError) Error() string {
@@ -170,8 +194,11 @@ type BudgetLedger interface {
 	// ReleaseGrants drops the given grants (an administrator releasing a
 	// replica that never came back); it returns the amount released.
 	ReleaseGrants(ctx context.Context, rows []GrantRow) (int64, error)
-	// Ledger returns a budget period's ledger (zero when it has none).
+	// Ledger returns a budget period's ledger (zero when it has none);
+	// LedgerAt is Ledger at now, which a rolling window's spent depends on
+	// (Ledger is LedgerAt at the current time).
 	Ledger(ctx context.Context, k BudgetKey, start time.Time) (LedgerState, error)
+	LedgerAt(ctx context.Context, k BudgetKey, start, now time.Time) (LedgerState, error)
 
 	// RegisterHolder records a gateway process before it admits anything;
 	// UnregisterHolder removes it (and its arming reports) at a clean
@@ -237,17 +264,22 @@ type Attrs struct {
 	Org, Team, Project, KeyID, User, Model string
 	Tags                                   []string
 	Unit                                   string
+	// Overflow: admitted beyond the user's workload profile (Record.Overflow).
+	Overflow bool
 }
 
 // RecordAttrs are a record's scopes.
 func RecordAttrs(r Record) Attrs {
-	return Attrs{Org: r.Org, Team: r.Team, Project: r.Project, KeyID: r.KeyID, User: r.User, Model: r.Model, Tags: r.Tags, Unit: r.Unit}
+	return Attrs{Org: r.Org, Team: r.Team, Project: r.Project, KeyID: r.KeyID, User: r.User, Model: r.Model, Tags: r.Tags, Unit: r.Unit,
+		Overflow: r.Overflow}
 }
 
 // ScopeKeys lists the budget keys a request of these attributes falls
-// under: each scope, for every model and for its own model, in its unit.
+// under: each scope, for every model and for its own model, in its unit. A
+// user's request falls under their profile's weekly and session budgets,
+// or, admitted beyond them, under its overflow budget.
 func ScopeKeys(a Attrs) []BudgetKey {
-	names := make([]BudgetKey, 0, 5+len(a.Tags))
+	names := make([]BudgetKey, 0, 7+len(a.Tags))
 	names = append(names, BudgetKey{Kind: ScopeOrg, Name: a.Org, Unit: a.Unit}, BudgetKey{Kind: ScopeTeam, Name: a.Team, Unit: a.Unit},
 		BudgetKey{Kind: ScopeKey, Name: a.KeyID, Unit: a.Unit})
 	if a.Project != "" {
@@ -255,6 +287,12 @@ func ScopeKeys(a Attrs) []BudgetKey {
 	}
 	if a.User != "" {
 		names = append(names, BudgetKey{Kind: ScopeUser, Name: a.User, Unit: a.Unit})
+		if a.Overflow {
+			names = append(names, BudgetKey{Kind: ScopeProfileOverflow, Name: a.User, Unit: a.Unit})
+		} else {
+			names = append(names, BudgetKey{Kind: ScopeProfileWeek, Name: a.User, Unit: a.Unit},
+				BudgetKey{Kind: ScopeProfileSession, Name: a.User, Unit: a.Unit})
+		}
 	}
 	for _, t := range a.Tags {
 		names = append(names, BudgetKey{Kind: ScopeTag, Name: t, Unit: a.Unit})
@@ -285,6 +323,10 @@ func Matches(k BudgetKey, a Attrs) bool {
 		return a.KeyID == k.Name
 	case ScopeUser:
 		return a.User != "" && a.User == k.Name
+	case ScopeProfileWeek, ScopeProfileSession:
+		return a.User != "" && a.User == k.Name && !a.Overflow
+	case ScopeProfileOverflow:
+		return a.User != "" && a.User == k.Name && a.Overflow
 	case ScopeTag:
 		for _, t := range a.Tags {
 			if t == k.Name {
@@ -344,6 +386,106 @@ type ledgerKey struct {
 type memLedger struct {
 	spent  int64
 	grants map[Holder]int64
+	// buckets: a rolling window's spent by bucket (unix seconds).
+	buckets map[int64]int64
+}
+
+// rolling reports whether a ledger row is a rolling window's.
+func rollingRow(start time.Time) bool { return start.Equal(RollingStart) }
+
+// bucketAt is when a record counts in a rolling window: when it ended (its
+// admission for a record without an end). Not its admission: a request
+// admitted at t may be held on a grant grown at a later t' (the time is
+// read before the hold), whose room left out buckets that a window ending
+// between t and t' still counts; the property test of #90 found a window
+// over its limit that way. The end comes after the hold, hence after every
+// growth that funded it, and the grant covers the request until then.
+func bucketAt(r Record) time.Time {
+	if r.Time.IsZero() {
+		return r.AdmittedAt
+	}
+	return r.Time
+}
+
+// recordAt is when a record counts: its admission (its end for a record
+// written before hard budgets).
+func recordAt(r Record) time.Time {
+	if r.AdmittedAt.IsZero() {
+		return r.Time
+	}
+	return r.AdmittedAt
+}
+
+// windowSpent is a rolling row's spent at now for a window of d; it drops
+// the buckets that left the window long ago.
+func (l *memLedger) windowSpent(now time.Time, d time.Duration) int64 {
+	from := WindowStart(now, d).Unix()
+	var s int64
+	for b, v := range l.buckets {
+		switch {
+		case b >= from:
+			s = min(s+v, MaxLedgerNano)
+		case b < from-int64(d/time.Second):
+			delete(l.buckets, b)
+		}
+	}
+	return s
+}
+
+// windowBuckets lists a rolling row's buckets in the window, oldest first.
+func (l *memLedger) windowBuckets(now time.Time, d time.Duration) []bucketSpend {
+	from := WindowStart(now, d).Unix()
+	var out []bucketSpend
+	for b, v := range l.buckets {
+		if b >= from {
+			out = append(out, bucketSpend{time.Unix(b, 0).UTC(), v})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].start.Before(out[j].start) })
+	return out
+}
+
+// spentAt is a row's spent at now under period p.
+func (l *memLedger) spentAt(p Period, now time.Time) int64 {
+	if d, ok := p.Rolling(); ok {
+		return l.windowSpent(now, d)
+	}
+	return l.spent
+}
+
+// seed sets a row's spent from the stored records of its period (m.mu
+// held): a new row, or one whose budget was created again (records stored
+// while no budget existed settled nothing in it).
+func (m *Memory) seed(l *memLedger, k BudgetKey, start time.Time) {
+	l.spent, l.buckets = 0, nil
+	if rollingRow(start) {
+		l.buckets = map[int64]int64{}
+	}
+	for _, r := range m.records {
+		at := recordAt(r)
+		if !Matches(k, RecordAttrs(r)) {
+			continue
+		}
+		if l.buckets != nil {
+			b := BucketOf(bucketAt(r)).Unix()
+			l.buckets[b] = min(l.buckets[b]+RecordCostNano(r), MaxLedgerNano)
+		} else if !at.Before(start) {
+			l.spent = min(l.spent+RecordCostNano(r), MaxLedgerNano)
+		}
+	}
+}
+
+// addSpent settles a record's actual nano-units in a row.
+func (l *memLedger) addSpent(start time.Time, r Record, actual int64) {
+	if rollingRow(start) {
+		if l.buckets == nil {
+			l.buckets = map[int64]int64{}
+		}
+		b := BucketOf(bucketAt(r)).Unix()
+		l.buckets[b] = min(l.buckets[b]+actual, MaxLedgerNano)
+		return
+	}
+	l.spent = min(l.spent+actual, MaxLedgerNano)
 }
 
 func (l *memLedger) granted() int64 {
@@ -364,15 +506,7 @@ func (m *Memory) ledgerRow(k BudgetKey, start time.Time, create bool) *memLedger
 	}
 	l := &memLedger{grants: map[Holder]int64{}}
 	// A new period starts from the cost of its usage records.
-	for _, r := range m.records {
-		at := r.AdmittedAt
-		if at.IsZero() {
-			at = r.Time
-		}
-		if !at.Before(start) && Matches(k, RecordAttrs(r)) {
-			l.spent = min(l.spent+RecordCostNano(r), MaxLedgerNano)
-		}
-	}
+	m.seed(l, k, start)
 	m.ledger[lk] = l
 	return l
 }
@@ -402,7 +536,11 @@ func (m *Memory) SetBudgetChecked(_ context.Context, b Budget, now time.Time, le
 	}
 	var st LedgerState
 	if l := m.ledgerRow(b.BudgetKey, b.Period.Start(now), false); l != nil {
-		st = LedgerState{l.spent, l.granted()}
+		if cur == nil {
+			// Created again: what was stored meanwhile settled nothing here.
+			m.seed(l, b.BudgetKey, b.Period.Start(now))
+		}
+		st = LedgerState{l.spentAt(b.Period, now), l.granted()}
 	}
 	if _, err := checkChange(old, b, st, now, lendFor, force); err != nil {
 		return err
@@ -436,7 +574,7 @@ func (m *Memory) IncreaseBudgetChecked(_ context.Context, k BudgetKey, amount fl
 	nb.TempIncrease, nb.TempExpiry = amount, &e
 	var st LedgerState
 	if l := m.ledgerRow(k, nb.Period.Start(now), false); l != nil {
-		st = LedgerState{l.spent, l.granted()}
+		st = LedgerState{l.spentAt(nb.Period, now), l.granted()}
 	}
 	if _, err := checkChange(&cur.b, nb, st, now, lendFor, force); err != nil {
 		return err
@@ -464,15 +602,22 @@ func (m *Memory) GrowGrants(_ context.Context, h Holder, now time.Time, lendFor 
 			out = append(out, res)
 			continue
 		}
+		if _, rolling := mb.b.Period.Rolling(); rolling != rollingRow(r.Start) {
+			return nil, &NoRoomError{Key: r.Key} // see Postgres.GrowGrants
+		}
 		limit, until := LimitNano(mb.b, now, lendFor)
 		l := m.ledgerRow(r.Key, r.Start, true)
 		pre, ready := m.armingPre(mb.b)
 		if !ready {
 			return nil, &NoRoomError{Key: r.Key, Arming: true}
 		}
-		room := limit - l.spent - l.granted() - pre
+		room := limit - l.spentAt(mb.b.Period, now) - l.granted() - pre
 		if room < r.Need || r.Need < 0 {
-			return nil, &NoRoomError{Key: r.Key, Room: max(room, 0)}
+			nr := &NoRoomError{Key: r.Key, Room: max(room, 0)}
+			if d, ok := mb.b.Period.Rolling(); ok {
+				nr.Reset = rollingReset(l.windowBuckets(now, d), now, d, r.Need-room)
+			}
+			return nil, nr
 		}
 		res.Grown = r.growth(room)
 		res.Room, res.Epoch, res.Until = room-res.Grown, mb.b.Epoch, until
@@ -567,14 +712,25 @@ func (m *Memory) ReleaseGrants(_ context.Context, rows []GrantRow) (int64, error
 	return n, nil
 }
 
-func (m *Memory) Ledger(_ context.Context, k BudgetKey, start time.Time) (LedgerState, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+func (m *Memory) Ledger(ctx context.Context, k BudgetKey, start time.Time) (LedgerState, error) {
+	return m.LedgerAt(ctx, k, start, time.Now())
+}
+
+func (m *Memory) LedgerAt(_ context.Context, k BudgetKey, start, now time.Time) (LedgerState, error) {
+	m.mu.Lock() // a rolling row drops its old buckets
+	defer m.mu.Unlock()
 	if m.Fail != nil {
 		return LedgerState{}, m.Fail
 	}
 	if l := m.ledger[ledgerKey{k, start.UnixNano()}]; l != nil {
-		return LedgerState{l.spent, l.granted()}, nil
+		st := LedgerState{l.spent, l.granted()}
+		if rollingRow(start) {
+			st.Spent = 0
+			if mb := m.budgets[k]; mb != nil {
+				st.Spent = l.spentAt(mb.b.Period, now)
+			}
+		}
+		return st, nil
 	}
 	return LedgerState{}, nil
 }
@@ -672,12 +828,16 @@ func (m *Memory) ReleaseReplica(_ context.Context, replica string) error {
 // was not held against. Its cost lands in their spent (v0.17.1): requests
 // admitted before a budget existed, or before a process loaded it.
 func unheldSettlements(r Record, budgets func(BudgetKey) (Period, bool)) []HoldRef {
-	at := r.AdmittedAt
-	if at.IsZero() {
-		at = r.Time
-	}
+	at := recordAt(r)
 	var out []HoldRef
+	seen := map[BudgetKey]bool{}
 	for _, k := range ScopeKeys(RecordAttrs(r)) {
+		// A record without a model lists its keys twice (every model, its
+		// own): once is its cost.
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
 		p, ok := budgets(k)
 		if !ok {
 			continue
@@ -709,7 +869,7 @@ func (m *Memory) settle(r Record) {
 			return mb.b.Period, true
 		}) {
 			if l := m.ledgerRow(u.Key, u.Start, false); l != nil {
-				l.spent = min(l.spent+actual, MaxLedgerNano)
+				l.addSpent(u.Start, r, actual)
 			}
 		}
 	}
@@ -722,7 +882,7 @@ func (m *Memory) settle(r Record) {
 		if l == nil {
 			continue
 		}
-		l.spent = min(l.spent+actual, MaxLedgerNano)
+		l.addSpent(hr.Start, r, actual)
 		l.grants[h] = max(0, l.grants[h]-min(actual, max(r.HoldNano, 0)))
 		if l.grants[h] == 0 {
 			delete(l.grants, h)

@@ -300,8 +300,15 @@ func TestHeaderSafe(t *testing.T) {
 }
 
 func TestRequestScopeKeys(t *testing.T) {
-	if n := len((reqScope{org: "o", team: "t", key: "k", user: "alice", model: "m"}).keys()); n != 8 {
+	// A user: their user budget and their profile's weekly and session
+	// budgets, or, beyond the profile, its overflow budget (#90).
+	if n := len((reqScope{org: "o", team: "t", key: "k", user: "alice", model: "m"}).keys()); n != 12 {
 		t.Fatalf("with a user: %d keys", n)
+	}
+	over := (reqScope{org: "o", team: "t", key: "k", user: "alice", model: "m", overflow: true}).keys()
+	if len(over) != 10 || !inKeys(store.BudgetKey{Kind: store.ScopeProfileOverflow, Name: "alice"}, over) ||
+		inKeys(store.BudgetKey{Kind: store.ScopeProfileWeek, Name: "alice"}, over) {
+		t.Fatalf("overflow: %+v", over)
 	}
 	r := reqScope{org: "o", team: "t", project: "p", key: "k", model: "m", tags: []string{"x"}}
 	ks := r.keys()
@@ -310,5 +317,43 @@ func TestRequestScopeKeys(t *testing.T) {
 	}
 	if len((reqScope{org: "o", team: "t", key: "k"}).keys()) != 6 {
 		t.Fatal("no project, no tags")
+	}
+}
+
+// rowKeys is the index the budgeter's refresh counts spend with: it must
+// list exactly the keys rowMatches accepts, or a budget would be counted
+// wrong (the index replaced matching every row against every budget).
+func TestRowKeysAreMatches(t *testing.T) {
+	rows := []store.SpendRow{
+		{Org: "o", Team: "t", KeyID: "k", Model: "m"},
+		{Org: "o", Team: "t", Project: "p", KeyID: "k", User: "alice", Model: "m", Tags: []string{"x", "y"}, Unit: "USD"},
+		{Org: "o", Team: "t", KeyID: "k", User: "alice", Model: "m", Overflow: true},
+		{Org: "o", Team: "t", KeyID: "k", User: "bob", Model: ""},
+	}
+	var cands []store.BudgetKey
+	for _, kind := range []store.ScopeKind{store.ScopeOrg, store.ScopeTeam, store.ScopeProject, store.ScopeKey, store.ScopeUser, store.ScopeTag,
+		store.ScopeProfileWeek, store.ScopeProfileSession, store.ScopeProfileOverflow} {
+		for _, name := range []string{"o", "t", "t/p", "k", "alice", "bob", "x", "y", "z"} {
+			for _, model := range []string{"", "m", "n"} {
+				for _, unit := range []string{"", "USD"} {
+					cands = append(cands, store.BudgetKey{Kind: kind, Name: name, Model: model, Unit: unit})
+				}
+			}
+		}
+	}
+	for _, r := range rows {
+		ks := rowKeys(r)
+		seen := map[store.BudgetKey]bool{}
+		for _, k := range ks {
+			if seen[k] {
+				t.Fatalf("%+v: %v twice", r, k)
+			}
+			seen[k] = true
+		}
+		for _, k := range cands {
+			if rowMatches(k, r) != seen[k] {
+				t.Fatalf("%+v: key %v matches=%v listed=%v", r, k, rowMatches(k, r), seen[k])
+			}
+		}
 	}
 }

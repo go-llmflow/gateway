@@ -105,7 +105,7 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(schemaLock)); err != nil {
 			return err
 		}
-		for _, s := range []string{schema, usersSchema, modelsSchema, toolsSchema, budgetsSchema, allowSchema, rotationSchema, scimSchema, auditSchema, haSchema, haStateSchema} {
+		for _, s := range []string{schema, usersSchema, modelsSchema, toolsSchema, budgetsSchema, allowSchema, rotationSchema, scimSchema, auditSchema, haSchema, haStateSchema, profilesSchema} {
 			if _, err := tx.Exec(ctx, s); err != nil {
 				return err
 			}
@@ -392,7 +392,7 @@ func (p *Postgres) KeyByHash(ctx context.Context, h [32]byte) (Key, error) {
 
 var usageCols = []string{"record_id", "ts", "org", "team", "project", "key_id", "model", "pool", "upstream", "prompt_tokens",
 	"completion_tokens", "cached_tokens", "cost", "unit", "latency_ms", "status", "priority", "borrowing", "stream", "estimated", "tags",
-	"user_name", "lab", "cost_nano", "admitted_at"}
+	"user_name", "lab", "cost_nano", "admitted_at", "profile", "overflow"}
 
 // InsertRecords writes a batch: COPY into a temporary table, then one
 // INSERT that skips the records whose ID is already stored, so a batch
@@ -417,7 +417,7 @@ func (p *Postgres) InsertRecords(ctx context.Context, recs []Record) error {
 		}
 		rows[i] = []any{id, r.Time, r.Org, r.Team, r.Project, r.KeyID, r.Model, r.Pool, r.Upstream, r.PromptTokens,
 			r.CompletionTokens, r.CachedTokens, r.Cost, r.Unit, r.LatencyMS, r.Status, r.Priority, r.Borrowing, r.Stream, r.Estimated, tags,
-			r.User, r.Lab, RecordCostNano(r), admitted}
+			r.User, r.Lab, RecordCostNano(r), admitted, r.Profile, r.Overflow}
 	}
 	cols := strings.Join(usageCols, ", ")
 	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
@@ -458,7 +458,7 @@ func (p *Postgres) InsertRecords(ctx context.Context, recs []Record) error {
 		if err := rs.Err(); err != nil {
 			return err
 		}
-		s := settlement{spent: map[ledgerKey]int64{}, dec: map[ledgerKey]map[Holder]int64{}}
+		s := newSettlement()
 		for _, id := range ids {
 			if id != nil {
 				s.add(byID[*id], budgets)

@@ -269,8 +269,17 @@ func TestLimitNano(t *testing.T) {
 	}
 	a := Attrs{Org: "o", Team: "t", Project: "p", KeyID: "k", User: "alice", Model: "m", Tags: []string{"x"}}
 	ks := ScopeKeys(a)
-	if len(ks) != 12 || !Matches(ks[6], a) || ks[8] != (BudgetKey{Kind: ScopeUser, Name: "alice"}) || !Matches(ks[9], a) {
+	// org, team, key, project, user, profile week and session, tag: each
+	// for every model and for its own.
+	if len(ks) != 16 || !Matches(ks[6], a) || ks[8] != (BudgetKey{Kind: ScopeUser, Name: "alice"}) || !Matches(ks[9], a) ||
+		ks[10] != (BudgetKey{Kind: ScopeProfileWeek, Name: "alice"}) || !Matches(ks[12], a) {
 		t.Fatalf("%+v", ks)
+	}
+	over := a
+	over.Overflow = true
+	if Matches(ks[10], over) || Matches(ks[12], over) || !Matches(BudgetKey{Kind: ScopeProfileOverflow, Name: "alice"}, over) ||
+		Matches(BudgetKey{Kind: ScopeProfileOverflow, Name: "alice"}, a) {
+		t.Fatal("the overflow flag splits the profile budgets")
 	}
 	other := a
 	other.Model = "other"

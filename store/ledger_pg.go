@@ -37,6 +37,10 @@ func usageMatch(k BudgetKey) (string, error) {
 		scope = "key_id = $2"
 	case ScopeUser:
 		scope = "user_name <> '' AND user_name = $2"
+	case ScopeProfileWeek, ScopeProfileSession:
+		scope = "user_name <> '' AND user_name = $2 AND NOT overflow"
+	case ScopeProfileOverflow:
+		scope = "user_name <> '' AND user_name = $2 AND overflow"
 	case ScopeTag:
 		scope = "$2 = ANY (tags)"
 	default:
@@ -45,30 +49,101 @@ func usageMatch(k BudgetKey) (string, error) {
 	return "unit = $4 AND ($3 = '' OR model = $3) AND " + scope, nil
 }
 
+// costNanoSQL is a usage row's cost in nano-units ($6 the bound), as
+// RecordCostNano computes it.
+const costNanoSQL = `coalesce(cost_nano, LEAST(ceil(cost * 1e9), $6)::bigint)`
+
+// bucketSQL is the start of a usage row's bucket (BucketOf of its end,
+// bucketAt).
+const bucketSQL = `to_timestamp(floor(extract(epoch FROM ts) / 300) * 300)`
+
+// seedLedger sets a ledger row's spent from the usage records stored so
+// far (the usage inserts must be locked out, lockUsage): a calendar row's
+// spent column, or a rolling row's buckets. now bounds the buckets read.
+func seedLedger(ctx context.Context, tx pgx.Tx, k BudgetKey, p Period, start, now time.Time) error {
+	match, err := usageMatch(k)
+	if err != nil {
+		return err
+	}
+	args := append(keyArgs(k), start.UTC(), MaxLedgerNano)
+	if d, ok := p.Rolling(); ok && rollingRow(start) {
+		// Buckets are written with their ledger row held (when it exists).
+		if _, err := holdLedger(ctx, tx, k, start); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM llmflow_budget_buckets WHERE `+keyWhere, keyArgs(k)...); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO llmflow_budget_buckets (kind, name, model, unit, bucket_start, spent_nano)
+			SELECT $1, $2, $3, $4, `+bucketSQL+`, LEAST(sum(`+costNanoSQL+`), $6)
+			FROM llmflow_usage WHERE ts >= $5 AND `+match+`
+			GROUP BY 5`, append(keyArgs(k), WindowStart(now, d), MaxLedgerNano)...)
+		return err
+	}
+	// ts >= start lets the (ts, team) index serve: a record admitted in the
+	// period ended in it or later.
+	_, err = tx.Exec(ctx, `UPDATE llmflow_budget_ledger SET spent_nano = (SELECT LEAST(coalesce(sum(`+costNanoSQL+`), 0), $6)
+		FROM llmflow_usage WHERE ts >= $5 AND coalesce(admitted_at, ts) >= $5 AND `+match+`)
+		WHERE `+keyWhere+` AND period_start = $5`, args...)
+	return err
+}
+
+// windowSpent is a rolling row's spent at now (its ledger row held), and
+// drops the buckets that left the window long ago.
+func windowSpent(ctx context.Context, tx pgx.Tx, k BudgetKey, d time.Duration, now time.Time) (int64, error) {
+	from := WindowStart(now, d)
+	if _, err := tx.Exec(ctx, `DELETE FROM llmflow_budget_buckets WHERE `+keyWhere+` AND bucket_start < $5`,
+		append(keyArgs(k), from.Add(-d))...); err != nil {
+		return 0, err
+	}
+	var s int64
+	err := tx.QueryRow(ctx, `SELECT LEAST(coalesce(sum(spent_nano), 0), $6)::bigint FROM llmflow_budget_buckets WHERE `+keyWhere+` AND bucket_start >= $5`,
+		append(keyArgs(k), from, MaxLedgerNano)...).Scan(&s)
+	return s, err
+}
+
+// windowBuckets lists a rolling row's buckets in the window, oldest first.
+func windowBuckets(ctx context.Context, tx pgx.Tx, k BudgetKey, d time.Duration, now time.Time) ([]bucketSpend, error) {
+	rows, err := tx.Query(ctx, `SELECT bucket_start, spent_nano FROM llmflow_budget_buckets WHERE `+keyWhere+` AND bucket_start >= $5 ORDER BY bucket_start`,
+		append(keyArgs(k), WindowStart(now, d))...)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (bucketSpend, error) {
+		var b bucketSpend
+		err := r.Scan(&b.start, &b.spent)
+		return b, err
+	})
+}
+
 // lockLedger locks a budget period's ledger row, creating it with the cost
 // of the period's usage records when it does not exist, and returns its
-// spent and the sum of its grants.
-func lockLedger(ctx context.Context, tx pgx.Tx, k BudgetKey, start time.Time) (LedgerState, error) {
+// spent at now (a rolling window's, under period p) and the sum of its
+// grants.
+func lockLedger(ctx context.Context, tx pgx.Tx, k BudgetKey, p Period, start, now time.Time) (LedgerState, error) {
 	var st LedgerState
 	args := append(keyArgs(k), start.UTC())
 	err := tx.QueryRow(ctx, `SELECT spent_nano FROM llmflow_budget_ledger WHERE `+keyWhere+` AND period_start = $5 FOR UPDATE`, args...).Scan(&st.Spent)
 	if errors.Is(err, pgx.ErrNoRows) {
-		match, merr := usageMatch(k)
-		if merr != nil {
-			return st, merr
+		tag, ierr := tx.Exec(ctx, `INSERT INTO llmflow_budget_ledger (kind, name, model, unit, period_start, spent_nano)
+			VALUES ($1, $2, $3, $4, $5, 0) ON CONFLICT DO NOTHING`, args...)
+		if ierr != nil {
+			return st, ierr
 		}
-		// ts >= start lets the (ts, team) index serve: a record admitted in
-		// the period ended in it or later.
-		if _, err = tx.Exec(ctx, `INSERT INTO llmflow_budget_ledger (kind, name, model, unit, period_start, spent_nano)
-			SELECT $1, $2, $3, $4, $5, LEAST(coalesce(sum(coalesce(cost_nano, LEAST(ceil(cost * 1e9), $6)::bigint)), 0), $6)
-			FROM llmflow_usage WHERE ts >= $5 AND coalesce(admitted_at, ts) >= $5 AND `+match+`
-			ON CONFLICT DO NOTHING`, append(args, MaxLedgerNano)...); err != nil {
-			return st, err
+		if tag.RowsAffected() == 1 {
+			if err := seedLedger(ctx, tx, k, p, start, now); err != nil {
+				return st, err
+			}
 		}
 		err = tx.QueryRow(ctx, `SELECT spent_nano FROM llmflow_budget_ledger WHERE `+keyWhere+` AND period_start = $5 FOR UPDATE`, args...).Scan(&st.Spent)
 	}
 	if err != nil {
 		return st, err
+	}
+	if d, ok := p.Rolling(); ok && rollingRow(start) {
+		if st.Spent, err = windowSpent(ctx, tx, k, d, now); err != nil {
+			return st, err
+		}
 	}
 	err = tx.QueryRow(ctx, `SELECT coalesce(sum(granted_nano), 0)::bigint FROM llmflow_budget_grants WHERE `+keyWhere+` AND period_start = $5`, args...).Scan(&st.Granted)
 	return st, err
@@ -109,10 +184,17 @@ func (p *Postgres) SetBudgetChecked(ctx context.Context, b Budget, now time.Time
 		if exists {
 			b.TempIncrease, b.TempExpiry, b.Epoch, b.Arming = cur.TempIncrease, cur.TempExpiry, cur.Epoch, cur.Arming
 			old = &cur
-		} else if _, err := tx.Exec(ctx, `DELETE FROM llmflow_budget_arming WHERE `+keyWhere, keyArgs(b.BudgetKey)...); err != nil {
-			return err
+		} else {
+			if _, err := tx.Exec(ctx, `DELETE FROM llmflow_budget_arming WHERE `+keyWhere, keyArgs(b.BudgetKey)...); err != nil {
+				return err
+			}
+			// Created again: the records stored while no budget existed
+			// settled nothing in a ledger row the old one left.
+			if err := seedLedger(ctx, tx, b.BudgetKey, b.Period, b.Period.Start(now), now); err != nil {
+				return err
+			}
 		}
-		st, err := lockLedger(ctx, tx, b.BudgetKey, b.Period.Start(now))
+		st, err := lockLedger(ctx, tx, b.BudgetKey, b.Period, b.Period.Start(now), now)
 		if err != nil {
 			return err
 		}
@@ -233,7 +315,7 @@ func (p *Postgres) IncreaseBudgetChecked(ctx context.Context, k BudgetKey, amoun
 		nb := cur
 		e := expiry.UTC()
 		nb.TempIncrease, nb.TempExpiry = amount, &e
-		st, err := lockLedger(ctx, tx, k, nb.Period.Start(now))
+		st, err := lockLedger(ctx, tx, k, nb.Period, nb.Period.Start(now), now)
 		if err != nil {
 			return err
 		}
@@ -294,14 +376,27 @@ func (p *Postgres) GrowGrants(ctx context.Context, h Holder, now time.Time, lend
 			if !ready {
 				return &NoRoomError{Key: r.Key, Arming: true}
 			}
-			st, err := lockLedger(ctx, tx, r.Key, r.Start)
+			if _, rolling := b.Period.Rolling(); rolling != rollingRow(r.Start) {
+				// The period changed between a calendar one and a rolling
+				// window since the replica read it: refused until it reloads.
+				return &NoRoomError{Key: r.Key}
+			}
+			st, err := lockLedger(ctx, tx, r.Key, b.Period, r.Start, now)
 			if err != nil {
 				return err
 			}
 			limit, until := LimitNano(b, now, lendFor)
 			room := limit - st.Spent - st.Granted - pre
 			if room < r.Need || r.Need < 0 {
-				return &NoRoomError{Key: r.Key, Room: max(room, 0)}
+				nr := &NoRoomError{Key: r.Key, Room: max(room, 0)}
+				if d, ok := b.Period.Rolling(); ok && rollingRow(r.Start) {
+					bs, err := windowBuckets(ctx, tx, r.Key, d, now)
+					if err != nil {
+						return err
+					}
+					nr.Reset = rollingReset(bs, now, d, r.Need-room)
+				}
+				return nr
 			}
 			res.Grown = r.growth(room)
 			res.Room, res.Epoch, res.Until = room-res.Grown, b.Epoch, until
@@ -444,6 +539,10 @@ func (p *Postgres) ReleaseGrants(ctx context.Context, rows []GrantRow) (int64, e
 }
 
 func (p *Postgres) Ledger(ctx context.Context, k BudgetKey, start time.Time) (LedgerState, error) {
+	return p.LedgerAt(ctx, k, start, time.Now())
+}
+
+func (p *Postgres) LedgerAt(ctx context.Context, k BudgetKey, start, now time.Time) (LedgerState, error) {
 	var st LedgerState
 	args := append(keyArgs(k), start.UTC())
 	err := p.pool.QueryRow(ctx, `SELECT spent_nano, (SELECT coalesce(sum(granted_nano), 0)::bigint FROM llmflow_budget_grants g
@@ -452,6 +551,25 @@ func (p *Postgres) Ledger(ctx context.Context, k BudgetKey, start time.Time) (Le
 	if errors.Is(err, pgx.ErrNoRows) {
 		return LedgerState{}, nil
 	}
+	if err != nil || !rollingRow(start) {
+		return st, err
+	}
+	// A rolling window: its buckets, under the budget's window.
+	st.Spent = 0
+	var period string
+	err = p.pool.QueryRow(ctx, `SELECT period FROM llmflow_budgets_v2 WHERE `+keyWhere, keyArgs(k)...).Scan(&period)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return st, nil
+	}
+	if err != nil {
+		return st, err
+	}
+	d, ok := Period(period).Rolling()
+	if !ok {
+		return st, nil
+	}
+	err = p.pool.QueryRow(ctx, `SELECT LEAST(coalesce(sum(spent_nano), 0), $6)::bigint FROM llmflow_budget_buckets WHERE `+keyWhere+` AND bucket_start >= $5`,
+		append(keyArgs(k), WindowStart(now, d), MaxLedgerNano)...).Scan(&st.Spent)
 	return st, err
 }
 
@@ -459,19 +577,21 @@ func (p *Postgres) Ledger(ctx context.Context, k BudgetKey, start time.Time) (Le
 type AdmittedCost struct {
 	At       time.Time
 	CostNano int64
+	// Ended is the row's end (ts): what a rolling window counts it by.
+	Ended time.Time
 }
 
 // UsageByAdmission lists every usage row's admission time (its end for a
-// row written before hard budgets) and cost, for verifying the ledger
+// row written before hard budgets), end and cost, for verifying the ledger
 // against the records (tests, audits).
 func (p *Postgres) UsageByAdmission(ctx context.Context) ([]AdmittedCost, error) {
-	rows, err := p.pool.Query(ctx, `SELECT coalesce(admitted_at, ts), coalesce(cost_nano, 0) FROM llmflow_usage`)
+	rows, err := p.pool.Query(ctx, `SELECT coalesce(admitted_at, ts), coalesce(cost_nano, 0), ts FROM llmflow_usage`)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (AdmittedCost, error) {
 		var a AdmittedCost
-		err := r.Scan(&a.At, &a.CostNano)
+		err := r.Scan(&a.At, &a.CostNano, &a.Ended)
 		return a, err
 	})
 }
@@ -480,14 +600,32 @@ func (p *Postgres) UsageByAdmission(ctx context.Context) ([]AdmittedCost, error)
 type settlement struct {
 	spent map[ledgerKey]int64
 	dec   map[ledgerKey]map[Holder]int64
+	// buckets: a rolling row's spent by bucket (unix seconds).
+	buckets map[ledgerKey]map[int64]int64
+}
+
+func newSettlement() settlement {
+	return settlement{spent: map[ledgerKey]int64{}, dec: map[ledgerKey]map[Holder]int64{}, buckets: map[ledgerKey]map[int64]int64{}}
+}
+
+// addSpent counts actual for a row: its spent, or a rolling row's bucket of
+// the record's admission.
+func (s *settlement) addSpent(lk ledgerKey, r Record, actual int64) {
+	s.spent[lk] = min(s.spent[lk]+actual, MaxLedgerNano)
+	if lk.start == RollingStart.UnixNano() {
+		if s.buckets[lk] == nil {
+			s.buckets[lk] = map[int64]int64{}
+		}
+		b := BucketOf(bucketAt(r)).Unix()
+		s.buckets[lk][b] = min(s.buckets[lk][b]+actual, MaxLedgerNano)
+	}
 }
 
 func (s *settlement) add(r Record, budgets map[BudgetKey]Period) {
 	actual := RecordCostNano(r)
 	if actual > 0 && len(budgets) > 0 {
 		for _, u := range unheldSettlements(r, func(k BudgetKey) (Period, bool) { p, ok := budgets[k]; return p, ok }) {
-			lk := ledgerKey{u.Key, u.Start.UnixNano()}
-			s.spent[lk] = min(s.spent[lk]+actual, MaxLedgerNano)
+			s.addSpent(ledgerKey{u.Key, u.Start.UnixNano()}, r, actual)
 		}
 	}
 	if len(r.Holds) == 0 {
@@ -496,7 +634,7 @@ func (s *settlement) add(r Record, budgets map[BudgetKey]Period) {
 	h := Holder{r.HoldReplica, r.HoldIncarnation}
 	for _, hr := range r.Holds {
 		lk := ledgerKey{hr.Key, hr.Start.UnixNano()}
-		s.spent[lk] = min(s.spent[lk]+actual, MaxLedgerNano)
+		s.addSpent(lk, r, actual)
 		if s.dec[lk] == nil {
 			s.dec[lk] = map[Holder]int64{}
 		}
@@ -515,13 +653,36 @@ func (s *settlement) apply(ctx context.Context, tx pgx.Tx) error {
 	})
 	for _, lk := range keys {
 		start := time.Unix(0, lk.start).UTC()
-		tag, err := tx.Exec(ctx, `UPDATE llmflow_budget_ledger SET spent_nano = LEAST(spent_nano::numeric + $6, $7)::bigint
-			WHERE `+keyWhere+` AND period_start = $5`, append(keyArgs(lk.k), start, s.spent[lk], MaxLedgerNano)...)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() == 0 {
-			continue // the budget period has no ledger (a record replayed after its rows were removed)
+		if rollingRow(start) {
+			// A rolling window: its row is held while its buckets grow.
+			ok, err := holdLedger(ctx, tx, lk.k, start)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			bs := make([]int64, 0, len(s.buckets[lk]))
+			for b := range s.buckets[lk] {
+				bs = append(bs, b)
+			}
+			sort.Slice(bs, func(i, j int) bool { return bs[i] < bs[j] })
+			for _, b := range bs {
+				if _, err := tx.Exec(ctx, `INSERT INTO llmflow_budget_buckets (kind, name, model, unit, bucket_start, spent_nano) VALUES ($1, $2, $3, $4, $5, $6)
+					ON CONFLICT (kind, name, model, unit, bucket_start) DO UPDATE SET spent_nano = LEAST(llmflow_budget_buckets.spent_nano::numeric + EXCLUDED.spent_nano, $7)::bigint`,
+					append(keyArgs(lk.k), time.Unix(b, 0).UTC(), s.buckets[lk][b], MaxLedgerNano)...); err != nil {
+					return err
+				}
+			}
+		} else {
+			tag, err := tx.Exec(ctx, `UPDATE llmflow_budget_ledger SET spent_nano = LEAST(spent_nano::numeric + $6, $7)::bigint
+				WHERE `+keyWhere+` AND period_start = $5`, append(keyArgs(lk.k), start, s.spent[lk], MaxLedgerNano)...)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() == 0 {
+				continue // the budget period has no ledger (a record replayed after its rows were removed)
+			}
 		}
 		hs := make([]Holder, 0, len(s.dec[lk]))
 		for h := range s.dec[lk] {

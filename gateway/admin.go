@@ -963,7 +963,7 @@ func (s *Server) listBudgets(w http.ResponseWriter, r *http.Request, p *principa
 			continue
 		}
 		spent, _ := s.budget.spent(b.BudgetKey)
-		led, err := s.st.Ledger(r.Context(), b.BudgetKey, b.Period.Start(now))
+		led, err := s.st.LedgerAt(r.Context(), b.BudgetKey, b.Period.Start(now), now)
 		if err != nil {
 			storeError(w, err)
 			return

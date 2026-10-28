@@ -49,11 +49,16 @@ type propReplica struct {
 }
 
 type propRun struct {
-	t         *testing.T
-	st        *store.Postgres
-	clk       *propClock
-	keys      []store.BudgetKey
-	control   bool
+	t       *testing.T
+	st      *store.Postgres
+	clk     *propClock
+	keys    []store.BudgetKey
+	control bool
+	// rolling, when set, makes the team budget a rolling window of that
+	// length (workload profiles' session window, #90) instead of a day; the
+	// org budget stays a day, so a growth spans both kinds of row.
+	rolling   time.Duration
+	samples   []time.Time
 	limit     atomic.Int64 // the team budget's current max, nano
 	mu        sync.Mutex
 	maxLim    map[int64]int64 // period start → the largest limit it had
@@ -67,9 +72,43 @@ type propRun struct {
 func (p *propRun) refs(now time.Time) []budgetRef {
 	out := make([]budgetRef, len(p.keys))
 	for i, k := range p.keys {
-		out[i] = budgetRef{key: k, start: store.Day.Start(now)}
+		out[i] = budgetRef{key: k, start: store.Day.Start(now), period: store.Day}
+		if i == 0 && p.rolling > 0 {
+			per := store.RollingPeriod(p.rolling)
+			out[i] = budgetRef{key: k, start: store.RollingStart, period: per, resetAt: per.ResetAt(now)}
+		}
 	}
 	return out
+}
+
+// teamPeriod is the team budget's period.
+func (p *propRun) teamPeriod() store.Period {
+	if p.rolling > 0 {
+		return store.RollingPeriod(p.rolling)
+	}
+	return store.Day
+}
+
+// slot is what the control counts a cost in: its day, or the one rolling
+// window.
+func (p *propRun) slot(at time.Time) int64 {
+	if p.rolling > 0 {
+		return 0
+	}
+	return store.Day.Start(at).UnixNano()
+}
+
+// windowTruth is the cost of the stored records a rolling window counts
+// at now (the buckets overlapping it, by the requests' end).
+func (p *propRun) windowTruth(rows []store.AdmittedCost, now time.Time) int64 {
+	from := store.WindowStart(now, p.rolling)
+	var s int64
+	for _, r := range rows {
+		if !r.Ended.Before(from) && !r.Ended.After(now) {
+			s += r.CostNano
+		}
+	}
+	return s
 }
 
 func (p *propRun) restart(r *propReplica) {
@@ -121,7 +160,7 @@ func (p *propRun) request(ctx context.Context, r *propReplica, rng *rand.Rand) {
 	e, inc := r.e, r.inc
 	r.mu.Unlock()
 	now := p.clk.now()
-	start := store.Day.Start(now).UnixNano()
+	start := p.slot(now)
 	w := 1 + rng.Int64N(propLimit/8)
 	var h *hold
 	if p.control {
@@ -198,6 +237,22 @@ func (p *propRun) setLimit(v int64) {
 
 func (p *propRun) check(ctx context.Context, where string) {
 	now := p.clk.now()
+	if p.rolling > 0 {
+		// The window's spent, at every sample, within the limit in force:
+		// the larger of the limit read before and after the ledger (a
+		// lowering meanwhile was checked against a spent that only fell).
+		before := p.limit.Load()
+		st, err := p.st.LedgerAt(ctx, p.keys[0], store.RollingStart, now)
+		if err != nil {
+			p.t.Error(err)
+			return
+		}
+		if lim := max(before, p.limit.Load()); st.Spent > lim {
+			msg := fmt.Sprintf("%s: %s at %s: window spent %d > limit %d", where, p.keys[0], now.Format(time.RFC3339), st.Spent, lim)
+			p.violation.CompareAndSwap(nil, &msg)
+		}
+		return
+	}
 	p.setLimit(p.limit.Load()) // the limit carries into a new period
 	for i, start := range []time.Time{store.Day.Start(now), store.Day.Start(now).AddDate(0, 0, -1)} {
 		for _, k := range p.keys {
@@ -227,6 +282,13 @@ func (p *propRun) check(ctx context.Context, where string) {
 }
 
 func runProperty(t *testing.T, control bool, seed uint64) (exceeded bool, admits int64) {
+	return runPropertyWith(t, control, seed, 0)
+}
+
+// runPropertyWith is the property run; rolling > 0 makes the team budget a
+// rolling window, and the clock then moves ten simulated seconds a tick, so
+// that the window slides several times over the run.
+func runPropertyWith(t *testing.T, control bool, seed uint64, rolling time.Duration) (exceeded bool, admits int64) {
 	direct, _ := freshDB(t, "")
 	ctx := context.Background()
 	st, err := store.OpenPostgres(ctx, direct)
@@ -236,12 +298,16 @@ func runProperty(t *testing.T, control bool, seed uint64) (exceeded bool, admits
 	defer st.Close()
 	clk := &propClock{}
 	clk.ns.Store(time.Date(2026, 10, 27, 23, 59, 50, 0, time.UTC).UnixNano())
+	tick := time.Second
+	if rolling > 0 {
+		tick = 10 * time.Second
+	}
 	// The team budget is the one that fills; the org budget, far larger,
 	// makes every hold a two-key, all-or-nothing growth.
-	p := &propRun{t: t, st: st, clk: clk, control: control,
+	p := &propRun{t: t, st: st, clk: clk, control: control, rolling: rolling,
 		keys: []store.BudgetKey{{Kind: store.ScopeTeam, Name: "t"}, {Kind: store.ScopeOrg, Name: "o"}}, maxLim: map[int64]int64{}}
 	p.setLimit(propLimit)
-	if err := st.SetBudgetChecked(ctx, store.Budget{BudgetKey: p.keys[0], Period: store.Day, MaxCost: 10}, clk.now(), time.Minute, false); err != nil {
+	if err := st.SetBudgetChecked(ctx, store.Budget{BudgetKey: p.keys[0], Period: p.teamPeriod(), MaxCost: 10}, clk.now(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.SetBudgetChecked(ctx, store.Budget{BudgetKey: p.keys[1], Period: store.Day, MaxCost: 1000}, clk.now(), time.Minute, false); err != nil {
@@ -295,8 +361,13 @@ func runProperty(t *testing.T, control bool, seed uint64) (exceeded bool, admits
 					rows, err := st.UsageByAdmission(ctx)
 					if err == nil {
 						seen := map[int64]int64{}
+						if rolling > 0 {
+							seen[0] = p.windowTruth(rows, clk.now())
+						}
 						for _, row := range rows {
-							seen[store.Day.Start(row.At).UnixNano()] += row.CostNano
+							if rolling == 0 {
+								seen[store.Day.Start(row.At).UnixNano()] += row.CostNano
+							}
 						}
 						r.mu.Lock()
 						r.seen, r.local = seen, map[int64]int64{}
@@ -320,7 +391,10 @@ func runProperty(t *testing.T, control bool, seed uint64) (exceeded bool, admits
 		defer tk.Stop()
 		for n := 0; n < 150; n++ {
 			<-tk.C
-			clk.ns.Add(int64(time.Second))
+			clk.ns.Add(int64(tick))
+			p.mu.Lock()
+			p.samples = append(p.samples, clk.now())
+			p.mu.Unlock()
 			if n%5 == 2 { // kill a replica; it comes back at once
 				r := reps[rng.IntN(len(reps))]
 				r.mu.Lock()
@@ -336,7 +410,7 @@ func runProperty(t *testing.T, control bool, seed uint64) (exceeded bool, admits
 				if v := int64(max) * nanoPerUnit; v > p.limit.Load() {
 					p.setLimit(v) // a raise: the sampler may see its spend at once
 				}
-				err := st.SetBudgetChecked(ctx, store.Budget{BudgetKey: p.keys[0], Period: store.Day, MaxCost: max}, clk.now(), time.Minute, false)
+				err := st.SetBudgetChecked(ctx, store.Budget{BudgetKey: p.keys[0], Period: p.teamPeriod(), MaxCost: max}, clk.now(), time.Minute, false)
 				switch {
 				case err == nil:
 					p.setLimit(int64(max) * nanoPerUnit)
@@ -366,15 +440,48 @@ func runProperty(t *testing.T, control bool, seed uint64) (exceeded bool, admits
 			t.Fatal(*v)
 		}
 		// The ledger agrees with the records.
-		for start, cost := range p.truth(ctx) {
-			led, _ := st.Ledger(ctx, p.keys[0], start)
-			if led.Spent != cost {
-				t.Fatalf("period %s: ledger %d, records %d", start, led.Spent, cost)
+		if rolling > 0 {
+			rows, err := st.UsageByAdmission(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := clk.now()
+			led, _ := st.LedgerAt(ctx, p.keys[0], store.RollingStart, now)
+			if want := p.windowTruth(rows, now); led.Spent != want {
+				t.Fatalf("rolling window at %s: ledger %d, records %d", now, led.Spent, want)
+			}
+		} else {
+			for start, cost := range p.truth(ctx) {
+				led, _ := st.Ledger(ctx, p.keys[0], start)
+				if led.Spent != cost {
+					t.Fatalf("period %s: ledger %d, records %d", start, led.Spent, cost)
+				}
 			}
 		}
 	}
 	if p.kills.Load() < 30 || p.admits.Load() == 0 || p.refused.Load() == 0 {
 		t.Fatalf("the run exercised nothing: %d kills, %d admitted, %d refused", p.kills.Load(), p.admits.Load(), p.refused.Load())
+	}
+	if rolling > 0 {
+		// Exceeded: a window, at any sample, whose records (all stored by
+		// now, replays included) cost more than the largest limit it had.
+		rows, err := st.UsageByAdmission(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var worst int64
+		for _, at := range p.samples {
+			c := p.windowTruth(rows, at)
+			worst = max(worst, c)
+			if control && c > propLimit || c > propLimit*12/10 {
+				exceeded = true
+			}
+		}
+		if slid := p.samples[len(p.samples)-1].Sub(p.samples[0]); slid < 3*rolling {
+			t.Fatalf("the window slid %s only: the run did not exercise its sliding", slid)
+		}
+		t.Logf("rolling %s control=%v: %d admitted, %d refused, %d kills, worst window %d", rolling, control, p.admits.Load(), p.refused.Load(), p.kills.Load(), worst)
+		return exceeded, p.admits.Load()
 	}
 	// Exceeded: a period's cost above the largest limit it ever had (the
 	// control keeps 10; the run raises up to 12).
@@ -385,6 +492,22 @@ func runProperty(t *testing.T, control bool, seed uint64) (exceeded bool, admits
 	}
 	t.Logf("control=%v: %d admitted, %d refused, %d kills, truth %v", control, p.admits.Load(), p.refused.Load(), p.kills.Load(), p.truth(ctx))
 	return exceeded, p.admits.Load()
+}
+
+// The same property for a rolling window (workload profiles' session
+// window, #90): 3 replicas, kills, limit changes, the window sliding over
+// 25 simulated minutes; every sample's window within its limit, the ledger
+// equal to the records at the end, and the planted control exceeding.
+func TestPropertyRollingWindowPG(t *testing.T) {
+	pgAdminDSN(t)
+	for seed := uint64(1); seed <= 3; seed++ {
+		if exceeded, _ := runPropertyWith(t, false, seed, 5*time.Minute); exceeded {
+			t.Fatalf("seed %d: a rolling window was exceeded", seed)
+		}
+	}
+	if exceeded, _ := runPropertyWith(t, true, 1, 5*time.Minute); !exceeded {
+		t.Fatal("control: the pre-#87 check did not exceed the rolling limit on this workload: the test cannot see an overshoot")
+	}
 }
 
 func TestPropertyNeverExceededPG(t *testing.T) {

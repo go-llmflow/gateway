@@ -31,6 +31,7 @@ type Memory struct {
 	allow      map[AllowKey][]string
 	scimDocs   memSCIM
 	audit      memAudit
+	prof       memProfiles
 	MaxRecords int
 	// Fail, when set, is returned by every call (fault injection). Set it
 	// with SetFail.
