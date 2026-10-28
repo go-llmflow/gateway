@@ -17,6 +17,7 @@ type Memory struct {
 	keys       map[string]*Key
 	byHash     map[[32]byte]string
 	budgets    map[BudgetKey]*memBudget
+	ledger     map[ledgerKey]*memLedger
 	records    []Record
 	recordIDs  map[string]bool // IDs stored, for idempotent inserts
 	u          memUsers
@@ -380,6 +381,7 @@ func (m *Memory) InsertRecords(_ context.Context, recs []Record) error {
 			m.recordIDs[r.ID] = true
 		}
 		m.records = append(m.records, r)
+		m.settle(r) // in the same "transaction" as the insert
 	}
 	if over := len(m.records) - m.MaxRecords; m.MaxRecords > 0 && over > 0 {
 		for _, r := range m.records[:over] {

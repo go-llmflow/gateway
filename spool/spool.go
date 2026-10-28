@@ -185,6 +185,18 @@ func Open(dir string, max int64) (*Spool, error) {
 // Path is the spool file's path.
 func (s *Spool) Path() string { return s.path }
 
+// ID is the spool's identifier, unique to this process: it names the
+// process's grants in the budget ledger (hard budgets), which are released
+// once a later process has replayed the file.
+func (s *Spool) ID() string { return idOf(s.path) }
+
+// ID is the identifier of the process that wrote the orphan.
+func (o *Orphan) ID() string { return idOf(o.Path) }
+
+func idOf(path string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), prefix), suffix)
+}
+
 // Size is the bytes the spool holds.
 func (s *Spool) Size() int64 {
 	s.mu.Lock()

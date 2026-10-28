@@ -667,11 +667,14 @@ calendar), optionally for one model group only:
 | `team` | team | the organisation's admins |
 | `project` | `team/project` | the team's admins |
 | `key` | key ID (with `model`: a per-model budget of that key) | the team's admins |
+| `user` | the person, as the reports name them: a key's owner, or a JWT's user (since v0.17.0) | the admins of an organisation or team the user belongs to; the user reads their own |
 | `tag` | tag | proxy admin |
 
-A request is refused (429, the message names the scope) as soon as one
-budget it falls under is exhausted: its organisation, team, project, key and
-every tag it carries, each for all models and for its own model. Tags come
+A request is refused (429, the message names the scope) when one budget it
+falls under cannot hold its worst-case cost (see [Hard budgets](#hard-budgets-since-v0170)):
+its organisation, team, project, key, user and every tag it carries, each
+for all models and for its own model. A user budget follows the person
+across all their keys and tokens. Tags come
 from the key (`"tags"` at key creation) and from one allow-listed request
 header (`tags { header, allowed }` in the configuration; at most 8, others
 refused with 400).
@@ -682,9 +685,106 @@ relay (`alerts { … }`); the "sent" mark is stored with the budget, so several
 gateways and restarts send it once. A temporary increase raises the limit
 until its expiry, whatever the period; setting the budget again keeps it.
 
-Spend is the stored records of the period plus what this gateway charged
-since: a request counts as pending until its record is stored, then as
-written until the next refresh query includes it.
+The `spent` of `GET /admin/budgets` is the stored records of the period
+plus what this gateway charged since (soft alerts use it). `committed` and
+`held` are the period's ledger: the cost of the requests settled under the
+budget, and the grants the replicas hold for the requests in flight.
+
+### Hard budgets (since v0.17.0)
+
+**A budget is never exceeded.** A request starts only when every budget it
+falls under can pay its worst case, as Slurm's
+`AccountingStorageEnforce=safe` starts a job only "if the job will be able
+to run to completion" ([resource limits](https://slurm.schedmd.com/resource_limits.html)).
+
+**The worst case W.** vLLM refuses an input longer than `max_model_len` and
+generates at most `min(max_tokens, max_model_len − input)` per choice
+(`get_max_tokens`). With `L = max_model_len`, `M` the `max_tokens` sent and
+`n` choices, per prompt:
+
+    W = max((L − M)·p_in + n·M·p_out, L·p_in)
+
+where `p_in` is the highest input price that can apply (input, cached,
+cache writes, either tier) and `p_out` the highest output price. Completion
+prompt lists, embedding inputs and rerank documents count one prompt each.
+For an Anthropic model, `W = context_window·p_in + M·p_out`. Costs are
+integers of nano-units: no float drift in `spent + held ≤ limit`.
+
+**max_tokens.** Under a budget the gateway always sends one:
+- the client's, never lowered: when its W does not fit, the request is refused (429 `insufficient_quota`, naming the scope, the room left and the request's maximum cost);
+- when the client sent none, the largest that fits, from the model's `max_output_tokens` (or the context length) down to `budgets.min_max_tokens`; the response says it in `X-Llmflow-Max-Tokens`.
+
+Every answer under a budget carries `X-Llmflow-Budget-Reset` (RFC 3339): when the
+budget that refused resets, or, on success, when the tightest one does.
+
+**Refused under a budget** (400, with the reason), since nothing bounds their cost:
+- Responses built-in tools (the server generates again after each call);
+- Anthropic server tools, `mcp_servers` and `container`;
+- the `compact-*` betas (their compaction step is missing from the top-level usage), and a `context-1m-*` beta wider than `context_window`;
+- transcriptions of a priced model (priced per audio duration).
+
+A model whose context length is unknown is refused under a budget (503), rather than guessed.
+
+**The escrow.** PostgreSQL holds, per budget and period, `spent` and, per
+replica process, a grant; every transaction keeps `spent + Σ grants ≤
+limit`. A replica admits locally while its grant covers what it has in
+flight: no database round trip per request. A grant that runs short grows in
+one transaction, all of the request's budgets or none, rows locked in one
+order. It grows by the larger of what is missing and `grant_share` of the
+room left, so near the limit grants shrink to one request. An unused grant
+goes back after `grant_idle`. Storing a request's record settles its hold in
+the same transaction (`spent += actual`, `grant −= min(actual, W)`); a record
+replayed from the spool settles nothing twice. A request that costs more
+than its W is charged anyway and counted in
+`llmflow_budget_hold_exceeded_total`; alert on any. The estimate of an
+aborted stream is capped at W.
+
+**Crashes.** A dead process's grants are never released on a timer, since its
+spool may still hold records. The process that replays the spool releases
+them once every record is stored. A replica that never comes back is
+released by `POST /admin/budgets/release-replica {"replica": "<name>"}`
+(audited; proxy admins, or the admins of the budgets' organisation).
+
+**Limits that move.**
+- Lowering a budget below what the period committed is refused (409) unless `"force": true` (proxy and organisation admins only, audited). A forced lower stops new admissions; what was admitted finishes. Other replicas see it at their next budget refresh.
+- A temporary increase is lent only to requests that end before it does (`limits.max_request_duration`).
+- A budget created mid-period starts from the usage already stored.
+- A request is charged to the period that admitted it.
+
+```hcl
+budgets {
+  grant_share    = 0.1   # share of the room left a refill takes (0..1]
+  grant_idle     = "5s"  # an unused grant goes back after this (100ms..10m)
+  min_max_tokens = 16    # the smallest max_tokens the gateway picks
+}
+model "llama" {
+  max_model_len     = 32768  # else read from the upstreams' /v1/models
+  max_output_tokens = 4096   # caps max_tokens (a larger one: 400)
+}
+model "claude" {
+  provider       = "anthropic"
+  context_window = 1000000   # required for a budget to admit it
+}
+```
+
+When `max_model_len` is not configured, the gateway reads it from each
+upstream's `GET /v1/models` at health check, and sends a held request only to
+an upstream whose length it has read since that upstream last became healthy.
+**Set `max_model_len` on every model a budget can apply to.** It is then never
+learned late, for example from a Slurm instance that just joined.
+
+`check-config` validates these fields, bounds every price to 1e6 per million
+tokens (so the integers cannot overflow), and refuses a context beta that is
+wider than `context_window`.
+
+**Edges.**
+- A request admitted before a replica loaded a new budget (at most `budget_refresh`) is not held by it.
+- A record dropped by a full accounting queue is not billed, as before; its hold stays reserved until its replica restarts or is released.
+
+**Migration (v0.16 → v0.17).**
+- Start-up adds `llmflow_budget_ledger` and `llmflow_budget_grants`, `limit_epoch` on `llmflow_budgets_v2`, and `cost_nano` and `admitted_at` on `llmflow_usage`. Each period's ledger starts from its stored usage.
+- Budgets that admitted while under their limit now admit only what fits at the worst case: set `max_tokens` (or `max_output_tokens`) to keep small budgets usable.
+- Spool files written by v0.17 carry the holds and are not readable by v0.16: drain the spool before a downgrade.
 
 ### Cost units (since v0.12.0)
 
@@ -1518,6 +1618,9 @@ The **W3C trace context of the upstream span is sent to vLLM** (`traceparent`/`t
 `llmflow_inflight`, `llmflow_inflight_borrowing`, `llmflow_borrowed_fraction`,
 `llmflow_reserved`, `llmflow_inflight_tokens`, `llmflow_fairshare_usage`,
 `llmflow_fairshare_level`, `llmflow_inflight_phantoms` (per pool and organisation, label `org`);
+hard budgets: `llmflow_budget_hold_exceeded_total` (alert on any),
+`llmflow_budget_grant_refills_total`, `llmflow_budget_hold_refused_total`,
+`llmflow_budget_grant_return_failures_total`;
 with `ha`, `llmflow_ha_owner`, `llmflow_ha_epoch`, `llmflow_ha_local_grants`,
 `llmflow_ha_unowned_total`; `llmflow_upstream_healthy`,
 `llmflow_upstream_inflight`; `llmflow_requests_total`, `llmflow_tokens_total`,
@@ -1713,9 +1816,8 @@ security audit of 2026-10-26):
    an owner made just before a long pause can still reach vLLM. The internal
    channel is authenticated but, without the `tls_*` files, not encrypted
    (keep it on a private network, or set them: mutual TLS since v0.16.0).
-2. **Budgets lag.** Cost is known when a request ends, so a burst of long
-   requests can overspend by what is in flight. Several gateways only see each
-   other's spend at their next refresh.
+2. *(Removed in v0.17.0: budgets no longer lag. See
+   [Hard budgets](#hard-budgets-since-v0170) for what remains at their edges.)*
 3. **Priorities are fixed at admission.** A borrowing request already queued in
    vLLM keeps its priority when its organisation drops back under its
    reservation; teams inside an organisation share its reservation without
@@ -1727,7 +1829,8 @@ security audit of 2026-10-26):
    charges prompt bytes / 4 plus the content deltas already forwarded. The
    record is flagged `estimated` (column in PostgreSQL and in the CSV export,
    metric `llmflow_usage_estimated_total`); the estimate undercounts tool-call
-   and reasoning tokens.
+   and reasoning tokens. Under a budget it is capped at the request's worst
+   case W (with `echo`, the forwarded deltas hold the prompt).
 5. **Prefix cache isolation is per scope, not absolute.** With the default
    `cache_isolation = "org"`, users of the same institution share one prefix
    cache and can still probe each other's prompts by timing; choose `team` or

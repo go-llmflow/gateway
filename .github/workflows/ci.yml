@@ -47,6 +47,8 @@ jobs:
         run: go vet ./...
       - name: test
         run: go test -race -count=1 -coverprofile=cover.out ./...
+      - name: benchmarks run (not measured)
+        run: go test -run '^$' -bench '^BenchmarkAdmission$' -benchtime=1x ./gateway
 
   fuzz:
     name: fuzz smoke ${{ matrix.target }}

@@ -300,7 +300,8 @@ func TestBudgetDeniesAndFailsClosed(t *testing.T) {
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 	e := newEnv(t, testConfig(up.URL()), WithClock(clock))
 	_, key := e.newKey("etabA")
-	resp := e.do("PUT", "/admin/budgets", master, `{"kind":"team","name":"etabA","period":"day","max_cost":0.2}`)
+	// Two requests fit 0.4 at their worst case, not three (budgets_test.go).
+	resp := e.do("PUT", "/admin/budgets", master, `{"kind":"team","name":"etabA","period":"day","max_cost":0.4}`)
 	if out := readAll(t, resp); resp.StatusCode != 200 {
 		t.Fatalf("set budget: %d %s", resp.StatusCode, out)
 	}
@@ -310,7 +311,7 @@ func TestBudgetDeniesAndFailsClosed(t *testing.T) {
 	}
 	resp = e.do("POST", "/v1/chat/completions", key, chat)
 	if readAll(t, resp); resp.StatusCode != 200 {
-		t.Fatalf("second request (0.164 < 0.2) %d", resp.StatusCode)
+		t.Fatalf("second request %d", resp.StatusCode)
 	}
 	resp = e.do("POST", "/v1/chat/completions", key, chat)
 	if out := readAll(t, resp); resp.StatusCode != http.StatusTooManyRequests || !strings.Contains(out, "insufficient_quota") {
@@ -573,7 +574,7 @@ func TestAdminAPI(t *testing.T) {
 	for _, bad := range []string{
 		`{"kind":"team","name":"etabC","period":"year","max_cost":1}`,
 		`{"kind":"team","name":"etabC","period":"day","max_cost":-1}`,
-		`{"kind":"user","name":"etabC","period":"day","max_cost":1}`,
+		`{"kind":"person","name":"etabC","period":"day","max_cost":1}`,
 	} {
 		resp := e.do("PUT", "/admin/budgets", master, bad)
 		if readAll(t, resp); resp.StatusCode != 400 {
@@ -583,6 +584,7 @@ func TestAdminAPI(t *testing.T) {
 	for _, missing := range []string{
 		`{"kind":"team","name":"nobody","period":"day","max_cost":1}`,
 		`{"kind":"org","name":"nobody","period":"day","max_cost":1}`,
+		`{"kind":"user","name":"no such user","period":"day","max_cost":1}`,
 		`{"kind":"project","name":"etabC/nope","period":"day","max_cost":1}`,
 		`{"kind":"project","name":"noslash","period":"day","max_cost":1}`,
 		`{"kind":"key","name":"k_none","period":"day","max_cost":1}`,

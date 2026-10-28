@@ -42,6 +42,9 @@ type recorder struct {
 	// done is told about every record once it is stored, failed or
 	// dropped (the budgeter moves its cost from pending to written).
 	done func([]store.Record)
+	// onAdopted is told the id of a dead process whose spool was replayed
+	// (its budget grants are released).
+	onAdopted func(id string) error
 
 	spool      *spool.Spool
 	spoolDir   string
@@ -191,6 +194,19 @@ func (r *recorder) adopt() {
 		if !ok {
 			o.Release() // the store is down: next tick
 			continue
+		}
+		// Every record the dead process spooled is now settled: its grants
+		// in the budget ledger hold nothing in flight any more (what it never
+		// spooled was never charged). Released before the file goes, so a
+		// failure leaves both for the next tick.
+		if r.onAdopted != nil {
+			if err := r.onAdopted(o.ID()); err != nil {
+				o.Release()
+				if r.onErr != nil {
+					r.onErr(err)
+				}
+				continue
+			}
 		}
 		r.replayed.Add(int64(len(o.Records)))
 		if o.Tail == spool.Corrupt && r.onLost != nil {

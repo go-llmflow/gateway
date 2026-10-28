@@ -65,10 +65,11 @@ func TestBudgetsKeepUnitsApart(t *testing.T) {
 	key := e.createKey(`{"team":"etabA"}`)
 	priced := strings.Replace(chat, `"llama"`, `"priced"`, 1)
 
-	// 0.164 per request in either unit (see budgets_test.go).
-	e.setBudget(`{"kind":"org","name":"etabA","period":"day","max_cost":0.2,"unit":"EUR"}`)
+	// Two requests fit 0.4 at their worst case, in either unit (see
+	// budgets_test.go).
+	e.setBudget(`{"kind":"org","name":"etabA","period":"day","max_cost":0.4,"unit":"EUR"}`)
 	expect(t, "EUR 1", e.chatWith(key, priced), 200)
-	expect(t, "EUR 2 (0.164 + 0.164 > 0.2 only after the first)", e.chatWith(key, priced), 200)
+	expect(t, "EUR 2", e.chatWith(key, priced), 200)
 	expect(t, "EUR 3", e.chatWith(key, priced), 429)
 	for i := 0; i < 3; i++ {
 		expect(t, "GPU-hours requests are not in the EUR budget", e.chatWith(key, chat), 200)

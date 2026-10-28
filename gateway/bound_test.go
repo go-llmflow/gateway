@@ -67,7 +67,7 @@ func TestWorstCase(t *testing.T) {
 		t.Fatalf("saturated W = %d", w)
 	}
 	maxP := pricesFor(config.Cost{InputPerMTok: math.Inf(1), OutputPerMTok: math.NaN()})
-	if maxP.worstIn != uint64(config.MaxPrice*nanoPerUnit) || maxP.worstOut != 0 {
+	if maxP.worstIn != uint64(config.MaxPrice*nanoPerUnit) || maxP.worstOut != uint64(config.MaxPrice*nanoPerUnit) {
 		t.Fatalf("prices beyond the bound: %+v", maxP)
 	}
 }

@@ -34,53 +34,22 @@ func (e *budgetError) Unwrap() error { return errBudgetExceeded }
 // of its model ("" for GPU-hours): only the budgets of that unit apply.
 type reqScope struct {
 	org, team, project, key, model string
-	tags                           []string
-	unit                           string
+	// user is the person (recordUser): every key and token of theirs
+	// shares their user budget.
+	user string
+	tags []string
+	unit string
 }
 
 // keys lists the budget keys that may apply to a request: each scope it
 // belongs to, for every model and for its own model, in its unit.
 func (r reqScope) keys() []store.BudgetKey {
-	names := make([]store.BudgetKey, 0, 4+len(r.tags))
-	names = append(names, store.BudgetKey{Kind: store.ScopeOrg, Name: r.org, Unit: r.unit}, store.BudgetKey{Kind: store.ScopeTeam, Name: r.team, Unit: r.unit},
-		store.BudgetKey{Kind: store.ScopeKey, Name: r.key, Unit: r.unit})
-	if r.project != "" {
-		names = append(names, store.BudgetKey{Kind: store.ScopeProject, Name: r.team + "/" + r.project, Unit: r.unit})
-	}
-	for _, t := range r.tags {
-		names = append(names, store.BudgetKey{Kind: store.ScopeTag, Name: t, Unit: r.unit})
-	}
-	out := make([]store.BudgetKey, 0, 2*len(names))
-	for _, k := range names {
-		out = append(out, k)
-		k.Model = r.model
-		out = append(out, k)
-	}
-	return out
+	return store.ScopeKeys(store.Attrs{Org: r.org, Team: r.team, Project: r.project, KeyID: r.key, User: r.user, Model: r.model, Tags: r.tags, Unit: r.unit})
 }
 
 // rowMatches reports whether spend row belongs to budget key k.
 func rowMatches(k store.BudgetKey, r store.SpendRow) bool {
-	if k.Unit != r.Unit || k.Model != "" && k.Model != r.Model {
-		return false
-	}
-	switch k.Kind {
-	case store.ScopeOrg:
-		return r.Org == k.Name
-	case store.ScopeTeam:
-		return r.Team == k.Name
-	case store.ScopeProject:
-		return r.Project != "" && r.Team+"/"+r.Project == k.Name
-	case store.ScopeKey:
-		return r.KeyID == k.Name
-	case store.ScopeTag:
-		for _, t := range r.Tags {
-			if t == k.Name {
-				return true
-			}
-		}
-	}
-	return false
+	return store.Matches(k, store.Attrs{Org: r.Org, Team: r.Team, Project: r.Project, KeyID: r.KeyID, User: r.User, Model: r.Model, Tags: r.Tags, Unit: r.Unit})
 }
 
 type budgetState struct {
@@ -330,6 +299,32 @@ func (b *budgeter) check(r reqScope) error {
 	return nil
 }
 
+// stale reports whether a fail-closed gateway must refuse requests because
+// its budget state is too old.
+func (b *budgeter) stale() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.failClosed && (!b.everOK || b.now().Sub(b.lastOK) > b.maxAge)
+}
+
+// refs lists the budget periods a request falls under (hard budgets): every
+// key of its scope that has a budget, at the period containing now.
+func (b *budgeter) refs(r reqScope) []budgetRef {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.budgets) == 0 {
+		return nil
+	}
+	now := b.now()
+	var out []budgetRef
+	for _, k := range r.keys() {
+		if st := b.budgets[k]; st != nil {
+			out = append(out, budgetRef{key: k, start: st.b.Period.Start(now), epoch: st.b.Epoch, period: st.b.Period})
+		}
+	}
+	return out
+}
+
 // add charges a finished request: pending until its record is stored.
 // Every scope key is tracked, whether or not it has a budget yet, so that
 // a budget created meanwhile still sees the request.
@@ -354,7 +349,7 @@ func (b *budgeter) persisted(recs []store.Record) {
 		if rec.Cost <= 0 {
 			continue
 		}
-		sc := reqScope{org: rec.Org, team: rec.Team, project: rec.Project, key: rec.KeyID, model: rec.Model, tags: rec.Tags, unit: rec.Unit}
+		sc := reqScope{org: rec.Org, team: rec.Team, project: rec.Project, key: rec.KeyID, user: rec.User, model: rec.Model, tags: rec.Tags, unit: rec.Unit}
 		for _, k := range sc.keys() {
 			b.pending[k] -= rec.Cost
 			if v := b.pending[k]; v < 1e-12 && v > -1e-12 {

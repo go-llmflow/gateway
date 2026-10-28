@@ -68,6 +68,12 @@ func matrixSetup(e *env) matrixFixture {
 		KeyID: f.serviceKey, Model: "llama", Pool: "b300", PromptTokens: 10, Cost: 1, Status: 200}}); err != nil {
 		t.Fatal(err)
 	}
+	// A grant of a replica that is gone, on etabA's team budget.
+	now := time.Now()
+	if _, err := e.st.GrowGrants(context.Background(), store.Holder{Replica: "ghost", Incarnation: "g1"}, now, time.Minute,
+		[]store.GrantRequest{{Key: store.BudgetKey{Kind: store.ScopeTeam, Name: "etabA"}, Start: store.Day.Start(now), Need: 1, Want: 1}}); err != nil {
+		t.Fatal(err)
+	}
 	return f
 }
 
@@ -134,6 +140,9 @@ func matrixRows() []matrixRow {
 		{"POST /admin/budgets/increase", "POST", p("/admin/budgets/increase"),
 			`{"kind":"team","name":"etabA","amount":1,"expires_at":"` + day.Add(time.Hour).Format(time.RFC3339) + `"}`, orgAdmins, nil},
 		{"DELETE /admin/budgets", "DELETE", p("/admin/budgets?kind=team&name=etabA"), "", orgAdmins, nil},
+		// Hard budgets (#87): releasing a gone replica's grants, the proxy's
+		// and the budget's own organisation admins only.
+		{"POST /admin/budgets/release-replica", "POST", p("/admin/budgets/release-replica"), `{"replica":"ghost"}`, orgAdmins, nil},
 		{"GET /admin/spend", "GET", p("/admin/spend" + span), "", nil, outsiders},
 		{"GET /admin/usage.csv", "GET", p("/admin/usage.csv" + span), "", nil, outsiders},
 		{"GET /admin/export", "GET", p("/admin/export" + span + "&format=csv"), "", nil, outsiders},

@@ -59,6 +59,9 @@ type groupPrices struct {
 // tokens, rounded up. check-config bounds prices to config.MaxPrice; a
 // value beyond it (or not a number) is read as the bound.
 func nanoPrice(p float64) uint64 {
+	if math.IsNaN(p) {
+		p = config.MaxPrice // never a free request (check-config refuses it)
+	}
 	if !(p > 0) {
 		return 0
 	}

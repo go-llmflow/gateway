@@ -506,6 +506,20 @@ func (s *Server) callGuardModel(ctx context.Context, rq *guardReq, model, path s
 	if g == nil {
 		return nil, fmt.Errorf("guard model %q is not configured", model)
 	}
+	// Hard budgets (#87): the guard call is charged to the request's
+	// budgets, so its worst case is held first, like the request's own.
+	sc := rq.scope
+	sc.model, sc.unit = g.cfg.Name, g.cfg.Cost.Unit
+	ep := openai.Chat
+	if path == "/classify" {
+		ep = openai.Embeddings // a pooling request: its inputs, nothing generated
+	}
+	adm, body, aerr := s.admitBudget(ctx, ep, g, sc, body, nil)
+	if aerr != nil {
+		return nil, fmt.Errorf("guard model %q: %w", model, aerr)
+	}
+	defer adm.release(0) // when nothing was charged
+	ctx = withBoundOnly(ctx, func() bool { return adm.hold != nil })
 	t0 := time.Now()
 	resp, u, _, err := s.send(ctx, g, path, body, "application/json", 0, rq.rid)
 	if err != nil {
@@ -524,24 +538,27 @@ func (s *Server) callGuardModel(ctx context.Context, rq *guardReq, model, path s
 		return nil, fmt.Errorf("guard model answered %d", resp.StatusCode)
 	}
 	usage, ok := openai.ParseUsage(data)
-	cost := 0.0
+	cost, costNano := 0.0, int64(0)
 	if ok {
-		cost = g.cost(usage)
-		sc := rq.scope
-		sc.model, sc.unit = g.cfg.Name, g.cfg.Cost.Unit
+		cost, costNano = g.cost(usage), g.prices.costNano(usage)
 		s.budget.add(sc, cost)
 		s.met.tokens.add(float64(usage.PromptTokens), rq.key.Team, g.cfg.Name, "prompt")
 		s.met.tokens.add(float64(usage.CompletionTokens), rq.key.Team, g.cfg.Name, "completion")
 		s.met.charge(cost, rq.key.Team, g.cfg.Pool, g.cfg.Cost.Unit)
 	}
 	end := time.Now()
-	s.rec.record(store.Record{
+	if adm.release(costNano) {
+		s.log.Error("a guard call cost more than its worst-case bound W: charged in full", "model", g.cfg.Name, "cost_nano", costNano)
+	}
+	rec := store.Record{
 		Time: end.UTC(), Org: rq.key.Org, Team: rq.key.Team, Project: rq.key.Project, KeyID: rq.key.ID, Model: g.cfg.Name, Pool: g.cfg.Pool,
 		User: recordUser(rq.key), Lab: s.cfg.LabOf(rq.key.Team),
 		Upstream: redactURL(u.base), PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
 		CachedTokens: usage.Cached(), Cost: cost, Unit: g.cfg.Cost.Unit, LatencyMS: float64(end.Sub(t0).Microseconds()) / 1000,
 		Status: resp.StatusCode, Estimated: !ok, Tags: rq.scope.tags,
-	})
+	}
+	s.recordHolds(&rec, adm, costNano)
+	s.rec.record(rec)
 	return data, nil
 }
 

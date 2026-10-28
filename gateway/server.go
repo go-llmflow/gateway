@@ -100,9 +100,14 @@ type Server struct {
 	client  *http.Client
 	limiter *limiter
 	budget  *budgeter
-	rec     *recorder
-	met     *metrics
-	keys    *keyCache
+	// escrow holds requests' worst-case costs on the budget ledger (hard
+	// budgets); softBudgets, a test hook, restores the pre-#87 check for
+	// the planted control of the property test.
+	escrow      *escrow
+	softBudgets bool
+	rec         *recorder
+	met         *metrics
+	keys        *keyCache
 	// authFails limits failed authentications per client network.
 	authFails *failLimiter
 	// allowedTags is the request-tag allow-list; alerts sends soft-budget
@@ -309,6 +314,23 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 			s.raise(context.Background(), "accounting_records_lost", map[string]any{"records": n, "err": err.Error()})
 		}
 	}
+	// The escrow's holder: this replica, and this process (its spool's id,
+	// so that the process that replays the spool after a crash releases
+	// exactly this process's grants).
+	holder := store.Holder{Replica: replicaName(cfg), Incarnation: randomHex(8)}
+	if s.rec.spool != nil {
+		holder.Incarnation = s.rec.spool.ID()
+	}
+	s.escrow = newEscrow(st, holder, cfg.Budgets.GrantShare, cfg.Budgets.GrantIdle, cfg.Limits.MaxRequestDuration, s.now)
+	s.rec.onAdopted = func(id string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
+		defer cancel()
+		n, err := st.ReleaseIncarnation(ctx, id)
+		if err == nil && n > 0 {
+			s.log.Info("budget grants of a finished process released after its spool was replayed", "incarnation", id, "nano", n)
+		}
+		return err
+	}
 	s.keys = newKeyCache(cfg.KeyCacheTTL, s.now)
 	s.authFails = newFailLimiter(cfg.AuthFailuresPerMinute, s.now)
 	s.jwtCache = newKeyCache(cfg.KeyCacheTTL, s.now)
@@ -399,7 +421,8 @@ func (s *Server) Start(ctx context.Context) error {
 	bctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.rec.start()
-	s.bg.Add(2)
+	s.bg.Add(3)
+	go func() { defer s.bg.Done(); s.escrow.loop(bctx) }()
 	go func() { defer s.bg.Done(); s.healthLoop(bctx) }()
 	for _, gn := range s.gorder {
 		if d := s.groups[gn].disc; d != nil {
@@ -452,6 +475,11 @@ func (s *Server) Close(ctx context.Context) {
 	// After the client listener drained: the pools' owners hand over.
 	s.closeHA(ctx)
 	s.rec.close(ctx)
+	// Once the records are stored (their holds settled): give back every
+	// unused grant. What a lost record held stays reserved until an
+	// administrator releases this replica (a record that never reaches
+	// the store would otherwise leave its cost uncounted).
+	s.escrow.tick(ctx, true)
 	// Last: the final checkpoint above queued its anchor.
 	for _, q := range s.exports {
 		q.Close(ctx)
@@ -747,4 +775,13 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 	writeSample(w, "llmflow_accounting_written_total", nil, nil, float64(s.rec.written.Load()))
 	writeHeader(w, "llmflow_accounting_queue_length", "Usage records waiting to be written.", "gauge")
 	writeSample(w, "llmflow_accounting_queue_length", nil, nil, float64(len(s.rec.queue)))
+	// Hard budgets (#87).
+	writeHeader(w, "llmflow_budget_hold_exceeded_total", "Requests whose cost exceeded the worst-case bound held for them (a bug in the bound: alert on any).", "counter")
+	writeSample(w, "llmflow_budget_hold_exceeded_total", nil, nil, float64(s.escrow.exceeded.Load()))
+	writeHeader(w, "llmflow_budget_grant_refills_total", "Grant growths in the budget ledger (one store transaction each).", "counter")
+	writeSample(w, "llmflow_budget_grant_refills_total", nil, nil, float64(s.escrow.refills.Load()))
+	writeHeader(w, "llmflow_budget_hold_refused_total", "Requests refused because a budget could not hold their worst-case cost.", "counter")
+	writeSample(w, "llmflow_budget_hold_refused_total", nil, nil, float64(s.escrow.refused.Load()))
+	writeHeader(w, "llmflow_budget_grant_return_failures_total", "Returns of unused grant the store refused (retried).", "counter")
+	writeSample(w, "llmflow_budget_grant_return_failures_total", nil, nil, float64(s.escrow.returnErr.Load()))
 }

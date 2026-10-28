@@ -21,12 +21,15 @@ const (
 	ScopeProject ScopeKind = "project" // Name is "team/project"
 	ScopeKey     ScopeKind = "key"     // Name is the key ID
 	ScopeTag     ScopeKind = "tag"
+	// ScopeUser is a person (Name is the user as the reports name them: a
+	// key's owner, or a JWT's user): every key and token of theirs counts.
+	ScopeUser ScopeKind = "user"
 )
 
 // Valid reports whether k is a known scope kind.
 func (k ScopeKind) Valid() bool {
 	switch k {
-	case ScopeOrg, ScopeTeam, ScopeProject, ScopeKey, ScopeTag:
+	case ScopeOrg, ScopeTeam, ScopeProject, ScopeKey, ScopeTag, ScopeUser:
 		return true
 	}
 	return false
@@ -92,6 +95,10 @@ type Budget struct {
 	SoftLimit    float64    `json:"soft_limit,omitempty"`
 	TempIncrease float64    `json:"temp_increase,omitempty"`
 	TempExpiry   *time.Time `json:"temp_expiry,omitempty"`
+	// Epoch changes whenever the limit is lowered or a temporary increase
+	// is set (hard budgets): a replica stops lending the grants it obtained
+	// under an earlier epoch. Set by the store.
+	Epoch int64 `json:"epoch,omitempty"`
 }
 
 // Limit returns the effective maximum at now.
@@ -107,7 +114,7 @@ func validAmount(v float64) bool { return v >= 0 && v <= 1e15 && !math.IsNaN(v) 
 // ValidateBudget checks a budget before it is stored.
 func ValidateBudget(b Budget) error {
 	if !b.Kind.Valid() {
-		return fmt.Errorf("kind %q: want org, team, project, key or tag", b.Kind)
+		return fmt.Errorf("kind %q: want org, team, project, key, user or tag", b.Kind)
 	}
 	if b.Name == "" || len(b.Name) > 140 || strings.ContainsAny(b.Name, "\x00\r\n") {
 		return fmt.Errorf("name %q is invalid", b.Name)
@@ -135,10 +142,10 @@ func ValidateBudget(b Budget) error {
 // SpendRow is the cost of one combination of attributes since a time, in
 // one unit.
 type SpendRow struct {
-	Org, Team, Project, KeyID, Model string
-	Tags                             []string
-	Cost                             float64
-	Unit                             string
+	Org, Team, Project, KeyID, User, Model string
+	Tags                                   []string
+	Cost                                   float64
+	Unit                                   string
 }
 
 // ---- memory ----
@@ -148,44 +155,12 @@ type memBudget struct {
 	alerted time.Time
 }
 
-func (m *Memory) SetBudget(_ context.Context, b Budget) error {
-	if err := ValidateBudget(b); err != nil {
-		return err
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.Fail != nil {
-		return m.Fail
-	}
-	if m.budgets == nil {
-		m.budgets = map[BudgetKey]*memBudget{}
-	}
-	if cur, ok := m.budgets[b.BudgetKey]; ok {
-		b.TempIncrease, b.TempExpiry = cur.b.TempIncrease, cur.b.TempExpiry
-		cur.b = b
-		return nil
-	}
-	b.TempIncrease, b.TempExpiry = 0, nil
-	m.budgets[b.BudgetKey] = &memBudget{b: b}
-	return nil
+func (m *Memory) SetBudget(ctx context.Context, b Budget) error {
+	return m.SetBudgetChecked(ctx, b, time.Now(), 0, true)
 }
 
-func (m *Memory) IncreaseBudget(_ context.Context, k BudgetKey, amount float64, expiry time.Time) error {
-	if !validAmount(amount) {
-		return fmt.Errorf("amount %v: want 0..1e15", amount)
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.Fail != nil {
-		return m.Fail
-	}
-	cur, ok := m.budgets[k]
-	if !ok {
-		return ErrNotFound
-	}
-	e := expiry.UTC()
-	cur.b.TempIncrease, cur.b.TempExpiry = amount, &e
-	return nil
+func (m *Memory) IncreaseBudget(ctx context.Context, k BudgetKey, amount float64, expiry time.Time) error {
+	return m.IncreaseBudgetChecked(ctx, k, amount, expiry, time.Now(), 0, true)
 }
 
 func (m *Memory) DeleteBudget(_ context.Context, k BudgetKey) error {
@@ -248,10 +223,10 @@ func (m *Memory) SpendRows(_ context.Context, since time.Time) ([]SpendRow, erro
 			continue
 		}
 		tags := dedupSorted(r.Tags)
-		k := strings.Join([]string{r.Org, r.Team, r.Project, r.KeyID, r.Model, strings.Join(tags, ","), r.Unit}, "\x00")
+		k := strings.Join([]string{r.Org, r.Team, r.Project, r.KeyID, r.User, r.Model, strings.Join(tags, ","), r.Unit}, "\x00")
 		row := agg[k]
 		if row == nil {
-			row = &SpendRow{Org: r.Org, Team: r.Team, Project: r.Project, KeyID: r.KeyID, Model: r.Model, Tags: tags, Unit: r.Unit}
+			row = &SpendRow{Org: r.Org, Team: r.Team, Project: r.Project, KeyID: r.KeyID, User: r.User, Model: r.Model, Tags: tags, Unit: r.Unit}
 			agg[k] = row
 		}
 		row.Cost += r.Cost
@@ -296,26 +271,39 @@ BEGIN
 		ALTER TABLE llmflow_budgets_v2 ADD PRIMARY KEY (kind, name, model, unit);
 	END IF;
 END $$;
+-- v0.17.0, hard budgets (#87): the ledger (ledger_pg.go).
+ALTER TABLE llmflow_budgets_v2 ADD COLUMN IF NOT EXISTS limit_epoch bigint NOT NULL DEFAULT 0;
+ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS cost_nano bigint;
+ALTER TABLE llmflow_usage ADD COLUMN IF NOT EXISTS admitted_at timestamptz;
+CREATE TABLE IF NOT EXISTS llmflow_budget_ledger (
+	kind         text NOT NULL,
+	name         text NOT NULL,
+	model        text NOT NULL,
+	unit         text NOT NULL,
+	period_start timestamptz NOT NULL,
+	spent_nano   bigint NOT NULL DEFAULT 0 CHECK (spent_nano >= 0),
+	PRIMARY KEY (kind, name, model, unit, period_start)
+);
+CREATE TABLE IF NOT EXISTS llmflow_budget_grants (
+	kind         text NOT NULL,
+	name         text NOT NULL,
+	model        text NOT NULL,
+	unit         text NOT NULL,
+	period_start timestamptz NOT NULL,
+	replica      text NOT NULL,
+	incarnation  text NOT NULL,
+	granted_nano bigint NOT NULL CHECK (granted_nano >= 0),
+	PRIMARY KEY (kind, name, model, unit, period_start, replica, incarnation)
+);
+CREATE INDEX IF NOT EXISTS llmflow_budget_grants_incarnation ON llmflow_budget_grants (incarnation);
 `
 
 func (p *Postgres) SetBudget(ctx context.Context, b Budget) error {
-	if err := ValidateBudget(b); err != nil {
-		return err
-	}
-	_, err := p.pool.Exec(ctx, `
-		INSERT INTO llmflow_budgets_v2 (kind, name, model, unit, period, max_cost, soft_limit) VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (kind, name, model, unit) DO UPDATE
-		SET period = EXCLUDED.period, max_cost = EXCLUDED.max_cost, soft_limit = EXCLUDED.soft_limit`,
-		string(b.Kind), b.Name, b.Model, b.Unit, string(b.Period), b.MaxCost, b.SoftLimit)
-	return err
+	return p.SetBudgetChecked(ctx, b, time.Now(), 0, true)
 }
 
 func (p *Postgres) IncreaseBudget(ctx context.Context, k BudgetKey, amount float64, expiry time.Time) error {
-	if !validAmount(amount) {
-		return fmt.Errorf("amount %v: want 0..1e15", amount)
-	}
-	return affected(p.pool.Exec(ctx, `UPDATE llmflow_budgets_v2 SET temp_increase = $5, temp_expiry = $6
-		WHERE kind = $1 AND name = $2 AND model = $3 AND unit = $4`, string(k.Kind), k.Name, k.Model, k.Unit, amount, expiry.UTC()))
+	return p.IncreaseBudgetChecked(ctx, k, amount, expiry, time.Now(), 0, true)
 }
 
 func (p *Postgres) DeleteBudget(ctx context.Context, k BudgetKey) error {
@@ -324,7 +312,7 @@ func (p *Postgres) DeleteBudget(ctx context.Context, k BudgetKey) error {
 }
 
 func (p *Postgres) Budgets(ctx context.Context) ([]Budget, error) {
-	rows, err := p.pool.Query(ctx, `SELECT kind, name, model, unit, period, max_cost, soft_limit, temp_increase, temp_expiry
+	rows, err := p.pool.Query(ctx, `SELECT kind, name, model, unit, period, max_cost, soft_limit, temp_increase, temp_expiry, limit_epoch
 		FROM llmflow_budgets_v2`)
 	if err != nil {
 		return nil, err
@@ -332,7 +320,7 @@ func (p *Postgres) Budgets(ctx context.Context) ([]Budget, error) {
 	out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (Budget, error) {
 		var b Budget
 		var kind, period string
-		err := r.Scan(&kind, &b.Name, &b.Model, &b.Unit, &period, &b.MaxCost, &b.SoftLimit, &b.TempIncrease, &b.TempExpiry)
+		err := r.Scan(&kind, &b.Name, &b.Model, &b.Unit, &period, &b.MaxCost, &b.SoftLimit, &b.TempIncrease, &b.TempExpiry, &b.Epoch)
 		b.Kind, b.Period = ScopeKind(kind), Period(period)
 		return b, err
 	})
@@ -366,14 +354,14 @@ func (p *Postgres) MarkSoftAlert(ctx context.Context, k BudgetKey, period time.T
 
 func (p *Postgres) SpendRows(ctx context.Context, since time.Time) ([]SpendRow, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT org, team, project, key_id, model, tags, unit, sum(cost) FROM llmflow_usage
-		WHERE ts >= $1 GROUP BY org, team, project, key_id, model, tags, unit`, since)
+		SELECT org, team, project, key_id, user_name, model, tags, unit, sum(cost) FROM llmflow_usage
+		WHERE ts >= $1 GROUP BY org, team, project, key_id, user_name, model, tags, unit`, since)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (SpendRow, error) {
 		var s SpendRow
-		err := r.Scan(&s.Org, &s.Team, &s.Project, &s.KeyID, &s.Model, &s.Tags, &s.Unit, &s.Cost)
+		err := r.Scan(&s.Org, &s.Team, &s.Project, &s.KeyID, &s.User, &s.Model, &s.Tags, &s.Unit, &s.Cost)
 		s.Tags = dedupSorted(s.Tags)
 		return s, err
 	})
