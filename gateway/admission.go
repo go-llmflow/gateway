@@ -30,6 +30,19 @@ type admission struct {
 	// reset is when the tightest budget the request falls under resets
 	// (X-Llmflow-Budget-Reset); zero without a budget.
 	reset time.Time
+	// id is the request's record id (the arming tracker's key); recorded
+	// is set once its record is handed to the recorder, which untracks it
+	// when stored.
+	id       string
+	recorded bool
+}
+
+// finish untracks a request that leaves no record (refused, or ended
+// before reaching vLLM).
+func (s *Server) finishUnrecorded(a *admission) {
+	if a != nil && !a.recorded {
+		s.tracker.untrack(a.id)
+	}
 }
 
 // admitError is an admission refusal with its HTTP answer.
@@ -62,14 +75,28 @@ func budgetRefusal(k store.BudgetKey, room, w int64, unit string, reset time.Tim
 	return &admitError{http.StatusTooManyRequests, "insufficient_quota", s, "budget", reset}
 }
 
+// armingRefusal answers a request under a budget that is still arming
+// (arming.go): it names the caller's own scope only.
+func armingRefusal(k store.BudgetKey) *admitError {
+	s := fmt.Sprintf("the budget of this period (%s %s", k.Kind, k.Name)
+	if k.Model != "" {
+		s += ", model " + k.Model
+	}
+	s += ") was just created and is arming: requests in its scope admitted before it are still running or being recorded; retry in a moment"
+	return &admitError{http.StatusTooManyRequests, "insufficient_quota", s, "budget_arming", time.Time{}}
+}
+
 var (
 	errNoContextLen = errors.New("the context length of this model is unknown (set max_model_len, or wait for its upstreams to report it on /v1/models): requests are refused while a budget applies")
 )
 
 // admitBudget holds a request's worst-case cost and returns the body to
 // send (with its max_tokens). out is the rewritten body for g.
-func (s *Server) admitBudget(ctx context.Context, ep openai.Endpoint, g *group, scope reqScope, out []byte, betas []string) (*admission, []byte, error) {
-	adm := &admission{at: s.now()}
+//
+// id names the request's record: the request is tracked under it until the
+// record is stored (arming.go), whether a budget applies or not.
+func (s *Server) admitBudget(ctx context.Context, ep openai.Endpoint, g *group, scope reqScope, out []byte, betas []string, id string) (*admission, []byte, error) {
+	adm := &admission{at: s.now(), id: id}
 	if s.budget.stale() {
 		return nil, nil, &admitError{http.StatusServiceUnavailable, "service_unavailable", errStateStale.Error(), "store_unavailable", time.Time{}}
 	}
@@ -81,12 +108,16 @@ func (s *Server) admitBudget(ctx context.Context, ep openai.Endpoint, g *group, 
 		}
 		return adm, out, nil
 	}
-	refs := s.budget.refs(scope)
 	capTok := g.cfg.MaxOutputTokens
+	sh, shapeErr := openai.ShapeOf(ep, out)
+	// Tracked before the budgets are read (arming.go): at its largest
+	// possible output bound, or without bound when there is none.
+	s.tracker.track(id, scope.keys(), s.trackedW(g, sh, shapeErr, betas), adm.at)
+	refs := s.budget.refs(scope)
 	if len(refs) == 0 && capTok == 0 {
 		return adm, out, nil
 	}
-	sh, err := openai.ShapeOf(ep, out)
+	sh, err := sh, shapeErr
 	if err != nil {
 		return nil, nil, &admitError{http.StatusBadRequest, "invalid_request_error", err.Error(), "", time.Time{}}
 	}
@@ -124,6 +155,9 @@ func (s *Server) admitBudget(ctx context.Context, ep openai.Endpoint, g *group, 
 	}
 	refuse := func(err error, w int64) error {
 		var nr *noRoom
+		if errors.As(err, &nr) && nr.arming {
+			return armingRefusal(nr.key)
+		}
 		if errors.As(err, &nr) {
 			return budgetRefusal(nr.key, nr.room, w, scope.unit, resetOf(refs, nr.key))
 		}
@@ -155,7 +189,7 @@ func (s *Server) admitBudget(ctx context.Context, ep openai.Endpoint, g *group, 
 			return adm.write(ep, out)
 		}
 		var nr *noRoom
-		if !errors.As(err, &nr) || attempt >= 3 {
+		if !errors.As(err, &nr) || nr.arming || attempt >= 3 {
 			return nil, nil, refuse(err, w)
 		}
 		next := g.prices.largestFit(sh, l, lo, m, nr.room, provider)
@@ -171,6 +205,31 @@ func (s *Server) admitBudget(ctx context.Context, ep openai.Endpoint, g *group, 
 		}
 		m = next
 	}
+}
+
+// trackedW is the worst case a request is tracked at for arming budgets:
+// its W at the largest output bound it can be sent with; no bound
+// (maxLedgerNano) when it has none; 0 when it is never charged.
+func (s *Server) trackedW(g *group, sh openai.Shape, shapeErr error, betas []string) int64 {
+	if g.prices.zero || shapeErr == nil && sh.Free {
+		return 0
+	}
+	if shapeErr != nil || sh.Unbounded != "" || sh.Generates && betaUnbounded(g, betas) != "" {
+		return maxLedgerNano
+	}
+	l := g.contextLen()
+	m := sh.MaxTokens
+	if sh.Generates && !sh.HasMaxTokens {
+		m = l
+		if g.cfg.MaxOutputTokens > 0 {
+			m = min(g.cfg.MaxOutputTokens, l)
+		}
+	}
+	w, ok := g.prices.worstCase(sh, l, m, g.ext != nil)
+	if !ok {
+		return maxLedgerNano
+	}
+	return min(w, maxLedgerNano)
 }
 
 // write sets the admission's output bound into the body.
@@ -211,12 +270,15 @@ func (a *admission) release(actual int64) bool {
 	return a.hold.settle(actual)
 }
 
-// recordHolds fills a record's hard-budget fields.
+// recordHolds fills a record's hard-budget fields; the record must then be
+// handed to the recorder, which untracks it once stored.
 func (s *Server) recordHolds(rec *store.Record, a *admission, costNano int64) {
 	rec.CostNano = costNano
 	if a == nil {
 		return
 	}
+	a.recorded = true
+	rec.ID = a.id
 	rec.AdmittedAt = a.at.UTC()
 	if h := a.hold; h != nil && len(h.refs) > 0 {
 		rec.HoldReplica, rec.HoldIncarnation, rec.HoldNano = s.escrow.holder.Replica, s.escrow.holder.Incarnation, h.w

@@ -33,8 +33,10 @@ type fallback struct {
 // nextFallback returns the next fallback of primary the key may use and
 // afford (its team allowed the model, every budget of the model can hold
 // the request's worst-case cost there), or nil; idx walks primary's list.
-// The caller releases the returned admission if it does not use it.
-func (s *Server) nextFallback(ctx context.Context, ep openai.Endpoint, primary *group, idx *int, key store.Key, scope reqScope, body []byte, betas []string) *fallback {
+// The caller releases the returned admission if it does not use it. A
+// candidate is tracked under the request's id (arming.go) until the
+// request ends, used or not: it errs on the side of reserving.
+func (s *Server) nextFallback(ctx context.Context, ep openai.Endpoint, primary *group, idx *int, key store.Key, scope reqScope, body []byte, betas []string, id string) *fallback {
 	for *idx < len(primary.cfg.Fallbacks) {
 		name := primary.cfg.Fallbacks[*idx]
 		*idx++
@@ -49,7 +51,7 @@ func (s *Server) nextFallback(ctx context.Context, ep openai.Endpoint, primary *
 		}
 		sc := scope
 		sc.model, sc.unit = name, g.cfg.Cost.Unit
-		adm, out, err := s.admitBudget(ctx, ep, g, sc, out, betas)
+		adm, out, err := s.admitBudget(ctx, ep, g, sc, out, betas, id)
 		if err != nil {
 			continue
 		}
@@ -64,15 +66,6 @@ func (s *Server) nextFallback(ctx context.Context, ep openai.Endpoint, primary *
 // only when the pool was full at admission or vLLM reports its queue.
 func movesOnSaturation(g *group, grant *fairshare.Grant) bool {
 	return grant.Borrowing && g.cfg.FallsBackOn("saturated") && (grant.Saturated || g.queueSaturated())
-}
-
-// guardRID returns the request id: the one the guardrails already used
-// (their guard-model calls and audit entries carry it), or a new one.
-func guardRID(rq *guardReq) string {
-	if rq != nil {
-		return rq.rid
-	}
-	return requestID()
 }
 
 var errUnknownModel = errors.New("unknown model")
@@ -217,15 +210,20 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		eg := clientEgress(r, key.Org)
 		// Hard budgets (#87): the request's worst-case cost is held on
 		// every budget of its scope before anything else is spent on it.
-		adm, held, aerr := s.admitBudget(r.Context(), ep, g, scope, out, eg.betas)
+		// The record id, known from admission on: the request is tracked
+		// under it until its record is stored (arming.go).
+		reqID := requestID()
+		adm, held, aerr := s.admitBudget(r.Context(), ep, g, scope, out, eg.betas, reqID)
 		if aerr != nil {
+			s.tracker.untrack(reqID)
 			s.writeAdmitError(w, key.Team, aerr)
 			return
 		}
 		out = held
 		// Released at the end with the request's cost (a no-op once a
-		// fallback replaced it, or when finish released it).
-		defer func() { adm.release(0) }()
+		// fallback replaced it, or when finish released it); untracked when
+		// no record was written.
+		defer func() { adm.release(0); s.finishUnrecorded(adm) }()
 		adm.header(w.Header())
 		if err := s.limiter.admit(key.ID, key.RPM, key.TPM, key.MaxInFlight); err != nil {
 			s.met.denied.add(1, key.Team, "rate_limit")
@@ -258,7 +256,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		}
 		var rq *guardReq
 		if len(guards) > 0 {
-			rq = &guardReq{s: s, key: key, scope: scope, rid: requestID(), guards: guards}
+			rq = &guardReq{s: s, key: key, scope: scope, rid: reqID, guards: guards}
 			defer rq.finish()
 			if ep == openai.Responses && req.Stream && rq.hasStage("post") {
 				s.limiter.release(key.ID, 0)
@@ -302,7 +300,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		// and with no room anywhere it simply queues where it is.
 		if movesOnSaturation(g, grant) {
 			idx := 0
-			for fb := s.nextFallback(r.Context(), ep, g, &idx, key, scope, body, eg.betas); fb != nil; fb = s.nextFallback(r.Context(), ep, g, &idx, key, scope, body, eg.betas) {
+			for fb := s.nextFallback(r.Context(), ep, g, &idx, key, scope, body, eg.betas, reqID); fb != nil; fb = s.nextFallback(r.Context(), ep, g, &idx, key, scope, body, eg.betas, reqID) {
 				next := fb.g
 				tg, ok := next.pool.tryAcquire(key.Org, next.class, promptEst+req.MaxTokens)
 				if !ok {
@@ -336,7 +334,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			tUp, tUpEnd   time.Time
 			status        int
 			pre           time.Duration
-			rid           = guardRID(rq)
+			rid           = reqID
 			usage         openai.Usage
 			estimated     bool
 			upstreamLabel string
@@ -463,7 +461,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			if err == nil && !saturated || r.Context().Err() != nil || !primary.cfg.FallsBackOn("unavailable") {
 				break
 			}
-			fb := s.nextFallback(r.Context(), ep, primary, &fallbackIdx, key, scope, body, eg.betas)
+			fb := s.nextFallback(r.Context(), ep, primary, &fallbackIdx, key, scope, body, eg.betas, reqID)
 			if fb == nil {
 				break
 			}

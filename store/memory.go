@@ -10,14 +10,19 @@ import (
 // Memory is an in-process Store. Usage records are bounded by MaxRecords
 // (oldest dropped first).
 type Memory struct {
-	mu         sync.RWMutex
-	orgs       map[string]*Org
-	teams      map[string]*Team
-	projects   map[[2]string]*Project
-	keys       map[string]*Key
-	byHash     map[[32]byte]string
-	budgets    map[BudgetKey]*memBudget
-	ledger     map[ledgerKey]*memLedger
+	mu       sync.RWMutex
+	orgs     map[string]*Org
+	teams    map[string]*Team
+	projects map[[2]string]*Project
+	keys     map[string]*Key
+	byHash   map[[32]byte]string
+	budgets  map[BudgetKey]*memBudget
+	ledger   map[ledgerKey]*memLedger
+	holders  map[string]Holder              // by incarnation
+	arming   map[BudgetKey]map[string]int64 // arming reports by incarnation
+	// NoArming creates budgets active at once, as v0.17.0 did: a planted
+	// control for the tests only.
+	NoArming   bool
 	records    []Record
 	recordIDs  map[string]bool // IDs stored, for idempotent inserts
 	u          memUsers

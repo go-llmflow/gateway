@@ -79,8 +79,8 @@ func lockLedger(ctx context.Context, tx pgx.Tx, k BudgetKey, start time.Time) (L
 func lockedBudget(ctx context.Context, tx pgx.Tx, k BudgetKey, mode string) (Budget, bool, error) {
 	b := Budget{BudgetKey: k}
 	var period string
-	err := tx.QueryRow(ctx, `SELECT period, max_cost, soft_limit, temp_increase, temp_expiry, limit_epoch FROM llmflow_budgets_v2 WHERE `+keyWhere+` FOR `+mode,
-		keyArgs(k)...).Scan(&period, &b.MaxCost, &b.SoftLimit, &b.TempIncrease, &b.TempExpiry, &b.Epoch)
+	err := tx.QueryRow(ctx, `SELECT period, max_cost, soft_limit, temp_increase, temp_expiry, limit_epoch, arming FROM llmflow_budgets_v2 WHERE `+keyWhere+` FOR `+mode,
+		keyArgs(k)...).Scan(&period, &b.MaxCost, &b.SoftLimit, &b.TempIncrease, &b.TempExpiry, &b.Epoch, &b.Arming)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return b, false, nil
 	}
@@ -93,6 +93,9 @@ func (p *Postgres) SetBudgetChecked(ctx context.Context, b Budget, now time.Time
 		return err
 	}
 	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		if err := lockUsage(ctx, tx); err != nil {
+			return err
+		}
 		// A budget created by two administrators at once: the second waits.
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, b.BudgetKey.String()); err != nil {
 			return err
@@ -102,10 +105,12 @@ func (p *Postgres) SetBudgetChecked(ctx context.Context, b Budget, now time.Time
 			return err
 		}
 		var old *Budget
-		b.TempIncrease, b.TempExpiry, b.Epoch = 0, nil, 0
+		b.TempIncrease, b.TempExpiry, b.Epoch, b.Arming = 0, nil, 0, !p.NoArming
 		if exists {
-			b.TempIncrease, b.TempExpiry, b.Epoch = cur.TempIncrease, cur.TempExpiry, cur.Epoch
+			b.TempIncrease, b.TempExpiry, b.Epoch, b.Arming = cur.TempIncrease, cur.TempExpiry, cur.Epoch, cur.Arming
 			old = &cur
+		} else if _, err := tx.Exec(ctx, `DELETE FROM llmflow_budget_arming WHERE `+keyWhere, keyArgs(b.BudgetKey)...); err != nil {
+			return err
 		}
 		st, err := lockLedger(ctx, tx, b.BudgetKey, b.Period.Start(now))
 		if err != nil {
@@ -117,10 +122,95 @@ func (p *Postgres) SetBudgetChecked(ctx context.Context, b Budget, now time.Time
 		// Every change takes a new epoch (ledger.go).
 		b.Epoch = nextEpoch(b.Epoch, now)
 		_, err = tx.Exec(ctx, `
-			INSERT INTO llmflow_budgets_v2 (kind, name, model, unit, period, max_cost, soft_limit, limit_epoch) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			INSERT INTO llmflow_budgets_v2 (kind, name, model, unit, period, max_cost, soft_limit, limit_epoch, arming) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (kind, name, model, unit) DO UPDATE
-			SET period = EXCLUDED.period, max_cost = EXCLUDED.max_cost, soft_limit = EXCLUDED.soft_limit, limit_epoch = EXCLUDED.limit_epoch`,
-			string(b.Kind), b.Name, b.Model, b.Unit, string(b.Period), b.MaxCost, b.SoftLimit, b.Epoch)
+			SET period = EXCLUDED.period, max_cost = EXCLUDED.max_cost, soft_limit = EXCLUDED.soft_limit, limit_epoch = EXCLUDED.limit_epoch, arming = EXCLUDED.arming`,
+			string(b.Kind), b.Name, b.Model, b.Unit, string(b.Period), b.MaxCost, b.SoftLimit, b.Epoch, b.Arming)
+		return err
+	})
+}
+
+// lockUsage blocks the inserts of usage records until the transaction
+// ends, so that a ledger row's starting spend (the usage stored so far) and
+// the settlement of the records stored after it never miss a record
+// between them. SHARE conflicts with the inserts' ROW EXCLUSIVE only. Taken
+// first, before any row lock, in every transaction that creates a ledger
+// row (the inserts take it first too).
+func lockUsage(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, `LOCK TABLE llmflow_usage IN SHARE MODE`)
+	return err
+}
+
+// armingPre is the sum of an arming budget's reports, and whether every
+// registered process has reported; its budget row must be held.
+func armingPre(ctx context.Context, tx pgx.Tx, b Budget) (int64, bool, error) {
+	if !b.Arming {
+		return 0, true, nil
+	}
+	var missing int
+	var pre int64
+	err := tx.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM llmflow_budget_holders h WHERE NOT EXISTS (SELECT 1 FROM llmflow_budget_arming a
+			WHERE a.kind = $1 AND a.name = $2 AND a.model = $3 AND a.unit = $4 AND a.incarnation = h.incarnation)),
+		(SELECT LEAST(coalesce(sum(a.pre_nano), 0), $5)::bigint FROM llmflow_budget_arming a JOIN llmflow_budget_holders h USING (incarnation)
+			WHERE a.kind = $1 AND a.name = $2 AND a.model = $3 AND a.unit = $4)`,
+		append(keyArgs(b.BudgetKey), MaxLedgerNano)...).Scan(&missing, &pre)
+	return pre, missing == 0, err
+}
+
+func (p *Postgres) RegisterHolder(ctx context.Context, h Holder) error {
+	_, err := p.pool.Exec(ctx, `INSERT INTO llmflow_budget_holders (incarnation, replica) VALUES ($1, $2) ON CONFLICT (incarnation) DO NOTHING`,
+		h.Incarnation, h.Replica)
+	return err
+}
+
+func (p *Postgres) UnregisterHolder(ctx context.Context, h Holder) error {
+	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		return dropIncarnation(ctx, tx, h.Incarnation)
+	})
+}
+
+func dropIncarnation(ctx context.Context, tx pgx.Tx, inc string) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM llmflow_budget_arming WHERE incarnation = $1`, inc); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `DELETE FROM llmflow_budget_holders WHERE incarnation = $1`, inc)
+	return err
+}
+
+func (p *Postgres) ReportArming(ctx context.Context, h Holder, k BudgetKey, pre int64) (bool, error) {
+	active := false
+	err := pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		b, ok, err := lockedBudget(ctx, tx, k, "UPDATE")
+		if err != nil || !ok || !b.Arming {
+			active = err == nil
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO llmflow_budget_arming (kind, name, model, unit, incarnation, pre_nano) VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (kind, name, model, unit, incarnation) DO UPDATE SET pre_nano = EXCLUDED.pre_nano`,
+			append(keyArgs(k), h.Incarnation, max(pre, 0))...); err != nil {
+			return err
+		}
+		total, ready, err := armingPre(ctx, tx, b)
+		if err != nil || !ready || total > 0 {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE llmflow_budgets_v2 SET arming = false WHERE `+keyWhere, keyArgs(k)...); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `DELETE FROM llmflow_budget_arming WHERE `+keyWhere, keyArgs(k)...)
+		active = err == nil
+		return err
+	})
+	return active, err
+}
+
+func (p *Postgres) ReleaseReplica(ctx context.Context, replica string) error {
+	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `DELETE FROM llmflow_budget_arming WHERE incarnation IN (SELECT incarnation FROM llmflow_budget_holders WHERE replica = $1)`, replica); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `DELETE FROM llmflow_budget_holders WHERE replica = $1`, replica)
 		return err
 	})
 }
@@ -130,6 +220,9 @@ func (p *Postgres) IncreaseBudgetChecked(ctx context.Context, k BudgetKey, amoun
 		return fmt.Errorf("amount %v: want 0..1e15", amount)
 	}
 	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		if err := lockUsage(ctx, tx); err != nil {
+			return err
+		}
 		cur, exists, err := lockedBudget(ctx, tx, k, "UPDATE")
 		if err != nil {
 			return err
@@ -164,6 +257,25 @@ func (p *Postgres) GrowGrants(ctx context.Context, h Holder, now time.Time, lend
 	var out []GrantResult
 	err := pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
 		out = out[:0]
+		// A ledger row to create (a new period): the usage inserts wait
+		// (lockUsage), taken before any row lock.
+		missing := false
+		for _, r := range sorted {
+			var one int
+			err := tx.QueryRow(ctx, `SELECT 1 FROM llmflow_budget_ledger WHERE `+keyWhere+` AND period_start = $5`, append(keyArgs(r.Key), r.Start.UTC())...).Scan(&one)
+			if errors.Is(err, pgx.ErrNoRows) {
+				missing = true
+				break
+			}
+			if err != nil {
+				return err
+			}
+		}
+		if missing {
+			if err := lockUsage(ctx, tx); err != nil {
+				return err
+			}
+		}
 		for _, r := range sorted {
 			res := GrantResult{Key: r.Key, Start: r.Start}
 			b, ok, err := lockedBudget(ctx, tx, r.Key, "SHARE")
@@ -175,12 +287,19 @@ func (p *Postgres) GrowGrants(ctx context.Context, h Holder, now time.Time, lend
 				out = append(out, res)
 				continue
 			}
+			pre, ready, err := armingPre(ctx, tx, b)
+			if err != nil {
+				return err
+			}
+			if !ready {
+				return &NoRoomError{Key: r.Key, Arming: true}
+			}
 			st, err := lockLedger(ctx, tx, r.Key, r.Start)
 			if err != nil {
 				return err
 			}
 			limit, until := LimitNano(b, now, lendFor)
-			room := limit - st.Spent - st.Granted
+			room := limit - st.Spent - st.Granted - pre
 			if room < r.Need || r.Need < 0 {
 				return &NoRoomError{Key: r.Key, Room: max(room, 0)}
 			}
@@ -294,8 +413,12 @@ func (p *Postgres) ReleaseIncarnation(ctx context.Context, inc string) (int64, e
 		if err != nil {
 			return err
 		}
-		n, err = releaseRows(ctx, tx, rows)
-		return err
+		if n, err = releaseRows(ctx, tx, rows); err != nil {
+			return err
+		}
+		// Its spool replayed, the process has nothing unsettled left: its
+		// registration and arming reports go too.
+		return dropIncarnation(ctx, tx, inc)
 	})
 	return n, err
 }
@@ -359,11 +482,17 @@ type settlement struct {
 	dec   map[ledgerKey]map[Holder]int64
 }
 
-func (s *settlement) add(r Record) {
+func (s *settlement) add(r Record, budgets map[BudgetKey]Period) {
+	actual := RecordCostNano(r)
+	if actual > 0 && len(budgets) > 0 {
+		for _, u := range unheldSettlements(r, func(k BudgetKey) (Period, bool) { p, ok := budgets[k]; return p, ok }) {
+			lk := ledgerKey{u.Key, u.Start.UnixNano()}
+			s.spent[lk] = min(s.spent[lk]+actual, MaxLedgerNano)
+		}
+	}
 	if len(r.Holds) == 0 {
 		return
 	}
-	actual := RecordCostNano(r)
 	h := Holder{r.HoldReplica, r.HoldIncarnation}
 	for _, hr := range r.Holds {
 		lk := ledgerKey{hr.Key, hr.Start.UnixNano()}

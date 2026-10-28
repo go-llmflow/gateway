@@ -98,15 +98,36 @@ type LedgerState struct {
 }
 
 // NoRoomError refuses a growth that does not fit a budget: Room is what
-// the budget period had left for it.
+// the budget period had left for it. Arming: the budget is new and some
+// gateway process has not yet reported what it had in flight in its scope
+// (v0.17.1, see ReportArming).
 type NoRoomError struct {
-	Key  BudgetKey
-	Room int64
+	Key    BudgetKey
+	Room   int64
+	Arming bool
 }
 
 func (e *NoRoomError) Error() string {
+	if e.Arming {
+		return fmt.Sprintf("budget %s is arming", e.Key)
+	}
 	return fmt.Sprintf("budget %s has %d nano-units left", e.Key, e.Room)
 }
+
+// Arming (v0.17.1). A budget created over a scope already in use starts
+// arming: the requests in its scope that were admitted before any gateway
+// process knew it hold nothing on it, yet their cost lands in it. Every
+// registered gateway process (RegisterHolder) reports, once it has loaded
+// the budget, the worst case of the requests it still has unsettled in the
+// scope (ReportArming), and lowers it as they settle. No grant is made
+// before every registered process has reported; meanwhile
+//
+//	spent + Σ grants + Σ pre-existing ≤ limit
+//
+// A process that died without a clean shutdown stays registered, so the
+// budget stays arming, until its spool is replayed (ReleaseIncarnation) or
+// an administrator releases its replica: never on a timer. When every
+// report is back to 0 the budget is active and the reports are removed.
 
 // BelowCommittedError refuses a limit lower than what the current period
 // already committed (spent + Σ granted), unless forced.
@@ -151,6 +172,19 @@ type BudgetLedger interface {
 	ReleaseGrants(ctx context.Context, rows []GrantRow) (int64, error)
 	// Ledger returns a budget period's ledger (zero when it has none).
 	Ledger(ctx context.Context, k BudgetKey, start time.Time) (LedgerState, error)
+
+	// RegisterHolder records a gateway process before it admits anything;
+	// UnregisterHolder removes it (and its arming reports) at a clean
+	// shutdown, once its records are stored.
+	RegisterHolder(ctx context.Context, h Holder) error
+	UnregisterHolder(ctx context.Context, h Holder) error
+	// ReportArming records what h still has unsettled in an arming
+	// budget's scope, and activates the budget once every registered
+	// process has reported 0. It reports whether the budget is active.
+	ReportArming(ctx context.Context, h Holder, k BudgetKey, pre int64) (bool, error)
+	// ReleaseReplica drops the registration and the arming reports of every
+	// process of a replica that will not come back (an administrator).
+	ReleaseReplica(ctx context.Context, replica string) error
 }
 
 // ToNano converts an amount of units to nano-units, rounded down and
@@ -360,8 +394,11 @@ func (m *Memory) SetBudgetChecked(_ context.Context, b Budget, now time.Time, le
 	if cur != nil {
 		b.TempIncrease, b.TempExpiry, b.Epoch = cur.b.TempIncrease, cur.b.TempExpiry, cur.b.Epoch
 		old = &cur.b
+		b.Arming = cur.b.Arming
 	} else {
 		b.TempIncrease, b.TempExpiry, b.Epoch = 0, nil, 0
+		b.Arming = !m.NoArming
+		delete(m.arming, b.BudgetKey)
 	}
 	var st LedgerState
 	if l := m.ledgerRow(b.BudgetKey, b.Period.Start(now), false); l != nil {
@@ -429,7 +466,11 @@ func (m *Memory) GrowGrants(_ context.Context, h Holder, now time.Time, lendFor 
 		}
 		limit, until := LimitNano(mb.b, now, lendFor)
 		l := m.ledgerRow(r.Key, r.Start, true)
-		room := limit - l.spent - l.granted()
+		pre, ready := m.armingPre(mb.b)
+		if !ready {
+			return nil, &NoRoomError{Key: r.Key, Arming: true}
+		}
+		room := limit - l.spent - l.granted() - pre
 		if room < r.Need || r.Need < 0 {
 			return nil, &NoRoomError{Key: r.Key, Room: max(room, 0)}
 		}
@@ -477,6 +518,7 @@ func (m *Memory) ReleaseIncarnation(_ context.Context, inc string) (int64, error
 			}
 		}
 	}
+	m.dropIncarnation(inc)
 	return n, nil
 }
 
@@ -537,12 +579,143 @@ func (m *Memory) Ledger(_ context.Context, k BudgetKey, start time.Time) (Ledger
 	return LedgerState{}, nil
 }
 
+// armingPre is the sum of an arming budget's reports, and whether every
+// registered process has reported (m.mu held).
+func (m *Memory) armingPre(b Budget) (int64, bool) {
+	if !b.Arming {
+		return 0, true
+	}
+	reps := m.arming[b.BudgetKey]
+	var pre int64
+	for inc := range m.holders {
+		p, ok := reps[inc]
+		if !ok {
+			return 0, false
+		}
+		pre = min(pre+p, MaxLedgerNano)
+	}
+	return pre, true
+}
+
+func (m *Memory) RegisterHolder(_ context.Context, h Holder) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Fail != nil {
+		return m.Fail
+	}
+	if m.holders == nil {
+		m.holders = map[string]Holder{}
+	}
+	m.holders[h.Incarnation] = h
+	return nil
+}
+
+func (m *Memory) UnregisterHolder(_ context.Context, h Holder) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Fail != nil {
+		return m.Fail
+	}
+	m.dropIncarnation(h.Incarnation)
+	return nil
+}
+
+// dropIncarnation forgets a process's registration and reports (m.mu held).
+func (m *Memory) dropIncarnation(inc string) {
+	delete(m.holders, inc)
+	for _, reps := range m.arming {
+		delete(reps, inc)
+	}
+}
+
+func (m *Memory) ReportArming(_ context.Context, h Holder, k BudgetKey, pre int64) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Fail != nil {
+		return false, m.Fail
+	}
+	mb := m.budgets[k]
+	if mb == nil || !mb.b.Arming {
+		return true, nil
+	}
+	if m.arming == nil {
+		m.arming = map[BudgetKey]map[string]int64{}
+	}
+	if m.arming[k] == nil {
+		m.arming[k] = map[string]int64{}
+	}
+	m.arming[k][h.Incarnation] = max(pre, 0)
+	if total, ready := m.armingPre(mb.b); ready && total == 0 {
+		mb.b.Arming = false
+		delete(m.arming, k)
+		return true, nil
+	}
+	return false, nil
+}
+
+func (m *Memory) ReleaseReplica(_ context.Context, replica string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Fail != nil {
+		return m.Fail
+	}
+	for inc, h := range m.holders {
+		if h.Replica == replica {
+			m.dropIncarnation(inc)
+		}
+	}
+	return nil
+}
+
+// unheldSettlements lists the budget periods a stored record counts for
+// without a hold: the budgets of its scope (by its admission time) that it
+// was not held against. Its cost lands in their spent (v0.17.1): requests
+// admitted before a budget existed, or before a process loaded it.
+func unheldSettlements(r Record, budgets func(BudgetKey) (Period, bool)) []HoldRef {
+	at := r.AdmittedAt
+	if at.IsZero() {
+		at = r.Time
+	}
+	var out []HoldRef
+	for _, k := range ScopeKeys(RecordAttrs(r)) {
+		p, ok := budgets(k)
+		if !ok {
+			continue
+		}
+		start := p.Start(at)
+		held := false
+		for _, h := range r.Holds {
+			if h.Key == k {
+				held = true
+				break
+			}
+		}
+		if !held {
+			out = append(out, HoldRef{Key: k, Start: start})
+		}
+	}
+	return out
+}
+
 // settle applies the holds of a record just stored (m.mu held).
 func (m *Memory) settle(r Record) {
+	actual := RecordCostNano(r)
+	if actual > 0 {
+		for _, u := range unheldSettlements(r, func(k BudgetKey) (Period, bool) {
+			mb := m.budgets[k]
+			if mb == nil {
+				return "", false
+			}
+			return mb.b.Period, true
+		}) {
+			if l := m.ledgerRow(u.Key, u.Start, false); l != nil {
+				l.spent = min(l.spent+actual, MaxLedgerNano)
+			}
+		}
+	}
 	if len(r.Holds) == 0 {
 		return
 	}
-	actual := RecordCostNano(r)
 	h := Holder{r.HoldReplica, r.HoldIncarnation}
 	for _, hr := range r.Holds {
 		l := m.ledgerRow(hr.Key, hr.Start, false)

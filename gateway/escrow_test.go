@@ -185,11 +185,12 @@ func BenchmarkAdmission(b *testing.B) {
 		scope := reqScope{org: "o", team: team, key: "k", model: "llama"}
 		b.ReportAllocs()
 		for b.Loop() {
-			adm, _, err := srv.admitBudget(ctx, openai.Chat, g, scope, body, nil)
+			adm, _, err := srv.admitBudget(ctx, openai.Chat, g, scope, body, nil, "bench")
 			if err != nil {
 				b.Fatal(err)
 			}
 			adm.release(0)
+			srv.tracker.untrack("bench")
 		}
 	}
 	b.Run("no-budget", func(b *testing.B) { run(b, "free") })
@@ -207,11 +208,12 @@ func BenchmarkAdmission(b *testing.B) {
 	b.Run("grant-refill", func(b *testing.B) {
 		scope := reqScope{org: "o", team: "rich", key: "k", model: "llama"}
 		for b.Loop() {
-			adm, _, err := srv.admitBudget(ctx, openai.Chat, g, scope, body, nil)
+			adm, _, err := srv.admitBudget(ctx, openai.Chat, g, scope, body, nil, "bench")
 			if err != nil {
 				b.Fatal(err)
 			}
 			adm.release(0)
+			srv.tracker.untrack("bench")
 			srv.escrow.tick(ctx, true)
 		}
 	})

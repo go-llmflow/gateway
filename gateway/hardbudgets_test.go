@@ -83,6 +83,9 @@ func TestUnboundedRefusedUnderBudget(t *testing.T) {
 	if code, _ := e.responses(key, tool); code != 200 {
 		t.Fatalf("no budget: %d", code)
 	}
+	// Until its record is stored, that unbounded request keeps a new budget
+	// of its scope arming (v0.17.1).
+	e.waitRecords(1)
 	e.setBudget(`{"kind":"team","name":"etabA","period":"day","max_cost":100}`)
 	if code, out := e.responses(key, tool); code != 400 || !strings.Contains(out, "cannot be bounded") {
 		t.Fatalf("built-in tool under a budget: %d %s", code, out)

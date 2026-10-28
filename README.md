@@ -748,8 +748,17 @@ released by `POST /admin/budgets/release-replica {"replica": "<name>"}`
 **Limits that move.**
 - Lowering a budget below what the period committed is refused (409) unless `"force": true` (proxy and organisation admins only, audited). A forced lower stops new admissions; what was admitted finishes. Other replicas see it at their next budget refresh.
 - A temporary increase is lent only to requests that end before it does (`limits.max_request_duration`).
-- A budget created mid-period starts from the usage already stored.
 - A request is charged to the period that admitted it.
+
+**A budget created mid-period (since v0.17.1).** The requests in its scope that were admitted before it existed hold nothing on it, yet their cost lands in it. So a new budget is created **arming**:
+- Every gateway process keeps, for every request it admitted (budget or not), its worst case W until its record is stored.
+- On loading the new budget (at once on the replica that created it, by NOTIFY on the others under `ha`, at the latest at `budget_refresh`), each process reports the W it still has unsettled in the budget's scope, and lowers the report as those requests settle. Their actual cost goes to the budget's `spent` when their records are stored.
+- No grant is made until **every registered process** has reported. Until then, requests in the scope get 429 with "was just created and is arming … retry in a moment". After that, the reports count against the limit (`spent + Σ grants + Σ reports ≤ limit`) until they are all back to 0, and the budget is then active.
+- A process that died without a clean shutdown stays registered, so the budget stays arming for its scope until the process that replays its spool releases it, or a proxy admin releases its replica (`POST /admin/budgets/release-replica`, audited). Never on a timer.
+- An `org` or `team` budget created over a scope with heavy traffic may therefore refuse for a moment after its creation.
+- The starting spend is read with the usage inserts blocked for the moment (`LOCK TABLE … IN SHARE MODE`), so no record falls between it and the later settlements.
+
+What no admission control can refuse is the work admitted before the budget existed, or by a replica in the instant before it loaded the budget. The guarantee is that what the budget admits never takes the period past its limit, or past the cost of that earlier work when it alone is larger.
 
 ```hcl
 budgets {
@@ -778,13 +787,19 @@ tokens (so the integers cannot overflow), and refuses a context beta that is
 wider than `context_window`.
 
 **Edges.**
-- A request admitted before a replica loaded a new budget (at most `budget_refresh`) is not held by it.
-- A record dropped by a full accounting queue is not billed, as before; its hold stays reserved until its replica restarts or is released.
+- A forced lower (`"force": true`) is an explicit admin act. Like Slurm's "safe" limits, what was already admitted finishes.
+- A record dropped by a full accounting queue is not billed, as before. Its hold stays reserved until its replica restarts or is released, which errs on the safe side.
+- With `store.fail_closed = false`, a replica that cannot load the budgets keeps admitting without them: the guarantee needs the default, fail-closed.
 
 **Migration (v0.16 → v0.17).**
 - Start-up adds `llmflow_budget_ledger` and `llmflow_budget_grants`, `limit_epoch` on `llmflow_budgets_v2`, and `cost_nano` and `admitted_at` on `llmflow_usage`. Each period's ledger starts from its stored usage.
 - Budgets that admitted while under their limit now admit only what fits at the worst case: set `max_tokens` (or `max_output_tokens`) to keep small budgets usable.
 - Spool files written by v0.17 carry the holds and are not readable by v0.16: drain the spool before a downgrade.
+
+**Migration (v0.17.0 → v0.17.1).**
+- Start-up adds `llmflow_budget_holders`, `llmflow_budget_arming` and `arming` on `llmflow_budgets_v2`. Existing budgets stay active.
+- Upgrade every replica before creating a budget. A v0.17.0 process does not register, so its unheld requests are not reported.
+- A stored record now counts in every budget of its scope, held or not (it is how the cost of the work admitted before a budget lands in it).
 
 ### Cost units (since v0.12.0)
 

@@ -105,9 +105,12 @@ type Server struct {
 	// the planted control of the property test.
 	escrow      *escrow
 	softBudgets bool
-	rec         *recorder
-	met         *metrics
-	keys        *keyCache
+	// tracker keeps every admitted request until its record is stored, for
+	// the arming budgets (arming.go).
+	tracker *tracker
+	rec     *recorder
+	met     *metrics
+	keys    *keyCache
 	// authFails limits failed authentications per client network.
 	authFails *failLimiter
 	// allowedTags is the request-tag allow-list; alerts sends soft-budget
@@ -303,7 +306,16 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 	s.rec = newRecorder(st, cfg.Store.QueueSize, cfg.Store.BatchSize, func(err error) {
 		s.log.Error("accounting write failed", "err", err)
 	})
-	s.rec.done = s.budget.persisted
+	s.tracker = newTracker()
+	s.budget.onBudgets = s.tracker.sync
+	s.rec.done = func(recs []store.Record) {
+		s.budget.persisted(recs)
+		ids := make([]string, 0, len(recs))
+		for _, r := range recs {
+			ids = append(ids, r.ID)
+		}
+		s.tracker.untrack(ids...)
+	}
 	if cfg.Store.SpoolDir != "" {
 		sp, err := spool.Open(cfg.Store.SpoolDir, cfg.Store.SpoolMaxBytes)
 		if err != nil {
@@ -412,6 +424,12 @@ func (s *Server) Start(ctx context.Context) error {
 			s.log.Error("scim: reconciliation at start failed", "err", err)
 		}
 	}
+	// Registered before the first budget refresh, and before anything is
+	// admitted: a budget created from now on waits for this process's
+	// arming report, and one created before is in that refresh (arming.go).
+	if err := s.st.RegisterHolder(ctx, s.escrow.holder); err != nil {
+		return fmt.Errorf("gateway: register in the budget ledger: %w", err)
+	}
 	if err := s.budget.refresh(ctx); err != nil {
 		s.log.Error("initial budget refresh failed", "err", err)
 	}
@@ -421,8 +439,9 @@ func (s *Server) Start(ctx context.Context) error {
 	bctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.rec.start()
-	s.bg.Add(3)
+	s.bg.Add(4)
 	go func() { defer s.bg.Done(); s.escrow.loop(bctx) }()
+	go func() { defer s.bg.Done(); s.armingLoop(bctx) }()
 	go func() { defer s.bg.Done(); s.healthLoop(bctx) }()
 	for _, gn := range s.gorder {
 		if d := s.groups[gn].disc; d != nil {
@@ -480,6 +499,14 @@ func (s *Server) Close(ctx context.Context) {
 	// administrator releases this replica (a record that never reaches
 	// the store would otherwise leave its cost uncounted).
 	s.escrow.tick(ctx, true)
+	// Every record stored: this process leaves the ledger. With records
+	// still in its spool it stays registered, so an arming budget waits for
+	// the process that replays them.
+	if s.rec.spooled.Load() == 0 && len(s.rec.queue) == 0 {
+		if err := s.st.UnregisterHolder(ctx, s.escrow.holder); err != nil {
+			s.log.Error("budget ledger: unregister failed", "err", err)
+		}
+	}
 	// Last: the final checkpoint above queued its anchor.
 	for _, q := range s.exports {
 		q.Close(ctx)
