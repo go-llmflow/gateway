@@ -743,7 +743,10 @@ aborted stream is capped at W.
 spool may still hold records. The process that replays the spool releases
 them once every record is stored. A replica that never comes back is
 released by `POST /admin/budgets/release-replica {"replica": "<name>"}`
-(audited; proxy admins, or the admins of the budgets' organisation).
+(audited). A proxy admin releases all of it: its grants and its
+registration, which an arming budget of any organisation waits for. An
+organisation admin releases only its grants on that organisation's budgets
+(`"unregistered": false` in the answer).
 
 **Limits that move.**
 - Lowering a budget below what the period committed is refused (409) unless `"force": true` (proxy and organisation admins only, audited). A forced lower stops new admissions; what was admitted finishes. Other replicas see it at their next budget refresh.
