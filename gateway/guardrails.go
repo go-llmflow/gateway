@@ -514,11 +514,13 @@ func (s *Server) callGuardModel(ctx context.Context, rq *guardReq, model, path s
 	if path == "/classify" {
 		ep = openai.Embeddings // a pooling request: its inputs, nothing generated
 	}
-	adm, body, aerr := s.admitBudget(ctx, ep, g, sc, body, nil)
+	callID := requestID()
+	adm, body, aerr := s.admitBudget(ctx, ep, g, sc, body, nil, callID)
 	if aerr != nil {
+		s.tracker.untrack(callID)
 		return nil, fmt.Errorf("guard model %q: %w", model, aerr)
 	}
-	defer adm.release(0) // when nothing was charged
+	defer func() { adm.release(0); s.finishUnrecorded(adm) }() // when nothing was charged
 	ctx = withBoundOnly(ctx, func() bool { return adm.hold != nil })
 	t0 := time.Now()
 	resp, u, _, err := s.send(ctx, g, path, body, "application/json", 0, rq.rid)

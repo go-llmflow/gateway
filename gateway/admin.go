@@ -1037,7 +1037,7 @@ func (s *Server) setBudget(w http.ResponseWriter, r *http.Request, p *principal)
 		return
 	}
 	b := in.Budget
-	b.TempIncrease, b.TempExpiry, b.Epoch = 0, nil, 0 // the increase only through /admin/budgets/increase
+	b.TempIncrease, b.TempExpiry, b.Epoch, b.Arming = 0, nil, 0, false // the increase only through /admin/budgets/increase; the rest is the store's
 	var err error
 	if b.Unit, err = s.budgetUnit(b.Unit); err != nil {
 		apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -1071,7 +1071,16 @@ func (s *Server) setBudget(w http.ResponseWriter, r *http.Request, p *principal)
 		return
 	}
 	_ = s.budget.refresh(r.Context())
+	s.sendReports(r.Context()) // this process's arming report, at once
 	s.escrow.forgetRoom()
+	if s.shared != nil {
+		// The other replicas load it at once (v0.17.1): the window in which
+		// a replica that does not know the budget admits without a hold on
+		// it is a NOTIFY, not a budget_refresh.
+		if err := s.shared.NotifyKeys(r.Context(), "budget:changed/"+b.BudgetKey.String()); err != nil {
+			s.log.Error("budget change not broadcast; the other replicas load it at their next refresh", "err", err)
+		}
+	}
 	s.log.Info("budget set", "budget", b.BudgetKey.String(), "max_cost", b.MaxCost, "force", in.Force, "by", p.name)
 	if in.Force {
 		s.audit("budget.forced", "by", p.name, "budget", b.BudgetKey.String(), "max_cost", b.MaxCost)
@@ -1131,9 +1140,20 @@ func (s *Server) releaseReplica(w http.ResponseWriter, r *http.Request, p *princ
 		storeError(w, err)
 		return
 	}
+	// Its registration (an arming budget waits for every registered
+	// process, v0.17.1) spans every organisation: a proxy admin's only.
+	unregistered := false
+	if p.proxyAdmin() {
+		if err := s.st.ReleaseReplica(r.Context(), in.Replica); err != nil {
+			storeError(w, err)
+			return
+		}
+		unregistered = true
+	}
 	s.escrow.forgetRoom()
-	s.audit("budget.release_replica", "by", p.name, "replica", in.Replica, "grants", len(mine), "released_nano", n)
-	writeJSON(w, http.StatusOK, map[string]any{"replica": in.Replica, "grants": len(mine), "released": store.FormatNano(n), "not_yours": denied})
+	s.audit("budget.release_replica", "by", p.name, "replica", in.Replica, "grants", len(mine), "released_nano", n, "unregistered", unregistered)
+	writeJSON(w, http.StatusOK, map[string]any{"replica": in.Replica, "grants": len(mine), "released": store.FormatNano(n), "not_yours": denied,
+		"unregistered": unregistered})
 }
 
 // increaseBudget grants a temporary increase that ends at expires_at,

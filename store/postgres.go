@@ -15,6 +15,9 @@ import (
 // Postgres is a Store on PostgreSQL through pgx.
 type Postgres struct {
 	pool *pgxpool.Pool
+	// NoArming creates budgets active at once, as v0.17.0 did: a planted
+	// control for the tests only.
+	NoArming bool
 }
 
 // schema is idempotent; the ALTER TABLE statements upgrade a v0.1.0
@@ -432,10 +435,33 @@ func (p *Postgres) InsertRecords(ctx context.Context, recs []Record) error {
 		if err != nil {
 			return err
 		}
+		if len(ids) == 0 {
+			return nil
+		}
+		// The budgets the records may count for without a hold (v0.17.1).
+		rs, err := tx.Query(ctx, `SELECT kind, name, model, unit, period FROM llmflow_budgets_v2`)
+		if err != nil {
+			return err
+		}
+		budgets := map[BudgetKey]Period{}
+		for rs.Next() {
+			var k BudgetKey
+			var kind, period string
+			if err := rs.Scan(&kind, &k.Name, &k.Model, &k.Unit, &period); err != nil {
+				rs.Close()
+				return err
+			}
+			k.Kind = ScopeKind(kind)
+			budgets[k] = Period(period)
+		}
+		rs.Close()
+		if err := rs.Err(); err != nil {
+			return err
+		}
 		s := settlement{spent: map[ledgerKey]int64{}, dec: map[ledgerKey]map[Holder]int64{}}
 		for _, id := range ids {
 			if id != nil {
-				s.add(byID[*id])
+				s.add(byID[*id], budgets)
 			}
 		}
 		return s.apply(ctx, tx)

@@ -57,9 +57,16 @@ func (e *env) createKey(body string) string {
 func (e *env) waitRecords(n int) {
 	e.t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
-	for len(e.st.Records()) < n {
+	settled := func() bool {
+		e.srv.tracker.mu.Lock()
+		defer e.srv.tracker.mu.Unlock()
+		return len(e.srv.tracker.pending) == 0
+	}
+	// Stored, and settled for the arming tracker (the recorder untracks
+	// just after the insert).
+	for len(e.st.Records()) < n || !settled() {
 		if time.Now().After(deadline) {
-			e.t.Fatalf("%d records stored, want %d", len(e.st.Records()), n)
+			e.t.Fatalf("%d records stored, want %d (settled: %v)", len(e.st.Records()), n, settled())
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

@@ -159,6 +159,87 @@ func contractLedger(t *testing.T, s Store) {
 	}
 }
 
+// contractArming: a budget created while processes are registered grants
+// nothing until each has reported, counts the reports against the limit,
+// activates when they are all 0, and counts unheld records' cost.
+func contractArming(t *testing.T, s Store) {
+	t.Helper()
+	ctx := context.Background()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	day := Day.Start(now)
+	k := BudgetKey{Kind: ScopeTeam, Name: "arming-team"}
+	a, b := Holder{"ra", "ia"}, Holder{"rb", "ib"}
+	must(s.RegisterHolder(ctx, a))
+	must(s.RegisterHolder(ctx, b))
+	must(s.SetBudgetChecked(ctx, Budget{BudgetKey: k, Period: Day, MaxCost: 1}, now, time.Minute, false))
+	bs, _ := s.Budgets(ctx)
+	if !findBudget(bs, k).Arming {
+		t.Fatal("a new budget is not arming")
+	}
+	grow := func(need int64) error {
+		_, err := s.GrowGrants(ctx, a, now, time.Minute, []GrantRequest{{Key: k, Start: day, Need: need, Want: need}})
+		return err
+	}
+	var nr *NoRoomError
+	if err := grow(1); !errors.As(err, &nr) || !nr.Arming {
+		t.Fatalf("granted before any report: %v", err)
+	}
+	active, err := s.ReportArming(ctx, a, k, unitNano/2)
+	if err != nil || active {
+		t.Fatalf("one report: %v %v", active, err)
+	}
+	if err := grow(1); !errors.As(err, &nr) || !nr.Arming {
+		t.Fatalf("granted with a process missing: %v", err)
+	}
+	if active, err := s.ReportArming(ctx, b, k, unitNano/4); err != nil || active {
+		t.Fatalf("second report: %v %v", active, err)
+	}
+	// Reports count against the limit: 1 - 0.75 = 0.25 left.
+	if err := grow(unitNano / 2); !errors.As(err, &nr) || nr.Arming || nr.Room != unitNano/4 {
+		t.Fatalf("reports not reserved: %v", err)
+	}
+	must(grow(unitNano / 4))
+	// A record of the scope without a hold lands in spent.
+	must(s.InsertRecords(ctx, []Record{{ID: "arming-unheld", Time: now, AdmittedAt: now, Team: k.Name, KeyID: "x", Model: "m", Cost: 0.3, CostNano: 3 * unitNano / 10}}))
+	if st, _ := s.Ledger(ctx, k, day); st.Spent != 3*unitNano/10 {
+		t.Fatalf("unheld record not counted: %+v", st)
+	}
+	if active, _ := s.ReportArming(ctx, a, k, 0); active {
+		t.Fatal("active with a report above 0")
+	}
+	// A process that died: its spool replayed, its registration goes.
+	if _, err := s.ReleaseIncarnation(ctx, "ib"); err != nil {
+		t.Fatal(err)
+	}
+	if active, err := s.ReportArming(ctx, a, k, 0); err != nil || !active {
+		t.Fatalf("not active once every report is 0: %v %v", active, err)
+	}
+	bs, _ = s.Budgets(ctx)
+	if findBudget(bs, k).Arming {
+		t.Fatal("still arming")
+	}
+	must(s.UnregisterHolder(ctx, a))
+	// An administrator releases a replica that never comes back.
+	must(s.RegisterHolder(ctx, Holder{"gone", "g1"}))
+	k2 := BudgetKey{Kind: ScopeTeam, Name: "arming-team-2"}
+	must(s.SetBudgetChecked(ctx, Budget{BudgetKey: k2, Period: Day, MaxCost: 1}, now, time.Minute, false))
+	if _, err := s.GrowGrants(ctx, a, now, time.Minute, []GrantRequest{{Key: k2, Start: day, Need: 1}}); !errors.As(err, &nr) || !nr.Arming {
+		t.Fatalf("granted while a registered replica has not reported: %v", err)
+	}
+	must(s.ReleaseReplica(ctx, "gone"))
+	if _, err := s.GrowGrants(ctx, a, now, time.Minute, []GrantRequest{{Key: k2, Start: day, Need: 1}}); err != nil {
+		t.Fatalf("after the release: %v", err)
+	}
+}
+
+func TestArmingMemory(t *testing.T) { contractArming(t, NewMemory()) }
+
 func findBudget(bs []Budget, k BudgetKey) Budget {
 	for _, b := range bs {
 		if b.BudgetKey == k {

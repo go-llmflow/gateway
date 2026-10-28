@@ -264,6 +264,21 @@ func (s *Server) onRevocation(payload string) {
 	if !ok {
 		return
 	}
+	if kind == "budget" {
+		// A budget was created or changed on another replica: load it now,
+		// rather than at the next refresh, so that an arming budget is
+		// reported (and held on) at once (v0.17.1).
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
+			defer cancel()
+			if s.budget.refresh(ctx) == nil {
+				s.sendReports(ctx)
+				s.escrow.forgetRoom()
+			}
+		}()
+		s.met.revocations.add(1, kind)
+		return
+	}
 	a, b, _ := strings.Cut(rest, "/")
 	s.forgetKeys(revocationMatch(kind, a, b))
 	s.met.revocations.add(1, kind)

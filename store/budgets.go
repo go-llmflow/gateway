@@ -99,6 +99,10 @@ type Budget struct {
 	// is set (hard budgets): a replica stops lending the grants it obtained
 	// under an earlier epoch. Set by the store.
 	Epoch int64 `json:"epoch,omitempty"`
+	// Arming: created over a scope in use, the budget waits for every
+	// gateway process to report what it had in flight (ledger.go). Set by
+	// the store.
+	Arming bool `json:"arming,omitempty"`
 }
 
 // Limit returns the effective maximum at now.
@@ -296,6 +300,22 @@ CREATE TABLE IF NOT EXISTS llmflow_budget_grants (
 	PRIMARY KEY (kind, name, model, unit, period_start, replica, incarnation)
 );
 CREATE INDEX IF NOT EXISTS llmflow_budget_grants_incarnation ON llmflow_budget_grants (incarnation);
+-- v0.17.1: arming budgets (ledger.go).
+ALTER TABLE llmflow_budgets_v2 ADD COLUMN IF NOT EXISTS arming boolean NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS llmflow_budget_holders (
+	incarnation text PRIMARY KEY,
+	replica     text NOT NULL,
+	started_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS llmflow_budget_arming (
+	kind        text NOT NULL,
+	name        text NOT NULL,
+	model       text NOT NULL,
+	unit        text NOT NULL,
+	incarnation text NOT NULL,
+	pre_nano    bigint NOT NULL CHECK (pre_nano >= 0),
+	PRIMARY KEY (kind, name, model, unit, incarnation)
+);
 `
 
 func (p *Postgres) SetBudget(ctx context.Context, b Budget) error {
@@ -312,7 +332,7 @@ func (p *Postgres) DeleteBudget(ctx context.Context, k BudgetKey) error {
 }
 
 func (p *Postgres) Budgets(ctx context.Context) ([]Budget, error) {
-	rows, err := p.pool.Query(ctx, `SELECT kind, name, model, unit, period, max_cost, soft_limit, temp_increase, temp_expiry, limit_epoch
+	rows, err := p.pool.Query(ctx, `SELECT kind, name, model, unit, period, max_cost, soft_limit, temp_increase, temp_expiry, limit_epoch, arming
 		FROM llmflow_budgets_v2`)
 	if err != nil {
 		return nil, err
@@ -320,7 +340,7 @@ func (p *Postgres) Budgets(ctx context.Context) ([]Budget, error) {
 	out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (Budget, error) {
 		var b Budget
 		var kind, period string
-		err := r.Scan(&kind, &b.Name, &b.Model, &b.Unit, &period, &b.MaxCost, &b.SoftLimit, &b.TempIncrease, &b.TempExpiry, &b.Epoch)
+		err := r.Scan(&kind, &b.Name, &b.Model, &b.Unit, &period, &b.MaxCost, &b.SoftLimit, &b.TempIncrease, &b.TempExpiry, &b.Epoch, &b.Arming)
 		b.Kind, b.Period = ScopeKind(kind), Period(period)
 		return b, err
 	})

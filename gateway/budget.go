@@ -90,6 +90,9 @@ type budgeter struct {
 	// onSoft is called (outside the lock) for every budget at or above its
 	// soft limit after a refresh.
 	onSoft func([]softAlert)
+	// onBudgets is told every budget after a refresh installed them
+	// (arming.go).
+	onBudgets func([]store.Budget)
 }
 
 func newBudgeter(st store.Store, refresh time.Duration, failClosed bool, now func() time.Time) *budgeter {
@@ -230,8 +233,13 @@ func (b *budgeter) refresh(ctx context.Context) error {
 	b.mu.Lock()
 	b.budgets, b.models, b.allow, b.lastOK, b.everOK = budgets, models, allow, now, true
 	b.projects, b.members = projects, members
-	onSoft := b.onSoft
+	onSoft, onBudgets := b.onSoft, b.onBudgets
 	b.mu.Unlock()
+	// After the install: a request that read the budgets before it was
+	// tracked before this (arming.go).
+	if onBudgets != nil {
+		onBudgets(list)
+	}
 	if onSoft != nil && len(alerts) > 0 {
 		onSoft(alerts)
 	}

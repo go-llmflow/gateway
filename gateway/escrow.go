@@ -165,8 +165,9 @@ type hold struct {
 // noRoom refuses a request: a budget it falls under has less room left for
 // this process than the request's worst-case cost.
 type noRoom struct {
-	key  store.BudgetKey
-	room int64 // nano-units this process could still get for it
+	key    store.BudgetKey
+	room   int64 // nano-units this process could still get for it
+	arming bool  // the budget is arming (arming.go)
 }
 
 func (e *noRoom) Error() string { return "budget exhausted" }
@@ -281,6 +282,17 @@ func (e *escrow) acquire(ctx context.Context, refs []budgetRef, w int64) (*hold,
 			}
 			e.mu.Unlock()
 			e.refused.Add(1)
+			if nr.Arming {
+				// Not cached: the reports come in within a second.
+				e.mu.Lock()
+				for _, r := range refs {
+					if r.key == nr.Key {
+						e.cellFor(r).room = -1
+					}
+				}
+				e.mu.Unlock()
+				return nil, &noRoom{key: nr.Key, arming: true}
+			}
 			return nil, &noRoom{key: nr.Key, room: e.roomFor(refs)}
 		case err != nil:
 			e.mu.Unlock()
