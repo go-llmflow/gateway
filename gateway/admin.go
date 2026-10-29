@@ -776,6 +776,16 @@ func (s *Server) grantRole(w http.ResponseWriter, r *http.Request, p *principal)
 	if !s.bindingFrom(w, r, p, b) {
 		return
 	}
+	prov, ok, err := s.grantProvenance(r.Context(), p, b)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	if !ok {
+		forbidden(w)
+		return
+	}
+	b.Provenance = prov
 	if err := s.st.Grant(r.Context(), b); err != nil {
 		storeError(w, err)
 		return
@@ -893,6 +903,8 @@ func (s *Server) userBudgetAccess(r *http.Request, p *principal, name string) (r
 	}
 	for _, b := range binds {
 		switch {
+		case b.Team != "" && !b.Provenance.Provisioned():
+			// A team role an org admin granted: not provisioning (#104).
 		case b.Team != "":
 			t, err := s.st.GetTeam(ctx, b.Team)
 			if errors.Is(err, store.ErrNotFound) {

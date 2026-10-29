@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS llmflow_bindings (
 	PRIMARY KEY (username, role, org, team)
 );
 ALTER TABLE llmflow_keys ADD COLUMN IF NOT EXISTS owner text NOT NULL DEFAULT '';
+-- v0.18.2 (#104): who created a binding. Rows stored before it keep '' (unknown),
+-- which is treated as legitimate.
+ALTER TABLE llmflow_bindings ADD COLUMN IF NOT EXISTS provenance text NOT NULL DEFAULT '';
 `
 
 func (p *Postgres) CreateUser(ctx context.Context, name string) error {
@@ -138,12 +141,12 @@ func (p *Postgres) Grant(ctx context.Context, b Binding) error {
 		return err
 	}
 	tag, err := p.pool.Exec(ctx, `
-		INSERT INTO llmflow_bindings (username, role, org, team)
-		SELECT $1, $2, $3, $4
+		INSERT INTO llmflow_bindings (username, role, org, team, provenance)
+		SELECT $1, $2, $3, $4, $5
 		WHERE EXISTS (SELECT 1 FROM llmflow_users WHERE name = $1)
 		  AND ($3 = '' OR EXISTS (SELECT 1 FROM llmflow_orgs WHERE name = $3))
 		  AND ($4 = '' OR EXISTS (SELECT 1 FROM llmflow_teams WHERE name = $4))
-		ON CONFLICT DO NOTHING`, b.User, string(b.Role), b.Org, b.Team)
+		ON CONFLICT DO NOTHING`, b.User, string(b.Role), b.Org, b.Team, string(b.Provenance))
 	if err != nil {
 		return err
 	}
@@ -167,16 +170,16 @@ func (p *Postgres) Ungrant(ctx context.Context, b Binding) error {
 }
 
 func (p *Postgres) Bindings(ctx context.Context, user string) ([]Binding, error) {
-	rows, err := p.pool.Query(ctx, `SELECT username, role, org, team FROM llmflow_bindings WHERE $1 = '' OR username = $1
+	rows, err := p.pool.Query(ctx, `SELECT username, role, org, team, provenance FROM llmflow_bindings WHERE $1 = '' OR username = $1
 		ORDER BY username, role, org, team`, user)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Binding, error) {
 		var b Binding
-		var role string
-		err := r.Scan(&b.User, &role, &b.Org, &b.Team)
-		b.Role = Role(role)
+		var role, prov string
+		err := r.Scan(&b.User, &role, &b.Org, &b.Team, &prov)
+		b.Role, b.Provenance = Role(role), Provenance(prov)
 		return b, err
 	})
 }

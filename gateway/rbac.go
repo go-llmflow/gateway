@@ -132,6 +132,47 @@ func (s *Server) userPrincipal(ctx context.Context, h [32]byte) (*principal, err
 	return &principal{name: u.Name, bindings: bs}, nil
 }
 
+// grantProvenance decides who a grant is on behalf of, and whether p may make
+// it to THIS user (#104). A proxy admin may grant to anybody (the binding is
+// recorded as theirs). Anyone else may grant only to a user already
+// provisioned into the organisation the binding is in: one that holds a team
+// binding of that organisation created by provisioning (SCIM, an SSO claim),
+// by a proxy admin, or before provenance was recorded. A binding-less user,
+// or one of another organisation, is a proxy admin's to place; otherwise an
+// organisation admin could pull anybody into their organisation by granting
+// a team role, and then act on them.
+func (s *Server) grantProvenance(ctx context.Context, p *principal, b store.Binding) (store.Provenance, bool, error) {
+	if p.proxyAdmin() {
+		return store.ProvProxyAdmin, true, nil
+	}
+	org := b.Org
+	if b.Team != "" {
+		t, err := s.st.GetTeam(ctx, b.Team)
+		if err != nil {
+			return "", false, err
+		}
+		org = t.Org
+	}
+	have, err := s.st.Bindings(ctx, b.User)
+	if err != nil {
+		return "", false, err
+	}
+	for _, h := range have {
+		if h.Team == "" || !h.Provenance.Provisioned() {
+			continue
+		}
+		t, err := s.st.GetTeam(ctx, h.Team)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+		case err != nil:
+			return "", false, err
+		case t.Org == org:
+			return store.ProvOrgAdmin, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // canGrant reports whether p may grant or remove binding b. Proxy roles
 // only by a proxy admin; organisation roles by an admin of that
 // organisation; team_admin by an admin of the team's organisation; member

@@ -402,8 +402,16 @@ func (b *scimBackend) reconcile(ctx context.Context) error {
 	}
 	for _, bd := range have {
 		if provisioned[bd.User] && b.managed(bd) {
-			if want[bd] {
-				delete(want, bd)
+			if want[bd.Key()] && bd.Provenance != store.ProvOrgAdmin {
+				delete(want, bd.Key())
+				continue
+			}
+			// A binding an administrator granted that provisioning also
+			// wants is re-created as the provisioning's (#104).
+			if want[bd.Key()] {
+				if err := b.s.st.Ungrant(ctx, bd); err != nil && !errors.Is(err, store.ErrNotFound) {
+					return err
+				}
 				continue
 			}
 			if err := b.s.st.Ungrant(ctx, bd); err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -413,6 +421,7 @@ func (b *scimBackend) reconcile(ctx context.Context) error {
 		}
 	}
 	for bd := range want {
+		bd.Provenance = store.ProvSCIM
 		switch err := b.s.st.Grant(ctx, bd); {
 		case err == nil:
 			b.s.audit("scim.role_granted", "user", bd.User, "role", string(bd.Role), "team", bd.Team)

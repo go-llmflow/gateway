@@ -294,20 +294,76 @@ func TestProfileGrantThenActRefused(t *testing.T) {
 	e.adminToken("loner")
 	e.check(toks, []call{
 		{"oa", "PUT", "/admin/users/loner/profile", `{"profile":"p"}`, 403},
-		{"oa", "PUT", "/admin/users/loner/roles", `{"role":"viewer","org":"etabA"}`, 200},
+		// #104: a binding-less user is a proxy admin's to place: every grant
+		// of the org admin is refused, so there is nothing to act through.
+		{"oa", "PUT", "/admin/users/loner/roles", `{"role":"viewer","org":"etabA"}`, 403},
+		{"oa", "PUT", "/admin/users/loner/roles", `{"role":"org_admin","org":"etabA"}`, 403},
+		{"oa", "PUT", "/admin/users/loner/roles", `{"role":"member","team":"etabA"}`, 403},
 		{"oa", "PUT", "/admin/users/loner/profile", `{"profile":"p"}`, 403},
 		{"oa", "GET", "/admin/users/loner/profile", "", 403},
 		{"oa", "DELETE", "/admin/users/loner/profile", "", 403},
-		{"oa", "PUT", "/admin/users/loner/roles", `{"role":"org_admin","org":"etabA"}`, 200},
-		{"oa", "PUT", "/admin/users/loner/profile", `{"profile":"p"}`, 403},
-		{"oa", "DELETE", "/admin/users/loner/roles?role=viewer&org=etabA", "", 204},
-		{"oa", "DELETE", "/admin/users/loner/roles?role=org_admin&org=etabA", "", 204},
-	})
-	// The user budgets API decides alike.
-	e.check(toks, []call{
-		{"oa", "PUT", "/admin/users/loner/roles", `{"role":"viewer","org":"etabA"}`, 200},
 		{"oa", "PUT", "/admin/budgets", `{"kind":"user","name":"loner","period":"week","max_cost":9}`, 403},
 	})
+}
+
+// #104: provenance. Another organisation's user is not pullable either; a
+// user provisioned into the organisation is administered normally; a binding
+// an org admin granted is no provisioning, and one with unknown provenance
+// (stored before v0.18.2) is legitimate.
+func TestProfileProvenance(t *testing.T) {
+	up := newFakeVLLM(t)
+	e := newEnv(t, profileConfig(up.URL()))
+	toks := map[string]string{
+		"oa": e.adminToken("oa", `{"role":"org_admin","org":"etabA"}`),
+		"ob": e.adminToken("ob", `{"role":"org_admin","org":"etabB"}`),
+	}
+	e.adminToken("bmem", `{"role":"member","team":"etabB"}`)
+	e.adminToken("amem", `{"role":"member","team":"etabA"}`)
+	e.adminToken("orphan")
+	e.adminToken("legacy")
+	ctx := context.Background()
+	// An org admin's grant recorded as such, and a pre-provenance one.
+	if err := e.st.Grant(ctx, store.Binding{User: "orphan", Role: store.RoleMember, Team: "etabA", Provenance: store.ProvOrgAdmin}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.Grant(ctx, store.Binding{User: "legacy", Role: store.RoleMember, Team: "etabA"}); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"profile":"p"}`
+	e.check(toks, []call{
+		// another organisation's user
+		{"oa", "PUT", "/admin/users/bmem/roles", `{"role":"member","team":"etabA"}`, 403},
+		{"oa", "PUT", "/admin/users/bmem/profile", body, 403},
+		{"ob", "PUT", "/admin/users/bmem/profile", body, 200},
+		// a user provisioned into the organisation: an org admin may add roles
+		{"oa", "PUT", "/admin/users/amem/roles", `{"role":"viewer","org":"etabA"}`, 200},
+		{"oa", "PUT", "/admin/users/amem/profile", body, 200},
+		// a role an org admin granted is not provisioning
+		{"oa", "PUT", "/admin/users/orphan/profile", body, 403},
+		{"oa", "GET", "/admin/users/orphan/profile", "", 403},
+		{"oa", "PUT", "/admin/users/orphan/roles", `{"role":"viewer","team":"etabA"}`, 403},
+		{"master", "PUT", "/admin/users/orphan/profile", body, 200},
+		// unknown provenance is legitimate
+		{"oa", "PUT", "/admin/users/legacy/profile", body, 200},
+		// ... and a proxy admin places anybody
+		{"master", "PUT", "/admin/users/orphan/roles", `{"role":"viewer","team":"etabA"}`, 200},
+	})
+	got := map[string]store.Provenance{}
+	bs, err := e.st.Bindings(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range bs {
+		if b.User == "amem" && b.Role == store.RoleViewer {
+			got["org_admin_grant"] = b.Provenance
+		}
+		if b.User == "orphan" && b.Role == store.RoleViewer {
+			got["proxy_grant"] = b.Provenance
+		}
+	}
+	if got["org_admin_grant"] != store.ProvOrgAdmin || got["proxy_grant"] != store.ProvProxyAdmin {
+		t.Fatalf("recorded provenance: %v", got)
+	}
 }
 
 // Calibration from a synthetic history: the proposal is the p75 of the

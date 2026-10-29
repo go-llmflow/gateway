@@ -9,13 +9,13 @@ type memUsers struct {
 	users       map[string]*User
 	tokens      map[string]*UserToken
 	tokenByHash map[[32]byte]string
-	bindings    map[Binding]bool
+	bindings    map[Binding]Provenance // keyed by Binding.Key()
 }
 
 func (m *Memory) usersInit() {
 	if m.u.users == nil {
 		m.u = memUsers{users: map[string]*User{}, tokens: map[string]*UserToken{},
-			tokenByHash: map[[32]byte]string{}, bindings: map[Binding]bool{}}
+			tokenByHash: map[[32]byte]string{}, bindings: map[Binding]Provenance{}}
 	}
 }
 
@@ -177,10 +177,10 @@ func (m *Memory) Grant(_ context.Context, b Binding) error {
 	if _, ok := m.teams[b.Team]; b.Team != "" && !ok {
 		return ErrNotFound
 	}
-	if m.u.bindings[b] {
+	if _, ok := m.u.bindings[b.Key()]; ok {
 		return ErrExists
 	}
-	m.u.bindings[b] = true
+	m.u.bindings[b.Key()] = b.Provenance
 	return nil
 }
 
@@ -191,10 +191,10 @@ func (m *Memory) Ungrant(_ context.Context, b Binding) error {
 		return m.Fail
 	}
 	m.usersInit()
-	if !m.u.bindings[b] {
+	if _, ok := m.u.bindings[b.Key()]; !ok {
 		return ErrNotFound
 	}
-	delete(m.u.bindings, b)
+	delete(m.u.bindings, b.Key())
 	return nil
 }
 
@@ -206,8 +206,9 @@ func (m *Memory) Bindings(_ context.Context, user string) ([]Binding, error) {
 	}
 	m.usersInit()
 	out := []Binding{}
-	for b := range m.u.bindings {
+	for b, prov := range m.u.bindings {
 		if user == "" || b.User == user {
+			b.Provenance = prov
 			out = append(out, b)
 		}
 	}

@@ -70,7 +70,23 @@ func (e *env) hasBinding(b store.Binding) bool {
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	return slices.Contains(bs, b)
+	return slices.ContainsFunc(bs, func(x store.Binding) bool { return x.Key() == b.Key() })
+}
+
+// provenanceOf is the recorded provenance of a stored binding.
+func (e *env) provenanceOf(b store.Binding) store.Provenance {
+	e.t.Helper()
+	bs, err := e.st.Bindings(context.Background(), b.User)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	for _, x := range bs {
+		if x.Key() == b.Key() {
+			return x.Provenance
+		}
+	}
+	e.t.Fatalf("no binding %+v", b)
+	return ""
 }
 
 func (e *env) disabled(name string) bool {
@@ -120,6 +136,9 @@ func TestSCIMProvisioning(t *testing.T) {
 	e.scimOK(201, "POST", "/Groups", `{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"Ghost Lab","members":[{"value":"`+bob+`"}]}`)
 	if !e.hasBinding(member) {
 		t.Fatal("group member has no role on the mapped team")
+	}
+	if got := e.provenanceOf(member); got != store.ProvSCIM {
+		t.Fatalf("provisioned binding's provenance %q, want scim", got)
 	}
 	if got, _ := e.scim("POST", "/Groups", `{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"x","members":[{"value":"nobody"}]}`); got != 400 {
 		t.Fatalf("unknown member: %d", got)

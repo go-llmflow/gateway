@@ -78,6 +78,9 @@ func TestRBACScopes(t *testing.T) {
 		{"alice", "POST", "/admin/orgs", `{"name":"orgD"}`, 403},
 		{"alice", "DELETE", "/admin/orgs/etabA", "", 403},
 		{"alice", "POST", "/admin/users", `{"name":"newbie"}`, 201},
+		// a binding-less user is a proxy admin's to place (#104)
+		{"alice", "PUT", "/admin/users/newbie/roles", `{"role":"team_admin","team":"etabA2"}`, 403},
+		{"master", "PUT", "/admin/users/newbie/roles", `{"role":"member","team":"etabA"}`, 200},
 		{"alice", "PUT", "/admin/users/newbie/roles", `{"role":"team_admin","team":"etabA2"}`, 200},
 		{"alice", "DELETE", "/admin/users/newbie", "", 403},
 		// no escalation
@@ -91,7 +94,9 @@ func TestRBACScopes(t *testing.T) {
 		{"tom", "PUT", "/admin/budgets", `{"kind":"team","name":"etabA","period":"day","max_cost":10}`, 403},
 		{"tom", "PUT", "/admin/budgets", `{"kind":"project","name":"etabA/eval","period":"day","max_cost":3}`, 200},
 		{"tom", "POST", "/admin/keys", `{"team":"etabA","name":"service"}`, 201},
-		{"tom", "PUT", "/admin/users/vic/roles", `{"role":"viewer","team":"etabA"}`, 200},
+		// vic holds only an organisation role: not provisioned into a team (#104)
+		{"tom", "PUT", "/admin/users/vic/roles", `{"role":"viewer","team":"etabA"}`, 403},
+		{"tom", "PUT", "/admin/users/mia/roles", `{"role":"member","team":"etabA"}`, 409},
 		{"tom", "PUT", "/admin/users/mia/roles", `{"role":"team_admin","team":"etabA"}`, 403},
 		{"tom", "POST", "/admin/users", `{"name":"z"}`, 403},
 		// member: own keys only
