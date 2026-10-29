@@ -81,6 +81,7 @@ jobs:
           - { target: FuzzRead, pkg: ./spool }
           - { target: FuzzProjectHeader, pkg: ./gateway }
           - { target: FuzzReportsQuery, pkg: ./gateway }
+          - { target: FuzzCostCenter, pkg: ./config }
           - { target: FuzzExportWriters, pkg: ./gateway }
           - { target: FuzzSreport, pkg: ./slurm }
           - { target: FuzzMessagesStream, pkg: ./openai }
