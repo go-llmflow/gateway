@@ -244,7 +244,7 @@ func groupFluids(cells []fluidsCell, dims []string, f *config.Fluids) []FluidsRo
 // anyOrgView reports whether the principal may read something at the
 // organisation level: a proxy role, or org_admin or viewer of an organisation.
 func (p *principal) anyOrgView() bool {
-	if p.proxyView() {
+	if p.reportView() {
 		return true
 	}
 	for _, b := range p.bindings {
@@ -284,7 +284,7 @@ func (s *Server) fluidsData(r *http.Request, p *principal, from, to time.Time, d
 	// another one.
 	kept := all[:0:0]
 	for _, c := range all {
-		if p.proxyView() || c.Org != Unallocated && p.orgView(c.Org) {
+		if p.reportView() || c.Org != Unallocated && p.orgView(c.Org) {
 			kept = append(kept, c)
 		}
 	}

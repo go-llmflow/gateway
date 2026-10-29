@@ -53,7 +53,7 @@ func (s *Server) batch(p *principal, upload []byte) (*batchInput, error) {
 	b := &batchInput{ByOrg: map[string]float64{}, Period: rep.Period, Source: source}
 	for acct, h := range rep.ByAccount() {
 		org := s.cfg.Slurm.OrgOfAccount(acct)
-		if p.orgView(org) {
+		if p.reportView() || p.orgView(org) {
 			b.ByOrg[org] += h
 		}
 	}

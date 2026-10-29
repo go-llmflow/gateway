@@ -370,7 +370,7 @@ type ssoRoleHCL struct {
 // scope, org_admin an org, team roles a team, viewer one of the two.
 func validRoleScope(role, org, team string) bool {
 	switch role {
-	case "proxy_admin", "proxy_viewer":
+	case "proxy_admin", "proxy_viewer", "finance_viewer":
 		return org == "" && team == ""
 	case "org_admin":
 		return org != "" && team == "" && ValidName(org)
