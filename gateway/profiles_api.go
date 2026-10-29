@@ -86,6 +86,8 @@ func personAccess(p *principal, user string, binds []store.Binding, teams map[st
 	all, member := true, false
 	for _, b := range binds {
 		switch {
+		case b.Team != "" && !b.Provenance.Provisioned():
+			// A team role an org admin granted: not provisioning (#104).
 		case b.Team != "":
 			member = true
 			t, ok := teams[b.Team]

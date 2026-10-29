@@ -40,10 +40,49 @@ type Binding struct {
 	Role Role   `json:"role"`
 	Org  string `json:"org,omitempty"`
 	Team string `json:"team,omitempty"`
+	// Provenance says who created the binding (#104). It is not part of the
+	// binding's identity: Key() drops it.
+	Provenance Provenance `json:"provenance,omitempty"`
 }
+
+// Provenance is how a binding came to exist.
+type Provenance string
+
+const (
+	// ProvUnknown marks a binding stored before v0.18.2 (the migration's
+	// default). It is treated as legitimate: nothing says it was not.
+	ProvUnknown    Provenance = ""
+	ProvSCIM       Provenance = "scim"
+	ProvSSOClaim   Provenance = "sso_claim"
+	ProvProxyAdmin Provenance = "proxy_admin"
+	// ProvOrgAdmin is a binding granted by an administrator of an
+	// organisation or a team (not a proxy admin): it never makes a person
+	// provisioned into the organisation.
+	ProvOrgAdmin Provenance = "org_admin"
+)
+
+// Valid reports whether p is a provenance a binding may carry.
+func (p Provenance) Valid() bool {
+	switch p {
+	case ProvUnknown, ProvSCIM, ProvSSOClaim, ProvProxyAdmin, ProvOrgAdmin:
+		return true
+	}
+	return false
+}
+
+// Provisioned reports whether a binding of this provenance puts a person
+// into an organisation: the identity side (SCIM, an SSO claim), a proxy
+// admin, or a binding older than the provenance record.
+func (p Provenance) Provisioned() bool { return p != ProvOrgAdmin && p.Valid() }
+
+// Key is the binding without its provenance: what identifies it.
+func (b Binding) Key() Binding { b.Provenance = ProvUnknown; return b }
 
 // Validate checks that a binding names the scope its role needs.
 func (b Binding) Validate() error {
+	if !b.Provenance.Valid() {
+		return fmt.Errorf("unknown provenance %q", b.Provenance)
+	}
 	switch b.Role {
 	case RoleProxyAdmin, RoleProxyViewer:
 		if b.Org != "" || b.Team != "" {

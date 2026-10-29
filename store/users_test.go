@@ -95,6 +95,34 @@ func contractUsers(t *testing.T, s Store) {
 	if len(all) != 4 {
 		t.Fatalf("all bindings %+v", all)
 	}
+	// Provenance (#104): recorded, not part of the identity, validated;
+	// none recorded reads back as unknown.
+	if bs[0].Provenance != ProvUnknown {
+		t.Fatalf("a grant without provenance reads back %q", bs[0].Provenance)
+	}
+	must(s.Grant(ctx, Binding{User: "alice", Role: RoleMember, Team: "etabA", Provenance: ProvSCIM}))
+	if err := s.Grant(ctx, Binding{User: "alice", Role: RoleMember, Team: "etabA", Provenance: ProvOrgAdmin}); !errors.Is(err, ErrExists) {
+		t.Fatalf("same binding, another provenance: %v", err)
+	}
+	if err := s.Grant(ctx, Binding{User: "alice", Role: RoleViewer, Team: "etabA", Provenance: "root"}); err == nil {
+		t.Fatal("an unknown provenance accepted")
+	}
+	ab, err := s.Bindings(ctx, "alice")
+	must(err)
+	found := false
+	for _, b := range ab {
+		if b.Role == RoleMember && b.Provenance == ProvSCIM {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("provenance not stored: %+v", ab)
+	}
+	// Ungrant by identity, whatever the provenance.
+	must(s.Ungrant(ctx, Binding{User: "alice", Role: RoleMember, Team: "etabA"}))
+	if !ProvUnknown.Provisioned() || !ProvSCIM.Provisioned() || !ProvSSOClaim.Provisioned() || !ProvProxyAdmin.Provisioned() || ProvOrgAdmin.Provisioned() || Provenance("x").Provisioned() {
+		t.Fatal("Provisioned")
+	}
 	must(s.Ungrant(ctx, Binding{User: "bob", Role: RoleViewer, Org: "orgA"}))
 	if err := s.Ungrant(ctx, Binding{User: "bob", Role: RoleViewer, Org: "orgA"}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("ungrant twice: %v", err)

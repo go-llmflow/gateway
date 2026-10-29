@@ -2210,6 +2210,28 @@ workload profiles.
   admin no longer assigns the profile of another organisation admin who is
   in no team; ask a proxy admin.
 
+### Security fix in v0.18.2: who may place a person in an organisation (#104)
+
+v0.18.1 still let an organisation admin pull a user who had no binding (or
+belonged to another organisation) into their organisation by granting them a
+team role, and then act on them. Every binding now records its **provenance**:
+`scim`, `sso_claim`, `proxy_admin` or `org_admin` (shown as `provenance` in
+`GET /admin/users/{name}/roles`).
+
+- An organisation or team admin may grant a role only to a user already
+  provisioned into that organisation: one holding a team binding of that
+  organisation created by SCIM, an SSO claim or a proxy admin. A user with no
+  binding, or in another organisation, is a proxy admin's to place (a user
+  created by an org admin needs a proxy admin's first grant).
+- A team binding an org admin granted does not make the person theirs: it is
+  ignored by the profile and user-budget access rules. SCIM re-creates a
+  binding it also wants under its own provenance.
+- **Migration.** The column is added automatically
+  (`provenance text NOT NULL DEFAULT ''`). Bindings stored before v0.18.2 have
+  an **unknown** provenance, which is treated as legitimate: nothing says they
+  were not, so no existing access changes at the upgrade. Only grants made
+  after it are classified.
+
 ## References
 
 Opened while building v0.1.0–v0.4.0, and cited where used above:
