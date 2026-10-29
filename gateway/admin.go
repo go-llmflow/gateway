@@ -905,10 +905,10 @@ func (s *Server) userBudgetAccess(r *http.Request, p *principal, name string) (r
 			// colleagues' to read.
 			read = read || p.teamAdmin(t) || p.orgView(t.Org) || p.has(store.RoleViewer, "", t.Name)
 			write = write || p.teamAdmin(t)
-		case b.Org != "":
-			read = read || p.orgView(b.Org)
-			write = write || p.orgAdmin(b.Org)
 		}
+		// An organisation-level binding (viewer, org_admin) is not
+		// membership: an organisation admin can grant one to anybody, so it
+		// decides nothing here (#99, as personAccess).
 	}
 	return read, write, nil
 }

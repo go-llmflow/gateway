@@ -97,7 +97,8 @@ func TestRollingReset(t *testing.T) {
 
 // contractRolling: a rolling window's ledger counts the buckets in the
 // window, gives the room back as they leave it, says when, and settles held
-// and unheld records in the bucket of their admission.
+// and unheld records in the bucket of their end (bucketAt: when the request
+// finished; a held one settles in the bucket its record says).
 func contractRolling(t *testing.T, s Store) {
 	t.Helper()
 	ctx := context.Background()

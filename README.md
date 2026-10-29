@@ -2186,6 +2186,30 @@ refused instead of building unpatched code.
 6. A tool server's error message (at most 4 KiB) is returned to the MCP
    client: tool servers are configured, so they are trusted.
 
+### Security fixes in v0.18.1
+
+Two defects of v0.18.0, found by a post-merge review. Upgrade if you use
+workload profiles.
+
+- **#98, a hard-budget hole.** A rolling window kept only twice its current
+  length of spend. Widening `session_window` (1h to 5h) therefore forgot
+  spend that was inside the new window, and a session budget could be
+  exceeded. A rolling budget now keeps its buckets for the longest window that
+  can apply (`MaxRollingWindow`, 7 days: at most 2016 buckets of 5 minutes per
+  budget), on both the memory and the PostgreSQL store. Spend lost by a
+  v0.18.0 prune before the upgrade is not recoverable from the buckets; it is
+  still in the usage records.
+- **#99, an authorization bypass.** An organisation admin could grant their
+  organisation's `viewer` role to any existing user, which made that person
+  theirs to assign a profile, read and delete. Who a person belongs to is now
+  decided by their **team** bindings (which SSO and SCIM also create). An
+  organisation-level binding (`viewer`, `org_admin`) is authority, not
+  membership: it gives no access to the person, whoever granted it. A person
+  with only such bindings, or none, or a proxy role, is the proxy admins'. The
+  same rule applies to the user budgets API. Consequence: an organisation
+  admin no longer assigns the profile of another organisation admin who is
+  in no team; ask a proxy admin.
+
 ## References
 
 Opened while building v0.1.0–v0.4.0, and cited where used above:

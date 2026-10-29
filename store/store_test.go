@@ -581,6 +581,7 @@ func TestPostgresContract(t *testing.T) {
 	contractLedger(t, p)
 	contractArming(t, p)
 	contractRolling(t, p)
+	contractRollingWindows(t, func() Store { return p }, 20)
 	contractProfiles(t, p)
 
 	if _, err := OpenPostgres(ctx, "postgres://u:hunter2@[::1"); err == nil || strings.Contains(err.Error(), "hunter2") {

@@ -232,6 +232,8 @@ func TestProfileAuthzMatrix(t *testing.T) {
 	e.adminToken("both", `{"role":"member","team":"etabA"}`, `{"role":"member","team":"etabB"}`)
 	e.adminToken("loner")
 	e.adminToken("oadm", `{"role":"org_admin","org":"etabA"}`)
+	e.adminToken("twoorg", `{"role":"viewer","org":"etabA"}`, `{"role":"viewer","org":"etabB"}`)
+	e.adminToken("mixed", `{"role":"member","team":"etabA"}`, `{"role":"org_admin","org":"etabB"}`)
 	body := `{"profile":"p"}`
 	put := func(who, user string, want int) call {
 		return call{who, "PUT", "/admin/users/" + user + "/profile", body, want}
@@ -248,8 +250,15 @@ func TestProfileAuthzMatrix(t *testing.T) {
 		// no binding, or a JWT's user: proxy admins only.
 		put("oa", "loner", 403), put("proxy", "loner", 200),
 		put("oa", "jwt-0123abcd", 403), put("proxy", "jwt-0123abcd", 200),
-		// an organisation admin of etabA: by the proxy admins and etabA's admins.
-		put("ta", "oadm", 403), put("oa", "oadm", 200),
+		// an organisation-level binding is authority, not membership (#99):
+		// a person who only has org_admin or viewer roles is the proxy
+		// admins', whoever granted them.
+		put("ta", "oadm", 403), put("oa", "oadm", 403), put("proxy", "oadm", 200),
+		// two organisation-level bindings: nobody but the proxy admins.
+		put("oa", "twoorg", 403), put("ob", "twoorg", 403), put("proxy", "twoorg", 200),
+		get("oa", "twoorg", 403), get("ob", "twoorg", 403),
+		// a team member who also holds an org role elsewhere stays etabA's.
+		put("oa", "mixed", 200), put("ob", "mixed", 403),
 		// reading
 		get("alice", "alice", 200), get("viewA", "alice", 200), get("ob", "alice", 403), get("alice", "both", 403),
 		// bad input
@@ -271,6 +280,34 @@ func TestProfileAuthzMatrix(t *testing.T) {
 	if strings.Contains(out, `"user":"alice"`) || !strings.Contains(out, `"user":"both"`) || !strings.Contains(out, `"can_assign":false`) {
 		t.Fatalf("ob's listing: %s", out)
 	}
+}
+
+// #99: an organisation admin cannot claim a person by granting them an
+// organisation-level role first: assign, read and delete stay refused after
+// every grant they are allowed to make.
+func TestProfileGrantThenActRefused(t *testing.T) {
+	up := newFakeVLLM(t)
+	e := newEnv(t, profileConfig(up.URL()))
+	toks := map[string]string{
+		"oa": e.adminToken("oa", `{"role":"org_admin","org":"etabA"}`),
+	}
+	e.adminToken("loner")
+	e.check(toks, []call{
+		{"oa", "PUT", "/admin/users/loner/profile", `{"profile":"p"}`, 403},
+		{"oa", "PUT", "/admin/users/loner/roles", `{"role":"viewer","org":"etabA"}`, 200},
+		{"oa", "PUT", "/admin/users/loner/profile", `{"profile":"p"}`, 403},
+		{"oa", "GET", "/admin/users/loner/profile", "", 403},
+		{"oa", "DELETE", "/admin/users/loner/profile", "", 403},
+		{"oa", "PUT", "/admin/users/loner/roles", `{"role":"org_admin","org":"etabA"}`, 200},
+		{"oa", "PUT", "/admin/users/loner/profile", `{"profile":"p"}`, 403},
+		{"oa", "DELETE", "/admin/users/loner/roles?role=viewer&org=etabA", "", 204},
+		{"oa", "DELETE", "/admin/users/loner/roles?role=org_admin&org=etabA", "", 204},
+	})
+	// The user budgets API decides alike.
+	e.check(toks, []call{
+		{"oa", "PUT", "/admin/users/loner/roles", `{"role":"viewer","org":"etabA"}`, 200},
+		{"oa", "PUT", "/admin/budgets", `{"kind":"user","name":"loner","period":"week","max_cost":9}`, 403},
+	})
 }
 
 // Calibration from a synthetic history: the proposal is the p75 of the
