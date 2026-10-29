@@ -416,16 +416,28 @@ func recordAt(r Record) time.Time {
 	return r.AdmittedAt
 }
 
+// retainFrom is the oldest bucket a rolling row keeps at now, whatever its
+// current window d: the start of the longest window that may apply
+// (MaxRollingWindow, which validation enforces), so that widening the window
+// later finds the earlier spend (#98). A variable so that a test can plant
+// the old behaviour (retain 2*d) and see the property test fail.
+var retainFrom = func(now time.Time, _ time.Duration) time.Time {
+	return WindowStart(now, MaxRollingWindow)
+}
+
 // windowSpent is a rolling row's spent at now for a window of d; it drops
-// the buckets that left the window long ago.
+// only the buckets older than any window can reach (MaxRollingWindow, not d:
+// the window may be widened later, and spend that can still fall inside a
+// window that may apply is never forgotten, #98).
 func (l *memLedger) windowSpent(now time.Time, d time.Duration) int64 {
 	from := WindowStart(now, d).Unix()
+	keep := retainFrom(now, d).Unix()
 	var s int64
 	for b, v := range l.buckets {
 		switch {
 		case b >= from:
 			s = min(s+v, MaxLedgerNano)
-		case b < from-int64(d/time.Second):
+		case b < keep:
 			delete(l.buckets, b)
 		}
 	}

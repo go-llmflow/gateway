@@ -89,11 +89,12 @@ func seedLedger(ctx context.Context, tx pgx.Tx, k BudgetKey, p Period, start, no
 }
 
 // windowSpent is a rolling row's spent at now (its ledger row held), and
-// drops the buckets that left the window long ago.
+// drops only the buckets older than any window can reach (MaxRollingWindow,
+// not d: the window may be widened later, #98).
 func windowSpent(ctx context.Context, tx pgx.Tx, k BudgetKey, d time.Duration, now time.Time) (int64, error) {
 	from := WindowStart(now, d)
 	if _, err := tx.Exec(ctx, `DELETE FROM llmflow_budget_buckets WHERE `+keyWhere+` AND bucket_start < $5`,
-		append(keyArgs(k), from.Add(-d))...); err != nil {
+		append(keyArgs(k), retainFrom(now, d))...); err != nil {
 		return 0, err
 	}
 	var s int64
