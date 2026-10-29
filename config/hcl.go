@@ -74,7 +74,8 @@ type fileHCL struct {
 	Tracing              *tracingHCL     `hcl:"tracing,block"`
 	MCPServers           []mcpServerHCL  `hcl:"mcp_server,block"`
 	Budgets              *budgetsHCL     `hcl:"budgets,block"`
-	Workday              *workdayHCL     `hcl:"workday,block"`
+	Fluids               *fluidsHCL      `hcl:"fluids,block"`
+	Workday             *workdayHCL     `hcl:"workday,block"`
 	Profiles             []profileHCL    `hcl:"profile,block"`
 	DefaultProfile       *string         `hcl:"default_profile,optional"`
 	DefaultProfileRange  hcl.Range       `hcl:"default_profile,attr_value_range"`
@@ -597,6 +598,9 @@ type upstreamHCL struct {
 	BaseURL      string    `hcl:"base_url"`
 	BaseURLRange hcl.Range `hcl:"base_url,attr_value_range"`
 	KeyFile      *string   `hcl:"key_file,optional"`
+	// DcgmURL is the NVIDIA DCGM exporter of this node (fluids, #97).
+	DcgmURL      *string   `hcl:"dcgm_url,optional"`
+	DcgmURLRange hcl.Range `hcl:"dcgm_url,attr_value_range"`
 	DefRange     hcl.Range `hcl:",def_range"`
 }
 
@@ -1502,6 +1506,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	c.MCPServers = v.mcpServers(raw.MCPServers)
 	v.external(raw, c)
 	v.budgets(raw, c)
+	v.fluids(raw, c)
 	v.profiles(raw, c)
 	// Every *_file attribute is a secret reference: a file, or a field of
 	// an OpenBao/Vault KV v2 secret (package secret).
