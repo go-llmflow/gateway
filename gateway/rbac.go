@@ -135,7 +135,9 @@ func (s *Server) userPrincipal(ctx context.Context, h [32]byte) (*principal, err
 // canGrant reports whether p may grant or remove binding b. Proxy roles
 // only by a proxy admin; organisation roles by an admin of that
 // organisation; team_admin by an admin of the team's organisation; member
-// and team viewer by an admin of the team.
+// and team viewer by an admin of the team. An organisation-level role is
+// authority, not membership: it never makes the person the granter's to
+// administer (personAccess, userBudgetAccess decide from team bindings).
 func (s *Server) canGrant(ctx context.Context, p *principal, b store.Binding) (bool, error) {
 	switch b.Role {
 	case store.RoleProxyAdmin, store.RoleProxyViewer:

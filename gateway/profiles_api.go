@@ -67,15 +67,27 @@ func (s *Server) listProfiles(w http.ResponseWriter, _ *http.Request, _ *princip
 
 // personAccess decides from a person's bindings whether p reads and
 // assigns their profile (teams: every team, by name).
+//
+// Who a person belongs to is decided by their TEAM bindings only (a team
+// membership, which SSO and SCIM also create). An organisation-level binding
+// (viewer or org_admin of an organisation) is authority granted to a person,
+// not membership: an organisation admin can grant one to any existing user
+// (canGrant), so counting it would let them claim anybody by granting their
+// own organisation's viewer role first (#99). Such bindings neither give
+// access nor are required for it; a person with no team binding, or with a
+// proxy role, is the proxy admins' only. Writing needs every team of the
+// person to be the caller's (a person in two organisations is decided by
+// neither alone).
 func personAccess(p *principal, user string, binds []store.Binding, teams map[string]store.Team) (read, write bool) {
 	read, write = p.proxyView() || p.name == user && !p.master, p.proxyAdmin()
-	if write || len(binds) == 0 {
+	if write {
 		return read, write
 	}
-	all := true
+	all, member := true, false
 	for _, b := range binds {
 		switch {
 		case b.Team != "":
+			member = true
 			t, ok := teams[b.Team]
 			if !ok {
 				all = false
@@ -84,13 +96,12 @@ func personAccess(p *principal, user string, binds []store.Binding, teams map[st
 			read = read || p.teamAdmin(t) || p.orgView(t.Org) || p.has(store.RoleViewer, "", t.Name)
 			all = all && p.teamAdmin(t)
 		case b.Org != "":
-			read = read || p.orgView(b.Org)
-			all = all && p.orgAdmin(b.Org)
+			// not membership: see above
 		default: // a proxy role: the proxy admins' only
 			all = false
 		}
 	}
-	return read, all
+	return read, all && member
 }
 
 // validPerson accepts a name that can be a person's: a gateway user name,
