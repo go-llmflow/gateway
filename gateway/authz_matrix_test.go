@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-llmflow/gateway/config"
+	"github.com/go-llmflow/gateway/energy"
 	"github.com/go-llmflow/gateway/store"
 )
 
@@ -66,6 +68,11 @@ func matrixSetup(e *env) matrixFixture {
 	// Spend of etabA, for the report routes' leak check.
 	if err := e.st.InsertRecords(context.Background(), []store.Record{{Time: time.Now().UTC(), Org: "etabA", Team: "etabA",
 		KeyID: f.serviceKey, Model: "llama", Pool: "b300", PromptTokens: 10, Cost: 1, Status: 200}}); err != nil {
+		t.Fatal(err)
+	}
+	// Measured energy of etabA, for the fluids route's leak check.
+	if err := e.st.SaveEnergy(context.Background(), store.EnergyInterval{Upstream: "n", Start: time.Now().UTC().Add(-time.Hour), End: time.Now().UTC().Add(-59 * time.Minute), TotalMJ: 100},
+		[]energy.Attributed{{Consumer: energy.Consumer{Org: "etabA", Team: "etabA", User: "member"}, MJ: 100}}); err != nil {
 		t.Fatal(err)
 	}
 	// A grant of a replica that is gone, on etabA's team budget.
@@ -144,6 +151,10 @@ func matrixRows() []matrixRow {
 		// and the budget's own organisation admins only.
 		{"POST /admin/budgets/release-replica", "POST", p("/admin/budgets/release-replica"), `{"replica":"ghost"}`, orgAdmins, nil},
 		{"GET /admin/spend", "GET", p("/admin/spend" + span), "", nil, outsiders},
+		// Fluids (#97): the proxy roles and the organisation-level roles; a
+		// team-level role has no energy view, and another organisation's admin
+		// reads nothing of etabA's.
+		{"GET /admin/fluids", "GET", p("/admin/fluids" + span), "", []string{"master", "padmin", "pview", "oadmin", "oadminC", "oviewer"}, []string{"oadminC"}},
 		{"GET /admin/usage.csv", "GET", p("/admin/usage.csv" + span), "", nil, outsiders},
 		{"GET /admin/export", "GET", p("/admin/export" + span + "&format=csv"), "", nil, outsiders},
 		{"POST /admin/export", "POST", p("/admin/export" + span + "&format=csv"), "", nil, outsiders},
@@ -169,6 +180,7 @@ func matrixRows() []matrixRow {
 func TestAuthzMatrix(t *testing.T) {
 	up := newFakeVLLM(t)
 	cfg := profileConfig(up.URL()) // the profile routes answer 404 without profile blocks
+	cfg.Fluids = &config.Fluids{PUE: 1, IdleEnergy: "by_share", WPrefill: 1, WDecode: 1}
 	rows := matrixRows()
 
 	// Every route of the router has a row, and every row a route.

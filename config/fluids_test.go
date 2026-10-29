@@ -50,22 +50,19 @@ func TestParseFluidsErrors(t *testing.T) {
 	for _, c := range []struct{ name, src, want string }{
 		{"pue below one", valid + `fluids { pue = 0.9 }`, "Invalid pue"},
 		{"pue huge", valid + `fluids { pue = 50 }`, "Invalid pue"},
-		{"price negative", valid + `fluids { price_per_kwh = -1, currency = "EUR" }`, "Invalid price_per_kwh"},
+		{"price negative", valid + "fluids {\n price_per_kwh = -1\n currency = \"EUR\"\n}", "Invalid price_per_kwh"},
 		{"price without currency", valid + `fluids { price_per_kwh = 0.2 }`, "Missing currency"},
 		{"currency is a report unit", valid + `fluids { currency = "gpu_hours" }`, "Invalid currency"},
 		{"currency garbage", valid + `fluids { currency = "E U R" }`, "Invalid currency"},
 		{"idle mode", valid + `fluids { idle_energy = "by_luck" }`, "Invalid idle_energy"},
-		{"weights zero", valid + `fluids { w_prefill = 0, w_decode = 0 }`, "Invalid weights"},
-		{"interval", valid + `fluids { interval = "0s" }`, "Invalid interval"},
-		{"period label", valid + `fluids { period "July" { pue = 1.2 } }`, "Invalid period"},
-		{"period twice", valid + `fluids { period "2026-07" { pue = 1.2 }
- period "2026-07" { pue = 1.3 } }`, "Duplicate period"},
+		{"weights zero", valid + "fluids {\n w_prefill = 0\n w_decode = 0\n}", "Invalid weights"},
+		{"interval", valid + "fluids {\n interval = \"500ms\"\n}", "Invalid interval"},
+		{"period label", valid + "fluids {\n period \"July\" {\n pue = 1.2\n }\n}", "Invalid period"},
+		{"period twice", valid + "fluids {\n period \"2026-07\" {\n pue = 1.2\n }\n period \"2026-07\" {\n pue = 1.3\n }\n}", "Duplicate period"},
 		{"dcgm credentials", strings.Replace(valid, `upstream "gpu01" { base_url = "http://10.0.0.1:8000" }`,
-			`upstream "gpu01" { base_url = "http://10.0.0.1:8000"
- dcgm_url = "http://u:p@10.0.0.1:9400/metrics" }`, 1), "Invalid dcgm_url"},
+			"upstream \"gpu01\" {\n base_url = \"http://10.0.0.1:8000\"\n dcgm_url = \"http://u:p@10.0.0.1:9400/metrics\"\n}", 1), "Invalid dcgm_url"},
 		{"dcgm scheme", strings.Replace(valid, `upstream "gpu01" { base_url = "http://10.0.0.1:8000" }`,
-			`upstream "gpu01" { base_url = "http://10.0.0.1:8000"
- dcgm_url = "file:///etc/passwd" }`, 1), "Invalid dcgm_url"},
+			"upstream \"gpu01\" {\n base_url = \"http://10.0.0.1:8000\"\n dcgm_url = \"file:///etc/passwd\"\n}", 1), "Invalid dcgm_url"},
 	} {
 		_, err := parse(c.src)
 		if err == nil || !strings.Contains(err.Error(), c.want) {

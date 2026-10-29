@@ -32,6 +32,7 @@ type Memory struct {
 	scimDocs   memSCIM
 	audit      memAudit
 	prof       memProfiles
+	en         memEnergy
 	MaxRecords int
 	// Fail, when set, is returned by every call (fault injection). Set it
 	// with SetFail.
