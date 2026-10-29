@@ -178,6 +178,28 @@ func TestProfileDefaultAtFirstRequest(t *testing.T) {
 	}
 }
 
+// A person's standing carries the shares used and the weekly window's
+// identity, for response headers and threshold notices.
+func TestProfilePersonShares(t *testing.T) {
+	up := newFakeVLLM(t)
+	e := newEnv(t, profileConfig(up.URL()))
+	alice := e.adminToken("alice", `{"role":"member","team":"etabA"}`)
+	e.check(nil, []call{{"master", "PUT", "/admin/users/alice/profile", `{"profile":"p"}`, 200}})
+	if code := e.chatWith(e.ownKey(alice), chat20); code != 200 {
+		t.Fatalf("request: %d", code)
+	}
+	e.waitRecords(1)
+	pe := e.srv.personOf("alice")
+	if len(pe.Units) != 1 {
+		t.Fatalf("%+v", pe)
+	}
+	u := pe.Units[0]
+	// 0.164 of 0.4 day; 0.164 of the session's 1 day.
+	if u.WeekPct < 40 || u.WeekPct > 42 || u.SessionPct < 16 || u.SessionPct > 17 || !u.WeekStart.Equal(store.Week.Start(time.Now())) {
+		t.Fatalf("shares: %+v", u)
+	}
+}
+
 // Without a workday in the request's unit, a priced request under a
 // profile is refused: nothing could hold its cost against the profile.
 func TestProfileUncalibratedUnitRefused(t *testing.T) {

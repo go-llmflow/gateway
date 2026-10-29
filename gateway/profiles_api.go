@@ -135,11 +135,16 @@ func (s *Server) userProfileAccess(ctx context.Context, p *principal, user strin
 
 // unitUse is a person's standing in one unit, in workdays.
 type unitUse struct {
-	Unit           string    `json:"unit"`
-	Workday        float64   `json:"workday"`
-	WeekDays       float64   `json:"week_days"`
-	WeekUsedDays   float64   `json:"week_used_days"`
-	WeekResets     time.Time `json:"week_resets"`
+	Unit         string    `json:"unit"`
+	Workday      float64   `json:"workday"`
+	WeekDays     float64   `json:"week_days"`
+	WeekUsedDays float64   `json:"week_used_days"`
+	WeekResets   time.Time `json:"week_resets"`
+	// WeekStart identifies the weekly window instance (the ISO week's
+	// Monday 00:00 UTC); WeekPct and SessionPct are the shares used.
+	WeekStart      time.Time `json:"week_start"`
+	WeekPct        float64   `json:"week_used_pct"`
+	SessionPct     float64   `json:"session_used_pct"`
 	SessionDays    float64   `json:"session_days"`
 	SessionUsed    float64   `json:"session_used_days"`
 	SessionWindow  string    `json:"session_window"`
@@ -193,6 +198,13 @@ func (s *Server) personOf(user string) person {
 		uu := unitUse{Unit: store.UnitName(u), Workday: wd, WeekDays: prof.Days, WeekUsedDays: used(store.ScopeProfileWeek),
 			WeekResets: store.Week.ResetAt(now), SessionDays: prof.SessionShare, SessionUsed: used(store.ScopeProfileSession),
 			SessionWindow: fmtWindow(s.cfg.Profiles.SessionWindow), SessionWhole: session.ResetAt(now)}
+		uu.WeekStart = store.Week.Start(now)
+		if uu.WeekDays > 0 {
+			uu.WeekPct = round2(100 * uu.WeekUsedDays / uu.WeekDays)
+		}
+		if uu.SessionDays > 0 {
+			uu.SessionPct = round2(100 * uu.SessionUsed / uu.SessionDays)
+		}
 		if overflow {
 			uu.OverflowDays, uu.OverflowUsed, uu.OverflowResets = prof.OverflowCap, used(store.ScopeProfileOverflow), store.Month.ResetAt(now)
 		}
