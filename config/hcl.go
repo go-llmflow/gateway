@@ -75,7 +75,7 @@ type fileHCL struct {
 	MCPServers           []mcpServerHCL  `hcl:"mcp_server,block"`
 	Budgets              *budgetsHCL     `hcl:"budgets,block"`
 	Fluids               *fluidsHCL      `hcl:"fluids,block"`
-	Workday             *workdayHCL     `hcl:"workday,block"`
+	Workday              *workdayHCL     `hcl:"workday,block"`
 	Profiles             []profileHCL    `hcl:"profile,block"`
 	DefaultProfile       *string         `hcl:"default_profile,optional"`
 	DefaultProfileRange  hcl.Range       `hcl:"default_profile,attr_value_range"`
