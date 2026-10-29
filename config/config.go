@@ -93,6 +93,9 @@ type Config struct {
 	// day, a week or a model used by fewer distinct people is not shown
 	// (default 5, at least 2: one person is never a figure).
 	AdoptionMinUsers int
+	// DecisionReport schedules the monthly decision report into an export;
+	// nil: reports are only downloaded (#97).
+	DecisionReport *DecisionReport
 	// Profiles are the workload profiles (profiles.go, #90).
 	Profiles Profiles
 	// SoftQuotas are the warnings before a window runs out (softquotas.go, #96).

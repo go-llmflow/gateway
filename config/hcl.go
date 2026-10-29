@@ -77,6 +77,7 @@ type fileHCL struct {
 	Fluids               *fluidsHCL      `hcl:"fluids,block"`
 	AdoptionMinUsers     *int            `hcl:"adoption_min_users,optional"`
 	AdoptionMinRange     hcl.Range       `hcl:"adoption_min_users,attr_value_range"`
+	DecisionReport       *decisionHCL    `hcl:"decision_report,block"`
 	Workday              *workdayHCL     `hcl:"workday,block"`
 	Profiles             []profileHCL    `hcl:"profile,block"`
 	DefaultProfile       *string         `hcl:"default_profile,optional"`
@@ -1521,6 +1522,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	v.budgets(raw, c)
 	v.fluids(raw, c)
 	v.adoptionPrivacy(raw, c)
+	v.decisionReport(raw, c)
 	v.profiles(raw, c)
 	v.softQuotas(raw, c)
 	// Every *_file attribute is a secret reference: a file, or a field of
