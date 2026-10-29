@@ -1256,6 +1256,43 @@ profile lookup and a handful of in-memory reads per request (`usageHeaders`).
   with their requests, and the overall figure is hidden below k. k is
   `adoption_min_users` (top level, default 5, at least 2).
 
+### The monthly decision report (#97)
+
+`GET /admin/decision?from=&to=&format=pdf|xlsx|json` gathers the figures above
+for a period (at most 366 days) into the document a partnership's steering
+committee reads:
+
+- **PDF**, typeset by `go-pdfkit/html2pdf` v0.3.0: A4, page numbers in the
+  margin (`counter(page)`), a table of contents whose page numbers come from CSS
+  `target-counter`, then **one page per partner** (guaranteed capacity, use in
+  share, borrowed and lent GPU-hours, net balance, inference GPU-hours against the
+  previous period, fluids on measured energy, latency in share against borrowing,
+  active people, cost centre), then the lending matrix, fluids, adoption,
+  chargeback rows and go-plot charts. The HTML is a golden file in the tests.
+- **XLSX**: sheets Partners, Lending matrix, Chargeback and Adoption; typed
+  cells, one column per unit.
+- **json**: the same data. Proxy roles and `finance_viewer` read every partner and
+  the matrix; `org_admin` and org-level viewers their own partner only. Every
+  download is audited.
+
+Scheduled delivery:
+
+```hcl
+decision_report {
+  destination = "reports"          # an export block (S3-compatible or a directory)
+  formats     = ["pdf", "xlsx"]    # default both
+  day         = 2                  # of the month, UTC, 1..28 (default 2)
+}
+```
+
+From that day on, the previous calendar month is written once to the export as
+`decision/YYYY-MM/decision-YYYY-MM.pdf` and `.xlsx` (write-once under Object
+Lock where the export has it) and audited (actor `decision-report`). **The
+gateway sends no email**: it has no SMTP client, and adding one means deciding
+credentials and recipients' trust. The delivered object is what a mail gateway
+or a bucket notification forwards. The existence of the object is the state, so
+a restart or a second replica does nothing twice.
+
 ### Cost units (since v0.12.0)
 
 A cost has a **unit**. vLLM models cost GPU-hours by default (`unit`
