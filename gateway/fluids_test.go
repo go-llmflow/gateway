@@ -93,13 +93,20 @@ func TestFluidsEndToEnd(t *testing.T) {
 	dc := newFakeDCGM(t)
 	cfg := fluidsConfig(up.URL(), dc.srv.URL)
 	clock := time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC)
-	e := newEnv(t, cfg, WithClock(func() time.Time { return clock }))
-	ctx := context.Background()
-	es := store.EnergyStore(e.st)
 	nodes := energyNodes(cfg)
 	if len(nodes) != 1 || len(nodes[0].labels) != 1 || nodes[0].labels[0] != redactURL(up.URL()) {
 		t.Fatalf("nodes %+v", nodes)
 	}
+	// The test drives the rounds itself, on its own clock: the server must
+	// not start a scraping loop of its own on the same exporter.
+	for i := range cfg.ModelGroups {
+		for j := range cfg.ModelGroups[i].Upstreams {
+			cfg.ModelGroups[i].Upstreams[j].DcgmURL = ""
+		}
+	}
+	e := newEnv(t, cfg, WithClock(func() time.Time { return clock }))
+	ctx := context.Background()
+	es := store.EnergyStore(e.st)
 	round := func(d time.Duration) { clock = clock.Add(d); e.srv.fluidsRound(ctx, es, nodes) }
 
 	round(0) // baseline
