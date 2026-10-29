@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -92,7 +93,10 @@ func TestFluidsEndToEnd(t *testing.T) {
 	up := newFakeVLLM(t)
 	dc := newFakeDCGM(t)
 	cfg := fluidsConfig(up.URL(), dc.srv.URL)
-	clock := time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC)
+	// The server's background loops read the clock while the test moves it.
+	var clockNs atomic.Int64
+	clockNs.Store(time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC).UnixNano())
+	now := func() time.Time { return time.Unix(0, clockNs.Load()).UTC() }
 	nodes := energyNodes(cfg)
 	if len(nodes) != 1 || len(nodes[0].labels) != 1 || nodes[0].labels[0] != redactURL(up.URL()) {
 		t.Fatalf("nodes %+v", nodes)
@@ -104,10 +108,10 @@ func TestFluidsEndToEnd(t *testing.T) {
 			cfg.ModelGroups[i].Upstreams[j].DcgmURL = ""
 		}
 	}
-	e := newEnv(t, cfg, WithClock(func() time.Time { return clock }))
+	e := newEnv(t, cfg, WithClock(now))
 	ctx := context.Background()
 	es := store.EnergyStore(e.st)
-	round := func(d time.Duration) { clock = clock.Add(d); e.srv.fluidsRound(ctx, es, nodes) }
+	round := func(d time.Duration) { clockNs.Add(int64(d)); e.srv.fluidsRound(ctx, es, nodes) }
 
 	round(0) // baseline
 	// 10:00-10:05: etabA 200 tokens of work, etabB 600; 2 kWh measured.
@@ -116,7 +120,7 @@ func TestFluidsEndToEnd(t *testing.T) {
 			PromptTokens: p, CompletionTokens: c, Cost: 1, Status: 200}
 	}
 	if err := e.st.InsertRecords(ctx, []store.Record{
-		rec("etabA", 100, 100, clock.Add(time.Minute)), rec("etabB", 300, 300, clock.Add(2*time.Minute)),
+		rec("etabA", 100, 100, now().Add(time.Minute)), rec("etabB", 300, 300, now().Add(2*time.Minute)),
 	}); err != nil {
 		t.Fatal(err)
 	}

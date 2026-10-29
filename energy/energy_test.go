@@ -209,6 +209,28 @@ func TestAttributionSumsToMeasured(t *testing.T) {
 	}
 }
 
+// Golden values: 10 s at an idle floor of 50 W is 500 000 mJ per GPU. GPU a
+// used 600 000 mJ (500 000 idle, 100 000 active), GPU b 100 000 (all idle: it
+// cannot idle more than it used). Doubling or halving the floor changes both
+// parts, which no sum-only check would see.
+func TestSplitIdleGolden(t *testing.T) {
+	iv := Interval{Start: at(0), End: at(10), PerGPU: map[string]int64{"a": 600_000, "b": 100_000}, MJ: 700_000}
+	for _, c := range []struct {
+		watts        float64
+		active, idle int64
+	}{
+		{0, 700_000, 0},
+		{50, 100_000, 600_000},
+		{25, 350_000, 350_000}, // floor 250 000: a 250 000 idle, b 100 000 idle
+		{100, 0, 700_000},      // the floor exceeds what either used
+	} {
+		a, i := iv.SplitIdle(c.watts)
+		if a != c.active || i != c.idle {
+			t.Errorf("%v W: active %d idle %d, want %d and %d", c.watts, a, i, c.active, c.idle)
+		}
+	}
+}
+
 func TestIdleUnallocated(t *testing.T) {
 	a, _ := AllocateIdle(100, IdleByUsage, nil, nil)
 	if a[""] != 100 {
