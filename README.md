@@ -1015,6 +1015,35 @@ model "llama" {
   real energy only for an exclusive allocation. It is not yet wired into the
   reconciliation sheet.
 
+### Guaranteed share against use, and the lending balance (#97)
+
+`GET /admin/lending?from=&to=&format=json|csv` settles the first two rules of a
+shared-GPU agreement from the period's finished requests (package `lending`):
+
+- **Guaranteed capacity**: reserved slots × hours of the period. The
+  reservation is `fairshare.Apportion(C, shares)`, the same slots the admission
+  test uses (a pool with `capacity = 0`, discovered from Slurm, has none).
+- **Used in share** and **borrowed** GPU-hours: the request's `Borrowing` flag,
+  decided at admission.
+- **Lent**: borrowing is served by capacity others reserved and did not use at
+  that moment. At every instant a borrower's GPU-hour rate is split between the
+  lenders in proportion to their idle reserved slots (reservation minus in-share
+  requests in flight). `borrowed_from_others` is what came from other
+  organisations; `borrowed_self_served` ran while the borrower's own reservation
+  was idle again; borrowing that found no idle reservation anywhere is
+  `unattributed_gpu_hours` (proxy roles), never dropped.
+- **Net** = lent − borrowed from others; the nets of all organisations sum to 0.
+  The **lending matrix** (lender × borrower, GPU-hours) is returned to the
+  proxy roles only.
+- **Latency**: p50/p95/p99 end-to-end latency of in-share against borrowing
+  requests. The gateway does not record the time a request spends in vLLM's
+  queue, so this is latency, not wait time (recording queue time is an open item).
+
+A request belongs to the period it finished in; a period is capped at 366 days
+and 2 million requests (HTTP 413 beyond). `org_admin` and org-level `viewer` read
+their own row, not the matrix; team roles get 403. The identities above are
+property-tested against the real `fairshare.Pool` driven on random timelines.
+
 ### Cost units (since v0.12.0)
 
 A cost has a **unit**. vLLM models cost GPU-hours by default (`unit`
