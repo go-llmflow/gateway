@@ -72,6 +72,7 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	h("DELETE /admin/budgets", s.deleteBudget)
 	h("GET /admin/spend", s.spendReport)
 	h("GET /admin/fluids", s.fluidsReport)
+	h("GET /admin/lending", s.lendingReport)
 	h("GET /admin/usage.csv", s.usageCSV)
 	h("GET /admin/export", s.exportReport)
 	h("POST /admin/export", s.exportReport) // with a Slurm report as the body
