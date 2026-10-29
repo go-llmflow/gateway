@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/openai"
 	"github.com/go-llmflow/gateway/store"
 )
@@ -169,6 +170,11 @@ func BenchmarkAdmission(b *testing.B) {
 	up := newFakeVLLM(b)
 	cfg := testConfig(up.URL())
 	cfg.ModelGroups[0].MaxModelLen = 4096
+	// Workload profiles (#90): a large one, and one whose week is always
+	// full so that every admission goes to the overflow cap.
+	cfg.Profiles = config.Profiles{Workday: map[string]float64{"": 1000},
+		List:          []config.Profile{{ID: "big", Days: 7, SessionShare: 1}, {ID: "full", Days: 0, SessionShare: 1, OverflowCap: 200}},
+		SessionWindow: 5 * time.Hour}
 	st := store.NewMemory()
 	srv, err := New(cfg, st, Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg), CacheSaltKey: testSaltKey})
 	if err != nil {
@@ -181,8 +187,11 @@ func BenchmarkAdmission(b *testing.B) {
 	g := srv.groups["llama"]
 	body := []byte(`{"model":"meta/llama","messages":[{"role":"user","content":"hi"}],"max_tokens":8}`)
 	ctx := context.Background()
-	run := func(b *testing.B, team string) {
+	run := func(b *testing.B, team string, user ...string) {
 		scope := reqScope{org: "o", team: team, key: "k", model: "llama"}
+		if len(user) > 0 {
+			scope.user = user[0]
+		}
 		b.ReportAllocs()
 		for b.Loop() {
 			adm, _, err := srv.admitBudget(ctx, openai.Chat, g, scope, body, nil, "bench")
@@ -204,6 +213,18 @@ func BenchmarkAdmission(b *testing.B) {
 	}
 	set("rich", 1e9)
 	b.Run("local-grant", func(b *testing.B) { run(b, "rich") })
+	// With a profile: its weekly and session budgets held too; and beyond
+	// the week, the refusal then the overflow cap, every time.
+	for user, prof := range map[string]string{"bench-big": "big", "bench-full": "full"} {
+		if err := st.AssignProfile(ctx, store.Assignment{User: user, Profile: prof, Overflow: prof == "full", From: time.Now()}); err != nil {
+			b.Fatal(err)
+		}
+	}
+	if err := srv.reconcileProfiles(ctx); err != nil {
+		b.Fatal(err)
+	}
+	b.Run("profile-local-grant", func(b *testing.B) { run(b, "rich", "bench-big") })
+	b.Run("profile-overflow", func(b *testing.B) { run(b, "rich", "bench-full") })
 	// Every admission refills: the grant is given back after each one.
 	b.Run("grant-refill", func(b *testing.B) {
 		scope := reqScope{org: "o", team: "rich", key: "k", model: "llama"}

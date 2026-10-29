@@ -108,9 +108,12 @@ type Server struct {
 	// tracker keeps every admitted request until its record is stored, for
 	// the arming budgets (arming.go).
 	tracker *tracker
-	rec     *recorder
-	met     *metrics
-	keys    *keyCache
+	// prof holds the workload profiles (profiles.go, #90); nil without
+	// profile blocks.
+	prof *profiler
+	rec  *recorder
+	met  *metrics
+	keys *keyCache
 	// authFails limits failed authentications per client network.
 	authFails *failLimiter
 	// allowedTags is the request-tag allow-list; alerts sends soft-budget
@@ -334,6 +337,9 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 		holder.Incarnation = s.rec.spool.ID()
 	}
 	s.escrow = newEscrow(st, holder, cfg.Budgets.GrantShare, cfg.Budgets.GrantIdle, cfg.Limits.MaxRequestDuration, s.now)
+	if cfg.Profiles.Enabled() {
+		s.prof = newProfiler(cfg.Profiles)
+	}
 	s.rec.onAdopted = func(id string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
 		defer cancel()
@@ -433,6 +439,13 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.budget.refresh(ctx); err != nil {
 		s.log.Error("initial budget refresh failed", "err", err)
 	}
+	if s.prof != nil {
+		// The assignments and calibrations before the first request; the
+		// profile budgets brought up to date (profilesLoop keeps them so).
+		if err := s.reconcileProfiles(ctx); err != nil {
+			s.log.Error("workload profiles: initial reconciliation failed", "err", err)
+		}
+	}
 	if err := s.startHA(ctx); err != nil {
 		return err
 	}
@@ -453,6 +466,10 @@ func (s *Server) Start(ctx context.Context) error {
 		defer s.bg.Done()
 		s.budget.loop(bctx, s.cfg.BudgetRefresh, func(err error) { s.log.Error("budget refresh failed", "err", err) })
 	}()
+	if s.prof != nil {
+		s.bg.Add(1)
+		go func() { defer s.bg.Done(); s.profilesLoop(bctx) }()
+	}
 	if s.cfg.KeyRotation != nil {
 		if s.secretWriter == nil {
 			return errors.New("gateway: key_rotation needs a secret writer (vault)")

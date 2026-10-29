@@ -97,6 +97,10 @@ func (s *Server) snapshot(ctx context.Context, pattern string, r *http.Request) 
 		v, err = s.st.GetUser(ctx, pv("name"))
 	case pattern == "/admin/users/{name}/roles":
 		v, err = s.st.Bindings(ctx, pv("name"))
+	case pattern == "/admin/users/{name}/profile":
+		v, err = s.st.AssignmentHistory(ctx, pv("name"))
+	case pattern == "/admin/profiles/calibrate":
+		v, err = s.st.Workdays(ctx)
 	case strings.HasPrefix(pattern, "/admin/users/{name}/tokens"):
 		v, err = s.st.ListUserTokens(ctx, pv("name"))
 	case pattern == "/admin/orgs/{name}":

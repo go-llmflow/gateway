@@ -19,6 +19,7 @@ button{font:inherit;padding:.2rem .6rem;cursor:pointer}
 .bad{color:#a00;font-weight:600}.good{color:#060;font-weight:600}
 .charts{display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-start}.charts svg{max-width:100%;height:auto}
 .chips a{margin-right:.6rem}td.num{text-align:right;font-variant-numeric:tabular-nums}
+meter{width:9rem;height:1rem;vertical-align:middle}.hint{color:#5b6475;font-size:13px}
 `
 
 const uiHTML = `
@@ -27,7 +28,7 @@ const uiHTML = `
 <title>{{.Title}} · llmflow</title><link rel="stylesheet" href="/ui/style.css"></head><body>
 <header><strong>llmflow</strong>
 <a href="/ui/">Home</a><a href="/ui/keys">Keys</a><a href="/ui/budgets">Budgets</a><a href="/ui/spend">Spend</a>
-<a href="/ui/reports">Reports</a><a href="/ui/fairshare">Fair share</a><a href="/ui/audit">Audit</a>
+<a href="/ui/reports">Reports</a><a href="/ui/profiles">Profiles</a><a href="/ui/fairshare">Fair share</a><a href="/ui/audit">Audit</a>
 {{if .User}}<span class="who">{{.User}}
 <form class="inline" method="post" action="/ui/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Sign out</button></form></span>{{end}}
 </header><main><h1>{{.Title}}</h1>
@@ -139,6 +140,60 @@ Checked with the gateway's own key; for an independent check run <code>llmflow-g
 {{if .Problems}}<ul>{{range .Problems}}<li class="bad">{{.}}</li>{{end}}</ul>{{end}}{{end}}
 {{template "table" .Data.Table}}
 {{if .Data.Next}}<p><a href="/ui/audit?from={{.Data.Next}}">Next entries</a></p>{{end}}
+{{template "foot" .}}{{end}}
+
+{{define "profiles"}}{{template "head" .}}
+<p class="chips"><a href="/ui/profiles/capacity">Capacity by organisation</a><a href="/ui/profiles/calibrate">Workday calibration</a></p>
+<p>A profile is a workload in <strong>working days per week</strong>: the week resets on Monday 00:00 UTC, and a session
+allowance (a share of one day) refills over a rolling window. A profile is never exceeded; beyond it, a person continues only if
+overflow was allowed for them, up to their profile's monthly overflow cap.{{if .Data.Default}} People without a profile of their own
+have <strong>{{.Data.Default}}</strong>.{{end}}</p>
+<form method="get" action="/ui/profiles"><label>Organisation <input name="org" value="{{.Data.Org}}" size="10"></label>
+<label>Team <input name="team" value="{{.Data.Team}}" size="10"></label> <button>Show</button></form>
+{{$csrf := .CSRF}}{{$profiles := .Data.Profiles}}
+<table><tr><th>person</th><th>profile</th><th>this week</th><th>session</th><th>overflow</th><th>assign</th></tr>
+{{range .Data.People}}<tr><td>{{.User}}</td><td>{{.Label}}{{if not .Assigned}} <span class="hint">(default)</span>{{end}}{{if .SetBy}}<br><span class="hint">by {{.SetBy}}</span>{{end}}</td>
+<td>{{range .Bars}}<meter min="0" max="{{.WeekDays}}" value="{{.WeekUsed}}"></meter> {{.WeekText}} <span class="hint">{{.Unit}}, resets {{.WeekResets}}</span><br>{{end}}</td>
+<td>{{range .Bars}}<meter min="0" max="{{.SessionOf}}" value="{{.SessionUsed}}"></meter> {{.SessionText}}<br>{{end}}</td>
+<td>{{if .Overflow}}{{range .Bars}}{{.OverflowText}}<br>{{end}}{{else}}not allowed{{end}}</td>
+<td>{{if .Write}}{{$user := .User}}{{$cur := .Profile}}{{$assigned := .Assigned}}
+<form class="inline" method="post" action="/ui/profiles"><input type="hidden" name="csrf" value="{{$csrf}}"><input type="hidden" name="user" value="{{.User}}">
+<select name="profile"><option value="">default</option>{{range $profiles}}<option value="{{.ID}}"{{if and $assigned (eq .ID $cur)}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+<label><input type="checkbox" name="overflow"{{if .Overflow}} checked{{end}}> overflow</label><button>Save</button></form>{{end}}</td></tr>{{end}}</table>
+<fieldset><legend>Assign a profile</legend>
+<form method="post" action="/ui/profiles"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<label>Person <input name="user" required size="20"></label>
+<label>Profile <select name="profile"><option value="">default</option>{{range .Data.Profiles}}<option value="{{.ID}}">{{.Label}}</option>{{end}}</select></label>
+<label><input type="checkbox" name="overflow"> allow overflow (up to the profile's monthly cap)</label>
+<button>Assign</button></form>
+<p class="hint">An organisation administrator assigns the people of their organisation only, a team administrator those of their teams; every change is in the audit log.</p></fieldset>
+{{template "foot" .}}{{end}}
+
+{{define "profilecapacity"}}{{template "head" .}}
+<p>Days assigned each week against what the organisation's share of the pools serves (share × capacity × the measured cost per
+request slot over the last 7 days, in workdays). Oversubscription is normal — people do not all work at the same time, and fair share
+arbitrates when they do — but a ratio far above what you expect is worth a look.</p>
+<table><tr><th>organisation</th><th>unit</th><th>people</th><th>assigned (days/week)</th><th>capacity (days/week)</th><th>×</th><th></th></tr>
+{{range .Data}}<tr><td>{{.Org}}</td><td>{{.Unit}}</td><td class="num">{{.People}}</td><td class="num">{{.AssignedDays}}</td>
+<td class="num">{{if .Capacity}}{{.Capacity}}{{else}}not measured{{end}}</td><td class="num">{{if .Ratio}}{{.Ratio}}{{end}}</td><td>{{.Sentence}}</td></tr>{{end}}</table>
+<p><a href="/ui/profiles">Back to the profiles</a></p>
+{{template "foot" .}}{{end}}
+
+{{define "calibrate"}}{{template "head" .}}
+<p>A workday is what one person working with the assistant for a full day consumes. It is measured, not guessed: below, the cost of
+every <em>active person-day</em> (a person with any cost that day) over the last weeks, and the proposal, its 75th percentile.
+Accepting it changes every profile's allowance at once, and is in the audit log.</p>
+<form method="get" action="/ui/profiles/calibrate"><label>Weeks <input name="weeks" type="number" min="1" max="26" size="3"></label> <button>Show</button></form>
+{{$csrf := .CSRF}}{{$admin := .Data.Admin}}
+{{range .Data.Units}}<h2>{{.Unit}}</h2>
+{{if .Days}}<p>{{.Days}} active person-days over {{.Weeks}} weeks: median {{.P50}}, p75 <strong>{{.P75}}</strong>, p90 {{.P90}}, max {{.Max}}.
+{{if .Current}}In force: {{.Current}} ({{.Source}}).{{else}}No workday yet: requests in this unit under a profile are refused.{{end}}</p>
+<table><tr><th>up to</th><th>person-days</th><th></th></tr>{{range .Bins}}<tr><td class="num">{{.Upper}}</td><td class="num">{{.Count}}</td><td><meter min="0" max="{{.Max}}" value="{{.Count}}"></meter></td></tr>{{end}}</table>
+{{if $admin}}<form method="post" action="/ui/profiles/calibrate"><input type="hidden" name="csrf" value="{{$csrf}}"><input type="hidden" name="unit" value="{{.Unit}}">
+<label>Workday <input name="amount" value="{{.Proposal}}" size="10"></label> <button>Accept</button></form>{{end}}
+{{else}}<p>No usage in this unit over the period: nothing to propose yet.</p>{{end}}
+{{end}}
+<p><a href="/ui/profiles">Back to the profiles</a></p>
 {{template "foot" .}}{{end}}
 
 {{define "loggedout"}}{{template "head" .}}<p>You are signed out. <a href="/admin/login?next=ui">Sign in again</a>.</p>{{template "foot" .}}{{end}}

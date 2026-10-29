@@ -150,12 +150,25 @@ func matrixRows() []matrixRow {
 		{"GET /admin/fairshare", "GET", p("/admin/fairshare"), "", nil, outsiders},
 		{"GET /admin/audit", "GET", p("/admin/audit"), "", proxyViews, nil},
 		{"POST /admin/audit/verify", "POST", p("/admin/audit/verify"), "", proxyViews, nil},
+		// Workload profiles (#90). The people and capacity listings are
+		// filtered to the caller's scope; calibration reads everyone's usage
+		// (proxy roles); an assignment is decided by the person's bindings
+		// (the person here is etabA's alone: its admins and the proxy's).
+		{"GET /admin/profiles", "GET", p("/admin/profiles"), "", nil, nil},
+		{"GET /admin/profiles/people", "GET", p("/admin/profiles/people"), "", nil, outsiders},
+		{"GET /admin/profiles/capacity", "GET", p("/admin/profiles/capacity"), "", nil, outsiders},
+		{"GET /admin/profiles/calibrate", "GET", p("/admin/profiles/calibrate"), "", proxyViews, nil},
+		{"POST /admin/profiles/calibrate", "POST", p("/admin/profiles/calibrate"), `{"unit":"gpu_hours","amount":2}`, writeAll, nil},
+		{"GET /admin/users/{name}/profile", "GET", p("/admin/users/target/profile"), "",
+			[]string{"master", "padmin", "pview", "oadmin", "tadmin", "tviewer", "oviewer"}, nil},
+		{"PUT /admin/users/{name}/profile", "PUT", p("/admin/users/target/profile"), `{"profile":"p"}`, teamAdmins, nil},
+		{"DELETE /admin/users/{name}/profile", "DELETE", p("/admin/users/target/profile"), "", teamAdmins, nil},
 	}
 }
 
 func TestAuthzMatrix(t *testing.T) {
 	up := newFakeVLLM(t)
-	cfg := testConfig(up.URL())
+	cfg := profileConfig(up.URL()) // the profile routes answer 404 without profile blocks
 	rows := matrixRows()
 
 	// Every route of the router has a row, and every row a route.

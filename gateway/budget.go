@@ -407,6 +407,35 @@ func (b *budgeter) persisted(recs []store.Record) {
 	}
 }
 
+// list returns the budgets of the last refresh.
+func (b *budgeter) list() []store.Budget {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]store.Budget, 0, len(b.budgets))
+	for _, st := range b.budgets {
+		out = append(out, st.b)
+	}
+	return out
+}
+
+// has reports whether a budget was loaded.
+func (b *budgeter) has(k store.BudgetKey) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.budgets[k] != nil
+}
+
+// limitOf returns a budget's limit now.
+func (b *budgeter) limitOf(k store.BudgetKey) (float64, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	st := b.budgets[k]
+	if st == nil {
+		return 0, false
+	}
+	return st.b.Limit(b.now()), true
+}
+
 // spent returns the current spend of a budget (for the admin API).
 func (b *budgeter) spent(k store.BudgetKey) (float64, bool) {
 	b.mu.Lock()

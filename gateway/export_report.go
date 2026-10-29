@@ -33,7 +33,7 @@ const MaxExportRows = 100_000
 // exportDims are the groupings an XLSX export gives a sheet each, and the
 // default grouping of a CSV export (tag excepted: a record counts under
 // each of its tags).
-var exportDims = []string{"org", "lab", "team", "project", "user", "model", "pool", "tag"}
+var exportDims = []string{"org", "lab", "team", "project", "user", "profile", "model", "pool", "tag"}
 
 var errTooManyRows = errors.New("the export has too many rows: narrow the period")
 
@@ -70,7 +70,7 @@ func (b *reportBundle) inferenceByOrg() map[string]float64 {
 
 func (s *Server) buildBundle(r *http.Request, p *principal, from, to time.Time) (*reportBundle, error) {
 	b := &reportBundle{From: from, To: to, PrevFrom: from.Add(-to.Sub(from)), Generated: s.now().UTC(), By: map[string][]store.ReportRow{}}
-	base, err := s.visibleReport(r, p, from, to, []string{"org", "lab", "team", "project", "user", "model", "pool"})
+	base, err := s.visibleReport(r, p, from, to, []string{"org", "lab", "team", "project", "user", "profile", "model", "pool"})
 	if err != nil {
 		return nil, err
 	}

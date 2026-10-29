@@ -35,6 +35,10 @@ type admission struct {
 	// when stored.
 	id       string
 	recorded bool
+	// profile is the person's workload profile in force ("" for none);
+	// overflow: admitted beyond it, on its overflow cap (#90).
+	profile  string
+	overflow bool
 }
 
 // finish untracks a request that leaves no record (refused, or ended
@@ -53,6 +57,8 @@ type admitError struct {
 	denyTag string
 	// reset: when the budget that refused resets.
 	reset time.Time
+	// key is the budget that refused (zero for another refusal).
+	key store.BudgetKey
 }
 
 // budgetResetHeader carries, on a refusal, when the budget that refused
@@ -64,15 +70,21 @@ func (e *admitError) Error() string { return e.msg }
 
 // budgetRefusal is a request that does not fit a budget of its scope. The
 // message names only the caller's own scope (the key's org, team, project,
-// key, tags), its room left and the request's maximum cost.
-func budgetRefusal(k store.BudgetKey, room, w int64, unit string, reset time.Time) *admitError {
-	s := fmt.Sprintf("budget exhausted for this period (%s %s", k.Kind, k.Name)
-	if k.Model != "" {
-		s += ", model " + k.Model
+// key, tags, the person), its room left and the request's maximum cost; a
+// workload profile's budget is spelled in workdays (profiles.go).
+func (s *Server) budgetRefusal(k store.BudgetKey, room, w int64, unit string, reset time.Time) *admitError {
+	if k.Kind.Profile() && s.prof != nil {
+		if ae, ok := s.profileRefusal(k, room, w, reset); ok {
+			return ae
+		}
 	}
-	s += fmt.Sprintf("): %s %s left, and this request may cost up to %s; send a smaller max_tokens",
+	m := fmt.Sprintf("budget exhausted for this period (%s %s", k.Kind, k.Name)
+	if k.Model != "" {
+		m += ", model " + k.Model
+	}
+	m += fmt.Sprintf("): %s %s left, and this request may cost up to %s; send a smaller max_tokens",
 		store.FormatNano(room), store.UnitName(unit), store.FormatNano(w))
-	return &admitError{http.StatusTooManyRequests, "insufficient_quota", s, "budget", reset}
+	return &admitError{http.StatusTooManyRequests, "insufficient_quota", m, "budget", reset, k}
 }
 
 // armingRefusal answers a request under a budget that is still arming
@@ -83,7 +95,7 @@ func armingRefusal(k store.BudgetKey) *admitError {
 		s += ", model " + k.Model
 	}
 	s += ") was just created and is arming: requests in its scope admitted before it are still running or being recorded; retry in a moment"
-	return &admitError{http.StatusTooManyRequests, "insufficient_quota", s, "budget_arming", time.Time{}}
+	return &admitError{http.StatusTooManyRequests, "insufficient_quota", s, "budget_arming", time.Time{}, k}
 }
 
 var (
@@ -95,16 +107,88 @@ var (
 //
 // id names the request's record: the request is tracked under it until the
 // record is stored (arming.go), whether a budget applies or not.
+//
+// Under a workload profile (#90) it first makes sure the person's profile
+// budgets exist, and, when the profile's weekly or session allowance
+// refuses the request and the person may overflow, admits it on the
+// overflow cap instead (the request is then marked overflow).
 func (s *Server) admitBudget(ctx context.Context, ep openai.Endpoint, g *group, scope reqScope, out []byte, betas []string, id string) (*admission, []byte, error) {
-	adm := &admission{at: s.now(), id: id}
 	if s.budget.stale() {
-		return nil, nil, &admitError{http.StatusServiceUnavailable, "service_unavailable", errStateStale.Error(), "store_unavailable", time.Time{}}
+		return nil, nil, &admitError{http.StatusServiceUnavailable, "service_unavailable", errStateStale.Error(), "store_unavailable", time.Time{}, store.BudgetKey{}}
 	}
+	if s.prof == nil || scope.user == "" || s.softBudgets {
+		return s.admitScope(ctx, ep, g, scope, out, betas, id)
+	}
+	scope.overflow = false
+	ps, err := s.profileAdmission(ctx, g, scope)
+	if err != nil {
+		return nil, nil, err
+	}
+	admit := func(sc reqScope) (*admission, []byte, error) {
+		adm, body, err := s.admitScope(ctx, ep, g, sc, out, betas, id)
+		// Budgets just created arm within a moment (every replica reports
+		// on the change notification): a first request waits for them.
+		deadline := s.now().Add(profileArmWait)
+		for ps.created && err != nil && s.now().Before(deadline) {
+			var ae *admitError
+			if !errors.As(err, &ae) || ae.denyTag != "budget_arming" || !ae.key.Kind.Profile() {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return nil, nil, err
+			case <-time.After(50 * time.Millisecond):
+			}
+			adm, body, err = s.admitScope(ctx, ep, g, sc, out, betas, id)
+		}
+		if adm != nil {
+			adm.profile, adm.overflow = ps.id, sc.overflow
+		}
+		return adm, body, err
+	}
+	adm, body, err := admit(scope)
+	var ae *admitError
+	if err == nil || !ps.overflow || !errors.As(err, &ae) || ae.denyTag != "profile" ||
+		ae.key.Kind != store.ScopeProfileWeek && ae.key.Kind != store.ScopeProfileSession {
+		return adm, body, err
+	}
+	// Beyond the allowance, on the overflow cap (its budget exists: the
+	// assignment that allowed it created it).
+	over := scope
+	over.overflow = true
+	if !s.budget.has(store.BudgetKey{Kind: store.ScopeProfileOverflow, Name: scope.user, Unit: scope.unit}) {
+		if eerr := s.ensureProfile(ctx, scope.user); eerr != nil {
+			return nil, nil, err
+		}
+		ps.created = true
+	}
+	oadm, obody, oerr := admit(over)
+	var oe *admitError
+	if oerr != nil && !(errors.As(oerr, &oe) && oe.key.Kind == store.ScopeProfileOverflow) {
+		// Refused for another budget than the overflow cap (the team's,
+		// the org's…): that refusal is the one to report.
+		return nil, nil, oerr
+	}
+	if oerr != nil {
+		// Both refuse: say both, and the earlier of their resets.
+		both := *oe
+		both.msg = ae.msg + "; and the " + oe.msg
+		if !ae.reset.IsZero() && (both.reset.IsZero() || ae.reset.Before(both.reset)) {
+			both.reset = ae.reset
+		}
+		return nil, nil, &both
+	}
+	return oadm, obody, nil
+}
+
+// admitScope is admitBudget for one scope.
+func (s *Server) admitScope(ctx context.Context, ep openai.Endpoint, g *group, scope reqScope, out []byte, betas []string, id string) (*admission, []byte, error) {
+	adm := &admission{at: s.now(), id: id}
 	if s.softBudgets {
 		// The pre-#87 check (spent < limit), kept for the planted control
 		// of the property test only.
 		if err := s.budget.check(scope); err != nil {
-			return nil, nil, &admitError{http.StatusTooManyRequests, "insufficient_quota", err.Error(), "budget", time.Time{}}
+			return nil, nil, &admitError{http.StatusTooManyRequests, "insufficient_quota", err.Error(), "budget", time.Time{}, store.BudgetKey{}}
 		}
 		return adm, out, nil
 	}
@@ -119,11 +203,11 @@ func (s *Server) admitBudget(ctx context.Context, ep openai.Endpoint, g *group, 
 	}
 	sh, err := sh, shapeErr
 	if err != nil {
-		return nil, nil, &admitError{http.StatusBadRequest, "invalid_request_error", err.Error(), "", time.Time{}}
+		return nil, nil, &admitError{http.StatusBadRequest, "invalid_request_error", err.Error(), "", time.Time{}, store.BudgetKey{}}
 	}
 	if sh.Generates && sh.HasMaxTokens && capTok > 0 && sh.MaxTokens > capTok {
 		return nil, nil, &admitError{http.StatusBadRequest, "invalid_request_error",
-			fmt.Sprintf("max_tokens %d exceeds this model's max_output_tokens (%d)", sh.MaxTokens, capTok), "", time.Time{}}
+			fmt.Sprintf("max_tokens %d exceeds this model's max_output_tokens (%d)", sh.MaxTokens, capTok), "", time.Time{}, store.BudgetKey{}}
 	}
 	writable := sh.Generates && ep != openai.Transcriptions
 	if len(refs) == 0 || sh.Free || g.prices.zero {
@@ -137,12 +221,12 @@ func (s *Server) admitBudget(ctx context.Context, ep openai.Endpoint, g *group, 
 	}
 	if sh.Unbounded != "" {
 		return nil, nil, &admitError{http.StatusBadRequest, "invalid_request_error",
-			"this request's cost cannot be bounded before it runs (" + sh.Unbounded + "), so it is refused while a budget applies to its scope", "budget_unbounded", time.Time{}}
+			"this request's cost cannot be bounded before it runs (" + sh.Unbounded + "), so it is refused while a budget applies to its scope", "budget_unbounded", time.Time{}, store.BudgetKey{}}
 	}
 	adm.reset = s.escrow.tightest(refs)
 	l := g.contextLen()
 	if l <= 0 {
-		return nil, nil, &admitError{http.StatusServiceUnavailable, "service_unavailable", errNoContextLen.Error(), "context_unknown", time.Time{}}
+		return nil, nil, &admitError{http.StatusServiceUnavailable, "service_unavailable", errNoContextLen.Error(), "context_unknown", time.Time{}, store.BudgetKey{}}
 	}
 	provider := g.ext != nil
 	try := func(m int64) (*hold, int64, error) {
@@ -159,9 +243,9 @@ func (s *Server) admitBudget(ctx context.Context, ep openai.Endpoint, g *group, 
 			return armingRefusal(nr.key)
 		}
 		if errors.As(err, &nr) {
-			return budgetRefusal(nr.key, nr.room, w, scope.unit, nr.resetIn(refs))
+			return s.budgetRefusal(nr.key, nr.room, w, scope.unit, nr.resetIn(refs))
 		}
-		return &admitError{http.StatusServiceUnavailable, "service_unavailable", "the budget ledger cannot be reached; requests under a budget are refused", "store_unavailable", time.Time{}}
+		return &admitError{http.StatusServiceUnavailable, "service_unavailable", "the budget ledger cannot be reached; requests under a budget are refused", "store_unavailable", time.Time{}, store.BudgetKey{}}
 	}
 	if !writable || sh.HasMaxTokens {
 		m := sh.MaxTokens
@@ -195,7 +279,7 @@ func (s *Server) admitBudget(ctx context.Context, ep openai.Endpoint, g *group, 
 		next := g.prices.largestFit(sh, l, lo, m, nr.room, provider)
 		if next < 0 {
 			wlo, _ := g.prices.worstCase(sh, l, lo, provider)
-			return nil, nil, budgetRefusal(nr.key, nr.room, wlo, scope.unit, nr.resetIn(refs))
+			return nil, nil, s.budgetRefusal(nr.key, nr.room, wlo, scope.unit, nr.resetIn(refs))
 		}
 		if next == m {
 			next = m - 1 // the room shrank meanwhile
@@ -237,7 +321,7 @@ func (a *admission) write(ep openai.Endpoint, out []byte) (*admission, []byte, e
 	b, err := a.apply(ep, out)
 	if err != nil {
 		a.hold.settle(0)
-		return nil, nil, &admitError{http.StatusBadRequest, "invalid_request_error", err.Error(), "", time.Time{}}
+		return nil, nil, &admitError{http.StatusBadRequest, "invalid_request_error", err.Error(), "", time.Time{}, store.BudgetKey{}}
 	}
 	return a, b, nil
 }
@@ -277,6 +361,7 @@ func (s *Server) recordHolds(rec *store.Record, a *admission, costNano int64) {
 	if a == nil {
 		return
 	}
+	rec.Profile, rec.Overflow = a.profile, a.overflow
 	a.recorded = true
 	rec.ID = a.id
 	rec.AdmittedAt = a.at.UTC()
@@ -292,7 +377,7 @@ func (s *Server) recordHolds(rec *store.Record, a *admission, costNano int64) {
 func (s *Server) writeAdmitError(w http.ResponseWriter, team string, err error) {
 	var ae *admitError
 	if !errors.As(err, &ae) {
-		ae = &admitError{http.StatusServiceUnavailable, "service_unavailable", err.Error(), "store_unavailable", time.Time{}}
+		ae = &admitError{http.StatusServiceUnavailable, "service_unavailable", err.Error(), "store_unavailable", time.Time{}, store.BudgetKey{}}
 	}
 	if ae.denyTag != "" {
 		s.met.denied.add(1, team, ae.denyTag)

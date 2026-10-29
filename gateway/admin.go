@@ -77,6 +77,7 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	h("GET /admin/fairshare", s.fairshareState)
 	h("GET /admin/audit", s.listAudit)
 	h("POST /admin/audit/verify", s.verifyAudit)
+	s.profileRoutes(h)
 	s.uiRoutes(mux)
 }
 
@@ -954,6 +955,9 @@ func (s *Server) listBudgets(w http.ResponseWriter, r *http.Request, p *principa
 	now := s.now()
 	out := []budgetOut{}
 	for _, b := range bs {
+		if b.Kind.Profile() {
+			continue // one per person and unit: GET /admin/profiles/people shows them
+		}
 		read, _, err := s.budgetAccess(r, p, b.BudgetKey)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			storeError(w, err)

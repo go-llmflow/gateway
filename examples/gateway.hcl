@@ -154,3 +154,24 @@ model "llama-3.3-70b-batch" {
     key_file = "/etc/llmflow/gpu04.key"
   }
 }
+
+# Workload profiles (README, "Workload profiles"): a person's allowance in
+# working days per week. The workday (what one person-day consumes, per
+# unit) is calibrated from measured usage in /ui/profiles/calibrate; until
+# then, requests under a profile are refused in that unit. One attribute per
+# line: HCL refuses several in a one-line block.
+profile "q" {
+  days          = 0.25
+  session_share = 0.25
+}
+profile "1d" {
+  days          = 1
+  session_share = 0.5
+  overflow_cap  = 2 # workdays a month beyond the profile, when allowed for the person
+}
+profile "5d" {
+  days          = 5
+  session_share = 0.5
+}
+session_window = "5h"
+# default_profile = "q"  # everyone without a profile of their own

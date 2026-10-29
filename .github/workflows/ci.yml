@@ -96,6 +96,9 @@ jobs:
           - { target: FuzzInternalAPI, pkg: ./ha }
           - { target: FuzzShapeOf, pkg: ./openai }
           - { target: FuzzWorstCase, pkg: ./gateway }
+          - { target: FuzzProfileHCL, pkg: ./config }
+          - { target: FuzzProfileAPI, pkg: ./gateway }
+          - { target: FuzzProfileForms, pkg: ./gateway }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
