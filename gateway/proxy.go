@@ -220,6 +220,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			return
 		}
 		out = held
+		scope.overflow = adm.overflow // beyond the person's profile (#90)
 		// Released at the end with the request's cost (a no-op once a
 		// fallback replaced it, or when finish released it); untracked when
 		// no record was written.
@@ -311,7 +312,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				adm.release(0)
 				s.met.fallbacks.add(1, g.cfg.Name, next.cfg.Name, "saturated")
 				g, grant, out, adm = next, tg, fb.out, fb.adm
-				scope.model, scope.unit = g.cfg.Name, g.cfg.Cost.Unit
+				scope.model, scope.unit, scope.overflow = g.cfg.Name, g.cfg.Cost.Unit, adm.overflow
 				w.Header().Set("X-Llmflow-Model", g.cfg.Name)
 				w.Header().Del("X-Llmflow-Max-Tokens")
 				adm.header(w.Header())
@@ -478,7 +479,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			// Nothing was computed where it was held: the old hold goes.
 			adm.release(0)
 			g, out, adm = next, fb.out, fb.adm
-			scope.model, scope.unit = g.cfg.Name, g.cfg.Cost.Unit
+			scope.model, scope.unit, scope.overflow = g.cfg.Name, g.cfg.Cost.Unit, adm.overflow
 			ng, aerr := g.pool.acquire(key.Org, g.class, promptEst+req.MaxTokens)
 			if aerr != nil {
 				// The released grant stays the one the deferred accounting

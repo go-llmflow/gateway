@@ -278,6 +278,27 @@ func contractProfiles(t *testing.T, s Store) {
 	if len(got) != 2 || got["2d"] != 1 || got["3d"] != 5 {
 		t.Fatalf("report by profile: %+v", rows)
 	}
+	// The measured load of a pool: cost and busy time per unit.
+	must(s.InsertRecords(ctx, []Record{
+		{ID: "pl-1", Time: t0, Team: "pt", Pool: "pl-pool", Cost: 2, LatencyMS: 1_800_000},
+		{ID: "pl-2", Time: t0.Add(time.Hour), Team: "pt", Pool: "pl-pool", Cost: 1, LatencyMS: 1_800_000},
+		{ID: "pl-3", Time: t0.Add(time.Hour), Team: "pt", Pool: "pl-pool", Unit: "USD", Cost: 7, LatencyMS: 1000},
+		{ID: "pl-4", Time: t0.Add(5 * time.Hour), Team: "pt", Pool: "pl-pool", Cost: 100, LatencyMS: 1000},
+	}))
+	loads, err := s.PoolLoad(ctx, t0, t0.Add(3*time.Hour))
+	must(err)
+	var gpu, usd *PoolLoad
+	for i := range loads {
+		switch l := &loads[i]; {
+		case l.Pool == "pl-pool" && l.Unit == "":
+			gpu = l
+		case l.Pool == "pl-pool" && l.Unit == "USD":
+			usd = l
+		}
+	}
+	if gpu == nil || gpu.Cost != 3 || gpu.BusySeconds != 3600 || gpu.Requests != 2 || usd == nil || usd.Cost != 7 {
+		t.Fatalf("pool load: %+v", loads)
+	}
 }
 
 func TestRollingMemory(t *testing.T)  { contractRolling(t, NewMemory()) }

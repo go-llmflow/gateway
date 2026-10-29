@@ -284,7 +284,7 @@ func writePDF(w io.Writer, b *reportBundle) error {
 		d.table([]string{"Unit", "This period", "Previous", "Change", "Requests"}, []float64{130, 100, 100, 80, 89}, rows)
 	}
 
-	for _, level := range []string{"org", "lab", "team", "project"} {
+	for _, level := range []string{"org", "lab", "team", "project", "profile"} {
 		data := b.By[level]
 		if len(data) == 0 {
 			continue

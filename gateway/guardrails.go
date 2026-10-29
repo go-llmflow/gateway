@@ -521,6 +521,7 @@ func (s *Server) callGuardModel(ctx context.Context, rq *guardReq, model, path s
 		return nil, fmt.Errorf("guard model %q: %w", model, aerr)
 	}
 	defer func() { adm.release(0); s.finishUnrecorded(adm) }() // when nothing was charged
+	sc.overflow = adm.overflow
 	ctx = withBoundOnly(ctx, func() bool { return adm.hold != nil })
 	t0 := time.Now()
 	resp, u, _, err := s.send(ctx, g, path, body, "application/json", 0, rq.rid)

@@ -86,6 +86,8 @@ type Config struct {
 	SCIM *SCIM
 	// Budgets tunes the hard budgets' escrow (budgets.go).
 	Budgets Budgets
+	// Profiles are the workload profiles (profiles.go, #90).
+	Profiles Profiles
 	// HA, when set, runs this gateway as one of several replicas sharing
 	// the pools through PostgreSQL (pool ownership by lease, package ha).
 	// Absent: one replica, everything in its memory, as before.

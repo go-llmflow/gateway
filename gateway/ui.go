@@ -73,6 +73,7 @@ func (s *Server) uiRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /ui/audit", page(s.uiAudit))
 	mux.Handle("POST /ui/audit/verify", page(s.uiVerify))
 	mux.Handle("POST /ui/logout", page(s.uiLogout))
+	s.profilesUIRoutes(mux, page)
 }
 
 // uiPrincipal authenticates a UI request by its SSO session. A POST must be

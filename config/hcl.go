@@ -74,6 +74,12 @@ type fileHCL struct {
 	Tracing              *tracingHCL     `hcl:"tracing,block"`
 	MCPServers           []mcpServerHCL  `hcl:"mcp_server,block"`
 	Budgets              *budgetsHCL     `hcl:"budgets,block"`
+	Workday              *workdayHCL     `hcl:"workday,block"`
+	Profiles             []profileHCL    `hcl:"profile,block"`
+	DefaultProfile       *string         `hcl:"default_profile,optional"`
+	DefaultProfileRange  hcl.Range       `hcl:"default_profile,attr_value_range"`
+	SessionWindow        *string         `hcl:"session_window,optional"`
+	SessionWindowRange   hcl.Range       `hcl:"session_window,attr_value_range"`
 }
 
 type loggingHCL struct {
@@ -1496,6 +1502,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	c.MCPServers = v.mcpServers(raw.MCPServers)
 	v.external(raw, c)
 	v.budgets(raw, c)
+	v.profiles(raw, c)
 	// Every *_file attribute is a secret reference: a file, or a field of
 	// an OpenBao/Vault KV v2 secret (package secret).
 	for _, ref := range c.SecretRefs() {

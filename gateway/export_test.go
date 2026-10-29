@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/csv"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -125,6 +126,30 @@ func TestPDFSample(t *testing.T) {
 	t.Logf("wrote %s (%d bytes)", path, out.Len())
 }
 
+// The management summary gains a section by profile (#90): the PDF of a
+// bundle that has one is not the PDF of the same bundle without it.
+func TestPDFByProfile(t *testing.T) {
+	day := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	mk := func(withProfile bool) []byte {
+		b := &reportBundle{From: day, To: day.AddDate(0, 0, 7), PrevFrom: day.AddDate(0, 0, -7), Generated: day, By: map[string][]store.ReportRow{}}
+		b.By["org"] = []store.ReportRow{{Org: "etabA", Cost: 10, Requests: 3}}
+		b.Totals = []unitTotal{{Cost: 10, Requests: 3}}
+		if withProfile {
+			b.By["profile"] = []store.ReportRow{{Profile: "2d", Cost: 6, Requests: 2}, {Profile: "5d", Cost: 4, Requests: 1}}
+		}
+		var out bytes.Buffer
+		if err := writePDF(&out, b); err != nil {
+			t.Fatal(err)
+		}
+		pdfSafe(t, out.Bytes())
+		return out.Bytes()
+	}
+	with, without := mk(true), mk(false)
+	if len(with) <= len(without) || bytes.Equal(with, without) {
+		t.Fatalf("no profile section: %d bytes with, %d without", len(with), len(without))
+	}
+}
+
 func TestExports(t *testing.T) {
 	e := newSSOEnv(t, "")
 	expect(t, "user", e.do("POST", "/admin/users", master, `{"name":"carol"}`).StatusCode, 201)
@@ -132,7 +157,7 @@ func TestExports(t *testing.T) {
 	now := e.srv.now().UTC()
 	from, to := now.AddDate(0, 0, -10), now.AddDate(0, 0, 1)
 	_ = e.st.InsertRecords(t.Context(), []store.Record{
-		{Org: "etabA", Lab: "physics", Team: "etabA", Project: "+1", User: "=cmd|' /C calc'!A0", Model: "llama", Pool: "b300", Cost: 2, Time: now},
+		{Org: "etabA", Lab: "physics", Team: "etabA", Project: "+1", User: "=cmd|' /C calc'!A0", Model: "llama", Pool: "b300", Cost: 2, Time: now, Profile: "2d"},
 		{Org: "etabA", Lab: "physics", Team: "etabA", Project: "@x", User: "-2", Model: "llama", Pool: "b300", Cost: 1, Time: from.AddDate(0, 0, -3)},
 		{Org: "etabA", Team: "etabA", Model: "claude", Cost: 3, Unit: "USD", Time: now},
 		{Org: "etabB", Team: "etabB", Model: "llama", Pool: "b300", Cost: 7, Time: now},
@@ -160,6 +185,12 @@ func TestExports(t *testing.T) {
 	if !strings.Contains(body, "'=cmd") {
 		t.Fatal("the formula was not prefixed")
 	}
+	// The profile dimension (#90): the profile in force at admission.
+	resp = e.do("GET", "/admin/export?"+span+"&format=csv&group_by=profile", master, "")
+	if recs, err := csv.NewReader(strings.NewReader(readAll(t, resp))).ReadAll(); err != nil || len(recs) < 2 ||
+		strings.Join(recs[0][:3], ",") != "from,to,profile" || !strings.Contains(fmt.Sprint(recs), "2d") {
+		t.Fatalf("csv by profile: %v %v", recs, err)
+	}
 
 	// XLSX: a summary and a sheet per grouping, no formula, units in headers.
 	resp = e.do("GET", "/admin/export?"+span+"&format=xlsx", master, "")
@@ -168,7 +199,7 @@ func TestExports(t *testing.T) {
 		t.Fatalf("xlsx: %d", resp.StatusCode)
 	}
 	parts := unzip(t, raw)
-	for _, want := range []string{"Summary", "By org", "By lab", "By team", "By project", "By user", "By model", "By pool", "By tag", "By day"} {
+	for _, want := range []string{"Summary", "By org", "By lab", "By team", "By project", "By user", "By profile", "By model", "By pool", "By tag", "By day"} {
 		if !strings.Contains(parts["xl/workbook.xml"], `name="`+want+`"`) {
 			t.Errorf("no sheet %q", want)
 		}
@@ -211,7 +242,7 @@ func TestExports(t *testing.T) {
 			}
 		}
 	}
-	if n != 7 || refused != 4 {
+	if n != 8 || refused != 4 { // four served (csv, csv by profile, xlsx, pdf), four refused
 		t.Fatalf("export audit: %d entries, %d refused", n, refused)
 	}
 

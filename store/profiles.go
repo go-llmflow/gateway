@@ -59,6 +59,19 @@ type ProfileStore interface {
 	// SetWorkday records an accepted calibration; Workdays lists them.
 	SetWorkday(ctx context.Context, w Workday) error
 	Workdays(ctx context.Context) ([]Workday, error)
+	// PoolLoad is the measured load of every pool over [from, to): what its
+	// requests cost and how long they ran, per unit (the capacity check).
+	PoolLoad(ctx context.Context, from, to time.Time) ([]PoolLoad, error)
+}
+
+// PoolLoad is a pool's measured load in one unit: cost per slot-hour is
+// Cost / (BusySeconds / 3600), what one request slot served while busy.
+type PoolLoad struct {
+	Pool        string  `json:"pool"`
+	Unit        string  `json:"unit"`
+	Cost        float64 `json:"cost"`
+	BusySeconds float64 `json:"busy_seconds"`
+	Requests    int64   `json:"requests"`
 }
 
 // ValidProfileID accepts [a-z0-9_-]{1,32}.
@@ -207,7 +220,51 @@ func (m *Memory) Workdays(context.Context) ([]Workday, error) {
 	return out, nil
 }
 
+func (m *Memory) PoolLoad(_ context.Context, from, to time.Time) ([]PoolLoad, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.Fail != nil {
+		return nil, m.Fail
+	}
+	agg := map[[2]string]*PoolLoad{}
+	for _, r := range m.records {
+		if r.Pool == "" || r.Time.Before(from) || !r.Time.Before(to) {
+			continue
+		}
+		k := [2]string{r.Pool, r.Unit}
+		if agg[k] == nil {
+			agg[k] = &PoolLoad{Pool: r.Pool, Unit: r.Unit}
+		}
+		agg[k].Cost += r.Cost
+		agg[k].BusySeconds += r.LatencyMS / 1000
+		agg[k].Requests++
+	}
+	out := make([]PoolLoad, 0, len(agg))
+	for _, l := range agg {
+		out = append(out, *l)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Pool+"\x00"+out[i].Unit < out[j].Pool+"\x00"+out[j].Unit })
+	return out, nil
+}
+
 // ---- PostgreSQL ----
+
+func (p *Postgres) PoolLoad(ctx context.Context, from, to time.Time) ([]PoolLoad, error) {
+	rows, err := p.pool.Query(ctx, `SELECT pool, unit, coalesce(sum(cost), 0), coalesce(sum(latency_ms), 0) / 1000, count(*) FROM llmflow_usage
+		WHERE ts >= $1 AND ts < $2 AND pool <> '' GROUP BY pool, unit ORDER BY pool, unit`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (PoolLoad, error) {
+		var l PoolLoad
+		err := r.Scan(&l.Pool, &l.Unit, &l.Cost, &l.BusySeconds, &l.Requests)
+		return l, err
+	})
+	if out == nil {
+		out = []PoolLoad{}
+	}
+	return out, err
+}
 
 const profilesSchema = `
 CREATE TABLE IF NOT EXISTS llmflow_profile_assignments (
