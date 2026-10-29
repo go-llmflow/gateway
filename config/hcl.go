@@ -544,7 +544,12 @@ type orgHCL struct {
 	ShareRange hcl.Range           `hcl:"share,attr_value_range"`
 	Teams      []orgTeamHCL        `hcl:"team,block"`
 	SoftQuotas *softQuotasLevelHCL `hcl:"soft_quotas,block"`
-	DefRange   hcl.Range           `hcl:",def_range"`
+	// General-ledger codes of the chargeback (#97).
+	CostCenter      *string        `hcl:"cost_center,optional"`
+	CostCenterRange hcl.Range      `hcl:"cost_center,attr_value_range"`
+	LabCCs          []labCCHCL     `hcl:"lab,block"`
+	ProjectCCs      []projectCCHCL `hcl:"project,block"`
+	DefRange        hcl.Range      `hcl:",def_range"`
 }
 
 type orgTeamHCL struct {
@@ -923,6 +928,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 				org.Labs[t.Name] = *t.Lab
 			}
 		}
+		v.costCenters(&org, o)
 		c.Orgs = append(c.Orgs, org)
 	}
 	if sum > 1+1e-9 {

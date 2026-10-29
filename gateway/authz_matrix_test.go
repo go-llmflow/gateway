@@ -165,6 +165,8 @@ func matrixRows() []matrixRow {
 		// Lending (#97): the same audience as fluids; only the proxy roles
 		// read the matrix across organisations.
 		{"GET /admin/lending", "GET", p("/admin/lending" + span), "", []string{"master", "padmin", "pview", "oadmin", "oadminC", "oviewer", "fviewer"}, []string{"oadminC"}},
+		{"GET /admin/chargeback", "GET", p("/admin/chargeback" + span), "", []string{"master", "padmin", "pview", "oadmin", "oadminC", "oviewer", "fviewer"}, []string{"oadminC"}},
+		{"GET /admin/adoption", "GET", p("/admin/adoption" + span), "", []string{"master", "padmin", "pview", "oadmin", "oadminC", "oviewer", "fviewer"}, []string{"oadminC"}},
 		{"GET /admin/usage.csv", "GET", p("/admin/usage.csv" + span), "", nil, reportOutsiders},
 		{"GET /admin/export", "GET", p("/admin/export" + span + "&format=csv"), "", nil, reportOutsiders},
 		{"POST /admin/export", "POST", p("/admin/export" + span + "&format=csv"), "", nil, reportOutsiders},

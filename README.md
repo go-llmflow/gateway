@@ -1204,6 +1204,47 @@ thresholds, so it only misses the firings it would have shared.
 was loaded (load average above 30; the rule is 4). The request path adds one
 profile lookup and a handful of in-memory reads per request (`usageHeaders`).
 
+### Chargeback, cost centres, finance reader and adoption (#97)
+
+- **`finance_viewer`** is a role without scope: it reads the reports of every
+  organisation (`/admin/spend`, `/admin/export`, `/admin/fluids`,
+  `/admin/lending` with its matrix, `/admin/chargeback`, `/admin/adoption`) and
+  nothing else: no listing of teams, keys or users, no audit log, no write.
+  Only a **proxy admin** grants it (`PUT /admin/users/{name}/roles`); an
+  `org_admin` never can, so an organisation's admin cannot open another
+  organisation's reports. It is also a valid `sso` role mapping. Every report
+  route has a row in the authorization-matrix test with a `finance_viewer`
+  column.
+- **Cost centres.** General-ledger codes on the organisation, a lab or a
+  project; the most specific wins (project, lab, organisation):
+
+  ```hcl
+  org "etabA" {
+    share       = 0.5
+    cost_center = "GL-7001"
+    team "t1" { lab = "genomics" }
+    lab "genomics" { cost_center = "GL-7002" }
+    project "t1" "p9" { cost_center = "GL-7003" }
+  }
+  ```
+
+  A code is 1 to 32 characters of letters, digits, `_ . / -` (no separator,
+  quote, space or leading sign: it is read by a finance system).
+- **`GET /admin/chargeback?from=&to=&format=csv|json`** (csv by default): one
+  row per cost centre and calendar month of the period, with `gpu_hours`, `kwh`,
+  `fluids_cost` and `fluids_currency` from the fluids block, and an external
+  provider's spend in its own currency on a row of its own (`provider_cost`,
+  `provider_currency`). What has no code is the cost centre `UNMAPPED`, and
+  energy no organisation is charged for is `UNALLOCATED`: the file always adds
+  up to the reports. This is a chargeback in FinOps' sense, the file a finance
+  system books (finops.org, Invoicing and Chargeback). Estimate-against-actual
+  variance needs actuals entered somewhere: not implemented. Organisation
+  admins and viewers get their own codes only.
+- **`GET /admin/adoption?from=&to=&format=json|csv`**: active people per day and
+  per week (Monday), requests, and per model the active people and requests.
+  Counts only: no name, key or content leaves it. A service key's request counts
+  as a request and as no one.
+
 ### Cost units (since v0.12.0)
 
 A cost has a **unit**. vLLM models cost GPU-hours by default (`unit`
