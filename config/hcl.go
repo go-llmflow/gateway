@@ -578,6 +578,8 @@ type attributionHCL struct {
 type slurmHCL struct {
 	SreportFile   *string           `hcl:"sreport_file,optional"`
 	FileRange     hcl.Range         `hcl:"sreport_file,attr_value_range"`
+	SacctFile     *string           `hcl:"sacct_file,optional"`
+	SacctRange    hcl.Range         `hcl:"sacct_file,attr_value_range"`
 	Accounts      map[string]string `hcl:"accounts,optional"`
 	AccountsRange hcl.Range         `hcl:"accounts,attr_value_range"`
 }
@@ -1124,6 +1126,12 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			c.Slurm.SreportFile = *sl.SreportFile
 			if !filepath.IsAbs(*sl.SreportFile) {
 				v.errf(sl.FileRange, "Invalid sreport_file", "sreport_file %q: want an absolute path", *sl.SreportFile)
+			}
+		}
+		if sl.SacctFile != nil {
+			c.Slurm.SacctFile = *sl.SacctFile
+			if !filepath.IsAbs(*sl.SacctFile) {
+				v.errf(sl.SacctRange, "Invalid sacct_file", "sacct_file %q: want an absolute path", *sl.SacctFile)
 			}
 		}
 		for acct, org := range sl.Accounts {

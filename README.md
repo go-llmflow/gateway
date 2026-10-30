@@ -1307,6 +1307,37 @@ size, never the content).
 2 minutes, the build runs under a timeout, and at most 2 heavy reports run at
 once (429 with `Retry-After` otherwise).
 
+#### Energy reconciliation: Slurm against DCGM
+
+With `slurm { sacct_file = "/abs/path" }` the report compares, per partner, the
+energy Slurm measured for the jobs of the partner's accounts with the IT energy
+the gateway attributed from the DCGM counters. The file is
+`TZ=UTC sacct -a -X -P -o JobID,Account,Start,End,ConsumedEnergyRaw -S <from> -E <to>`
+(`sacct.html`: `-S`/`-E` select jobs *active* in the window, not jobs that ended
+in it; `End` is `Unknown` for a running job; timestamps are
+`YYYY-MM-DDThh:mm:ss`). The header **must** name `JobID`, `Account`, `Start`,
+`End` and `ConsumedEnergyRaw`: without the instants a job cannot be placed in a
+period, and without `JobID` steps cannot be told from allocations. The scheduled
+monthly report reads the same file every month, so **each job's energy is
+attributed to the report period in proportion to the share of its run inside
+it** (constant power assumed; a job entirely outside counts 0; a running job has
+accrued its energy up to the file's latest instant). Job steps (a `JobID` with a
+`.`) are skipped even without `-X`, a row without energy counts as nothing, a
+job that never started is left out, and a value with a unit prefix is refused
+(the base is not documented). The report states its coverage (jobs used,
+prorated, outside, running; the file's earliest and latest instant) and **when
+the file does not cover the period** (its span reaches less than half of it, or
+no job falls in it) it says so and prints no difference. Accounts map to
+partners by `slurm.accounts` (else by name). The difference is **DCGM minus
+Slurm**, in kWh and as a percentage of Slurm's figure (`n/a` when Slurm reports
+nothing). It is shown as
+a table in the PDF, a sheet "Energy reconciliation" in the XLSX, and
+`energy_reconciliation` in the JSON; an unreadable input is said in the report,
+not hidden. A difference is a question, not an error: Slurm counts a job's
+allocation ("only in the case of an exclusive job allocation does this value
+reflect the job's real energy consumption", sacct.html), DCGM counts the GPUs.
+Organisation admins see their own partner only.
+
 #### Mail transport: TLS is required (changed in this release)
 
 Alert and report mail went through `net/smtp.SendMail`, which upgrades to TLS

@@ -2,6 +2,7 @@ package energy
 
 import (
 	"context"
+	"math"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -66,16 +67,35 @@ func FuzzParseText(f *testing.F) {
 }
 
 func FuzzParseSacct(f *testing.F) {
+	f.Add("JobID|Account|Start|End|ConsumedEnergyRaw\n1|lab-a|2026-10-01T00:00:00|2026-10-02T00:00:00|1000\n1.batch|lab-a|2026-10-01T00:00:00|2026-10-02T00:00:00|9\n")
+	f.Add("JobID|Account|Start|End|ConsumedEnergy\n1|a|2026-10-01T00:00:00|Unknown|5K\n")
 	f.Add("Account|ConsumedEnergyRaw\nlab-a|1000\n")
-	f.Add("JobID|Account|ConsumedEnergy\n1|a|5K\n1.0|a|3\n")
 	f.Fuzz(func(t *testing.T, in string) {
 		r, err := ParseSacct(strings.NewReader(in))
-		if err == nil {
-			for _, j := range r.Joules {
-				if j < 0 {
-					t.Fatal("negative energy")
-				}
+		if err != nil {
+			return
+		}
+		for _, j := range r.Jobs {
+			if j.Joules < 0 || math.IsNaN(j.Joules) || !j.Running && j.End.Before(j.Start) {
+				t.Fatalf("bad job %+v", j)
 			}
+		}
+		// Prorating never invents energy: what is attributed to any period is at most the file's.
+		var total float64
+		for _, j := range r.Jobs {
+			total += j.Joules
+		}
+		base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+		got, cov := r.Prorate(base, base.AddDate(0, 1, 0))
+		var sum float64
+		for _, v := range got {
+			if v < 0 || math.IsNaN(v) {
+				t.Fatalf("negative share %v", v)
+			}
+			sum += v
+		}
+		if sum > total*(1+1e-9)+1e-6 || cov.Used+cov.Outside != cov.Jobs {
+			t.Fatalf("attributed %v of %v; %+v", sum, total, cov)
 		}
 	})
 }
@@ -249,16 +269,112 @@ func TestCost(t *testing.T) {
 	}
 }
 
-func TestSacct(t *testing.T) {
-	in := "JobID|Account|ConsumedEnergyRaw\n1|lab-a|1000\n1.batch|lab-a|900\n2|lab-a|\n3|lab-b|2500.5\n"
+const sacctHead = "JobID|Account|Start|End|ConsumedEnergyRaw\n"
+
+var (
+	oct = time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	nov = time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+)
+
+func TestSacctParse(t *testing.T) {
+	in := sacctHead +
+		"1|lab-a|2026-10-05T00:00:00|2026-10-06T00:00:00|1000\n" +
+		"1.batch|lab-a|2026-10-05T00:00:00|2026-10-06T00:00:00|900\n" + // a step
+		"2|lab-a|2026-10-07T00:00:00|2026-10-08T00:00:00|\n" + // no energy collected
+		"3|lab-b|2026-10-09T00:00:00|Unknown|2500.5\n" + // running
+		"4|lab-b|Unknown|Unknown|7\n" // never started
 	r, err := ParseSacct(strings.NewReader(in))
-	if err != nil || r.Joules["lab-a"] != 1000 || r.Joules["lab-b"] != 2500.5 || r.Jobs != 3 || r.NoEnergy != 1 {
+	if err != nil || len(r.Jobs) != 3 || r.Steps != 1 || r.NoEnergy != 1 || r.NotStarted != 1 || !r.Jobs[2].Running {
 		t.Fatalf("%+v %v", r, err)
 	}
-	for _, bad := range []string{"Account|ConsumedEnergy\na|5K\n", "x|y\n1|2\n", "Account|ConsumedEnergyRaw\na|-3\n", ""} {
+	if !r.Earliest.Equal(time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)) || !r.Latest.Equal(time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("span %v %v", r.Earliest, r.Latest)
+	}
+	for _, bad := range []string{
+		"Account|ConsumedEnergy\na|5K\n", "x|y\n1|2\n", "",
+		"Account|ConsumedEnergyRaw\na|-3\n",
+		"Account|Start|End|ConsumedEnergyRaw\na|2026-10-01T00:00:00|2026-10-02T00:00:00|1\n", // no JobID: steps would count twice
+		"JobID|Account|ConsumedEnergyRaw\n1|a|5\n",                                           // no instants
+		sacctHead + "1|a|2026-10-01T00:00:00|2026-10-02T00:00:00|5K\n",                       // a unit prefix
+		sacctHead + "1|a|2026-10-01 00:00:00|2026-10-02T00:00:00|5\n",                        // not sacct's format
+		sacctHead + "1|a|2026-10-03T00:00:00|2026-10-02T00:00:00|5\n",                        // ends before it starts
+	} {
 		if _, err := ParseSacct(strings.NewReader(bad)); err == nil {
 			t.Fatalf("accepted %q", bad)
 		}
+	}
+}
+
+// Golden values: a job of 10 days (5 in October, 5 in November) with 1000 J
+// has 500 J in each month, assuming constant power; a job entirely in
+// September counts 0 and a job entirely in October counts all of it.
+func TestSacctProrateGolden(t *testing.T) {
+	in := sacctHead +
+		"1|a|2026-10-27T00:00:00|2026-11-06T00:00:00|1000\n" + // straddles the month end: 5 days of 10 in each
+		"2|a|2026-10-10T00:00:00|2026-10-11T00:00:00|300\n" + // inside October
+		"3|b|2026-09-01T00:00:00|2026-09-05T00:00:00|9999\n" + // before
+		"4|b|2026-10-30T12:00:00|Unknown|600\n" // running at the file's latest instant
+	r, err := ParseSacct(strings.NewReader(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, cov := r.Prorate(oct, nov)
+	// Job 4 runs from Oct 30 12:00 to the file's latest instant, which is
+	// Nov 6 (job 1's end), capped at Nov 1: 36 h of 156 h.
+	want := map[string]float64{"a": 500 + 300, "b": 600 * 36.0 / 156.0}
+	for acct, w := range want {
+		if math.Abs(got[acct]-w) > 1e-9 {
+			t.Errorf("%s: %v J, want %v", acct, got[acct], w)
+		}
+	}
+	if cov.Jobs != 4 || cov.Used != 3 || cov.Prorated != 2 || cov.Outside != 1 || cov.Running != 1 || !cov.Covers {
+		t.Fatalf("coverage %+v", cov)
+	}
+	// The same file against November: the straddling job gives the other half.
+	got, _ = r.Prorate(nov, nov.AddDate(0, 1, 0))
+	if math.Abs(got["a"]-500) > 1e-9 {
+		t.Fatalf("november: %v", got)
+	}
+	// The two months add up to the file's energy for the job that straddles them.
+	sep, _ := r.Prorate(oct.AddDate(0, -1, 0), oct)
+	if math.Abs(sep["b"]-9999) > 1e-9 {
+		t.Fatalf("september: %v", sep)
+	}
+}
+
+// A file for another period does not cover this one.
+func TestSacctDoesNotCoverAnotherPeriod(t *testing.T) {
+	r, err := ParseSacct(strings.NewReader(sacctHead + "1|a|2026-09-02T00:00:00|2026-09-20T00:00:00|1000\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, cov := r.Prorate(oct, nov)
+	if cov.Covers || cov.Used != 0 || len(got) != 0 {
+		t.Fatalf("%+v %v", cov, got)
+	}
+	// A file that reaches only the first days of the period does not either.
+	r, _ = ParseSacct(strings.NewReader(sacctHead + "1|a|2026-10-01T00:00:00|2026-10-04T00:00:00|1000\n"))
+	if _, cov = r.Prorate(oct, nov); cov.Covers {
+		t.Fatalf("a 3-day file covers a month: %+v", cov)
+	}
+}
+
+// Without -X sacct prints a row per step: the same total as the -X file.
+func TestSacctStepsAreNotCountedTwice(t *testing.T) {
+	allocs := sacctHead + "7|a|2026-10-02T00:00:00|2026-10-03T00:00:00|1000\n8|a|2026-10-04T00:00:00|2026-10-05T00:00:00|500\n"
+	withSteps := sacctHead +
+		"7|a|2026-10-02T00:00:00|2026-10-03T00:00:00|1000\n7.batch|a|2026-10-02T00:00:00|2026-10-03T00:00:00|1000\n7.0|a|2026-10-02T00:00:00|2026-10-03T00:00:00|1000\n" +
+		"8|a|2026-10-04T00:00:00|2026-10-05T00:00:00|500\n8.extern|a|2026-10-04T00:00:00|2026-10-05T00:00:00|500\n"
+	total := func(in string) float64 {
+		r, err := ParseSacct(strings.NewReader(in))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := r.Prorate(oct, nov)
+		return got["a"]
+	}
+	if a, b := total(allocs), total(withSteps); a != 1500 || b != a {
+		t.Fatalf("-X file %v J, file with steps %v J", a, b)
 	}
 }
 
