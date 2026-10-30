@@ -283,6 +283,12 @@ type Record struct {
 	// weekly and session ones.
 	Profile  string
 	Overflow bool
+
+	// AdmissionWaitMS is the time between the request's arrival and the
+	// fair-share grant: the gateway's queue, before vLLM saw anything. The
+	// request holds its slot from then to its end (LatencyMS is arrival to
+	// end), which is what the lending report integrates (#97).
+	AdmissionWaitMS float64
 }
 
 // Store is the persistence contract.

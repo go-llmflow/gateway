@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -35,9 +36,13 @@ type LendingRow struct {
 	Lent               float64 `json:"lent_gpu_hours"`
 	Net                float64 `json:"net_lent_gpu_hours"`
 	// Utilisation is the share of the guarantee used in share.
-	Utilisation float64         `json:"guarantee_utilisation"`
-	InShare     lending.Latency `json:"latency_in_share_ms"`
-	Borrowing   lending.Latency `json:"latency_borrowing_ms"`
+	Utilisation float64 `json:"guarantee_utilisation"`
+	// Wait is the admission wait of the requests, in the gateway's fair-share
+	// queue: the evidence that the guarantee held. Latency is arrival to end.
+	WaitInShare   lending.Latency `json:"wait_in_share_ms"`
+	WaitBorrowing lending.Latency `json:"wait_borrowing_ms"`
+	InShare       lending.Latency `json:"latency_in_share_ms"`
+	Borrowing     lending.Latency `json:"latency_borrowing_ms"`
 }
 
 // LendingCell is one cell of the matrix.
@@ -47,13 +52,27 @@ type LendingCell struct {
 	GPUHours float64 `json:"gpu_hours"`
 }
 
-func (s *Server) lendingPools() []lending.Pool {
+// lendingPools describes the pools as they were over [from, to): the shares
+// of the organisations and the history of each pool's C. A pool fed by Slurm
+// jobs is configured with capacity 0 and a C that follows its instances;
+// reading the configuration alone would give it no guarantee at all (#108).
+func (s *Server) lendingPools(ctx context.Context, from, to time.Time) ([]lending.Pool, error) {
 	shares := s.orgShares()
+	hist := map[string][]lending.CapPoint{}
+	if cs, ok := s.st.(store.CapacityStore); ok {
+		pts, err := cs.CapacityBetween(ctx, from, to)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range pts {
+			hist[p.Pool] = append(hist[p.Pool], lending.CapPoint{At: p.At, C: p.C})
+		}
+	}
 	var ps []lending.Pool
 	for _, p := range s.cfg.Pools {
-		ps = append(ps, lending.Pool{Name: p.Name, Capacity: p.Capacity, Shares: shares})
+		ps = append(ps, lending.Pool{Name: p.Name, Capacity: p.Capacity, Timeline: hist[p.Name], Shares: shares})
 	}
-	return ps
+	return ps, nil
 }
 
 func lendingRows(res *lending.Result, visible func(org string) bool) []LendingRow {
@@ -66,7 +85,7 @@ func lendingRows(res *lending.Result, visible func(org string) bool) []LendingRo
 		if o.GuaranteedHours > 0 {
 			u = o.UsedInShare / o.GuaranteedHours
 		}
-		rows = append(rows, LendingRow{o.Org, o.GuaranteedHours, o.UsedInShare, o.Borrowed, o.BorrowedFromOthers, o.SelfServed, o.Lent, o.Net, u, o.InShare, o.Borrow})
+		rows = append(rows, LendingRow{o.Org, o.GuaranteedHours, o.UsedInShare, o.Borrowed, o.BorrowedFromOthers, o.SelfServed, o.Lent, o.Net, u, o.WaitInShare, o.WaitBorrow, o.InShare, o.Borrow})
 	}
 	return rows
 }
@@ -100,9 +119,18 @@ func (s *Server) lendingReport(w http.ResponseWriter, r *http.Request, p *princi
 		apiError(w, http.StatusBadRequest, "invalid_request_error", "format: want json or csv")
 		return
 	}
+	release, ok := heavy(w)
+	if !ok {
+		return
+	}
+	defer release()
 	res, err := s.lending(r, from, to, ls)
 	if errors.Is(err, store.ErrTooMany) || errors.Is(err, lending.ErrTooMany) {
-		apiError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "too many requests in the period; shorten it")
+		apiError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "too many requests in the period (more than "+strconv.Itoa(lending.MaxRequests)+"); shorten it")
+		return
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		apiError(w, http.StatusServiceUnavailable, "service_unavailable", "the report took too long; shorten the period")
 		return
 	}
 	if err != nil {
@@ -131,10 +159,13 @@ func (s *Server) lendingReport(w http.ResponseWriter, r *http.Request, p *princi
 		f := func(v float64) string { return strconv.FormatFloat(v, 'f', 6, 64) }
 		_ = cw.Write([]string{"from", "to", "org", "guaranteed_gpu_hours", "used_in_share_gpu_hours", "borrowed_gpu_hours", "borrowed_from_others_gpu_hours",
 			"borrowed_self_served_gpu_hours", "lent_gpu_hours", "net_lent_gpu_hours", "guarantee_utilisation",
-			"p50_in_share_ms", "p95_in_share_ms", "p50_borrowing_ms", "p95_borrowing_ms"})
+			"p50_wait_in_share_ms", "p95_wait_in_share_ms", "p50_wait_borrowing_ms", "p95_wait_borrowing_ms",
+			"p50_latency_in_share_ms", "p95_latency_in_share_ms", "p50_latency_borrowing_ms", "p95_latency_borrowing_ms"})
 		for _, x := range rows {
 			_ = cw.Write([]string{from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339), csvSafe(x.Org), f(x.GuaranteedHours), f(x.UsedInShare), f(x.Borrowed),
-				f(x.BorrowedFromOthers), f(x.SelfServed), f(x.Lent), f(x.Net), f(x.Utilisation), f(x.InShare.P50), f(x.InShare.P95), f(x.Borrowing.P50), f(x.Borrowing.P95)})
+				f(x.BorrowedFromOthers), f(x.SelfServed), f(x.Lent), f(x.Net), f(x.Utilisation),
+				f(x.WaitInShare.P50), f(x.WaitInShare.P95), f(x.WaitBorrowing.P50), f(x.WaitBorrowing.P95),
+				f(x.InShare.P50), f(x.InShare.P95), f(x.Borrowing.P50), f(x.Borrowing.P95)})
 		}
 		cw.Flush()
 		return
@@ -146,7 +177,7 @@ func (s *Server) lendingReport(w http.ResponseWriter, r *http.Request, p *princi
 		cells = []LendingCell{}
 	}
 	out := map[string]any{"from": from.UTC(), "to": to.UTC(), "orgs": rows, "matrix": cells,
-		"latency_note": "end-to-end latency of the request; the gateway does not record the time spent in vLLM's queue"}
+		"wait_note": "wait is the admission wait in the gateway's fair-share queue (arrival to grant); latency is arrival to end. The time a granted request spends in vLLM's own queue is not recorded."}
 	if p.proxyView() {
 		out["unattributed_gpu_hours"] = res.Unattributed
 	}
@@ -155,13 +186,19 @@ func (s *Server) lendingReport(w http.ResponseWriter, r *http.Request, p *princi
 }
 
 func (s *Server) lending(r *http.Request, from, to time.Time, ls store.LendingStore) (*lending.Result, error) {
-	rows, err := ls.LendingRequests(r.Context(), from, to, lending.MaxRequests)
+	ctx, cancel := context.WithTimeout(r.Context(), ReportTimeout)
+	defer cancel()
+	pools, err := s.lendingPools(ctx, from, to)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := ls.LendingRequests(ctx, from, to, lending.MaxRequests)
 	if err != nil {
 		return nil, err
 	}
 	reqs := make([]lending.Req, len(rows))
 	for i, x := range rows {
-		reqs[i] = lending.Req{Org: x.Org, Pool: x.Pool, End: x.End, LatencyMS: x.LatencyMS, Borrowing: x.Borrowing, GPUHours: x.Cost}
+		reqs[i] = lending.Req{Org: x.Org, Pool: x.Pool, End: x.End, LatencyMS: x.LatencyMS, WaitMS: x.WaitMS, Borrowing: x.Borrowing, GPUHours: x.Cost}
 	}
-	return lending.Compute(from, to, s.lendingPools(), reqs)
+	return lending.Compute(from, to, pools, reqs)
 }

@@ -1022,7 +1022,12 @@ shared-GPU agreement from the period's finished requests (package `lending`):
 
 - **Guaranteed capacity**: reserved slots × hours of the period. The
   reservation is `fairshare.Apportion(C, shares)`, the same slots the admission
-  test uses (a pool with `capacity = 0`, discovered from Slurm, has none).
+  test uses, with **C as it was at each instant**: the gateway records every
+  change of a pool's C (its configured capacity plus its Slurm-discovered
+  instances) in `llmflow_pool_capacity`, and the report integrates that
+  history. A pool with `capacity = 0` fed by Slurm jobs is guaranteed what its
+  instances made it. A period before the history started falls back to the
+  configured capacity.
 - **Used in share** and **borrowed** GPU-hours: the request's `Borrowing` flag,
   decided at admission.
 - **Lent**: borrowing is served by capacity others reserved and did not use at
@@ -1035,12 +1040,20 @@ shared-GPU agreement from the period's finished requests (package `lending`):
 - **Net** = lent − borrowed from others; the nets of all organisations sum to 0.
   The **lending matrix** (lender × borrower, GPU-hours) is returned to the
   proxy roles only.
-- **Latency**: p50/p95/p99 end-to-end latency of in-share against borrowing
-  requests. The gateway does not record the time a request spends in vLLM's
-  queue, so this is latency, not wait time (recording queue time is an open item).
+- **Wait**: each record now carries its **admission wait** (`wait_ms`): the
+  time between the request's arrival and the fair-share grant, in the gateway's
+  queue. A request holds its slot from the grant to its end, so the lending
+  interval is `[end − latency + wait, end]`: waiting in the queue is not holding
+  a reservation. The report gives p50/p95/p99 of the admission wait of in-share
+  against borrowing requests (`wait_in_share_ms`, `wait_borrowing_ms`): the
+  evidence that the guarantee held, next to the end-to-end latency
+  (`latency_*`). The time a granted request spends in vLLM's own queue is not
+  recorded. Records from before this release have `wait_ms = 0`.
 
 A request belongs to the period it finished in; a period is capped at 366 days
-and 2 million requests (HTTP 413 beyond). `org_admin` and org-level `viewer` read
+and 500 000 requests (HTTP 413 beyond). The heavy reports (lending, chargeback,
+decision) read the store under `ReportTimeout` and at most 2 run at once: the
+next caller gets 429 with `Retry-After`. `org_admin` and org-level `viewer` read
 their own row, not the matrix; team roles get 403. The identities above are
 property-tested against the real `fairshare.Pool` driven on random timelines.
 

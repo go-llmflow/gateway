@@ -96,10 +96,12 @@ type Server struct {
 	// outbox, revocations); nil without an ha block.
 	shared store.HAStateStore
 	// capMu serialises the recomputation of a pool's C (slurm.go).
-	capMu   sync.Mutex
-	client  *http.Client
-	limiter *limiter
-	budget  *budgeter
+	capMu sync.Mutex
+	// capNotes remembers the C last written to the pool's history (#97).
+	capNotes capacityNotes
+	client   *http.Client
+	limiter  *limiter
+	budget   *budgeter
 	// escrow holds requests' worst-case costs on the budget ledger (hard
 	// budgets); softBudgets, a test hook, restores the pre-#87 check for
 	// the planted control of the property test.
@@ -471,6 +473,7 @@ func (s *Server) Start(ctx context.Context) error {
 		go func() { defer s.bg.Done(); s.profilesLoop(bctx) }()
 	}
 	s.startFluids(bctx)
+	s.startCapacityHistory(bctx)
 	if s.cfg.KeyRotation != nil {
 		if s.secretWriter == nil {
 			return errors.New("gateway: key_rotation needs a secret writer (vault)")

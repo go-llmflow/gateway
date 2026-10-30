@@ -191,15 +191,104 @@ func FuzzCompute(f *testing.F) {
 		var reqs []Req
 		for i := 0; i < n; i++ {
 			reqs = append(reqs, Req{Org: string(rune('a' + i%3)), Pool: "p", End: t0.Add(time.Duration(ms%10_000_000+int64(i)) * time.Millisecond),
-				LatencyMS: lat * float64(i), Borrowing: i%2 == 0, GPUHours: share * float64(i)})
+				LatencyMS: lat * float64(i), WaitMS: lat * float64(i%4), Borrowing: i%2 == 0, GPUHours: share * float64(i)})
 		}
-		res, err := Compute(t0, t0.Add(time.Hour), []Pool{{Name: "p", Capacity: min(max(capacity, 0), 1000), Shares: map[string]float64{"a": math.Abs(share), "b": 1}}}, reqs)
-		if err == nil {
-			for _, o := range res.Orgs {
-				if math.IsNaN(o.Lent) || math.IsNaN(o.Net) {
-					t.Fatal("NaN")
+		c := min(max(capacity, 0), 1000)
+		pool := Pool{Name: "p", Capacity: c, Shares: map[string]float64{"a": math.Abs(share), "b": 1},
+			Timeline: []CapPoint{{t0.Add(time.Duration(ms%3_600_000) * time.Millisecond), c + 3}}}
+		res, err := Compute(t0, t0.Add(time.Hour), []Pool{pool}, reqs)
+		if err != nil {
+			return
+		}
+		// Invariants, for any input: no NaN or negative figure, the nets sum
+		// to zero, and what was borrowed is lent, self-served or unattributed.
+		var borrowed, lent, self, net float64
+		for _, o := range res.Orgs {
+			for _, v := range []float64{o.GuaranteedHours, o.UsedInShare, o.Borrowed, o.Lent, o.SelfServed, o.BorrowedFromOthers} {
+				if math.IsNaN(v) || math.IsInf(v, 0) || v < -1e-9 {
+					t.Fatalf("bad figure %v in %+v", v, o)
+				}
+			}
+			if math.IsNaN(o.Net) || math.IsInf(o.Net, 0) {
+				t.Fatalf("net %+v", o)
+			}
+			borrowed += o.Borrowed
+			lent += o.Lent
+			self += o.SelfServed
+			net += o.Net
+			for _, l := range []Latency{o.InShare, o.Borrow, o.WaitInShare, o.WaitBorrow} {
+				if l.N > 0 && !(l.P50 <= l.P95 && l.P95 <= l.P99) {
+					t.Fatalf("percentiles out of order: %+v", l)
 				}
 			}
 		}
+		tol := 1e-6 * (1 + borrowed)
+		if math.Abs(net) > tol || math.Abs(lent+self+res.Unattributed-borrowed) > tol {
+			t.Fatalf("lent %v + self %v + unattributed %v != borrowed %v (net %v)", lent, self, res.Unattributed, borrowed, net)
+		}
 	})
+}
+
+// A pool fed by Slurm jobs has capacity = 0 in the configuration and a C that
+// comes and goes. With its history the guarantee and the lending are those of
+// the real C; with the configured value alone (the first version) every
+// borrowing request was unattributed and nothing was guaranteed.
+func TestSlurmPoolCapacityTimeline(t *testing.T) {
+	t0 := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	h := time.Hour
+	shares := map[string]float64{"a": .5, "b": .5}
+	reqs := []Req{
+		// b fills its own reservation (2 slots) and borrows one more, in the
+		// second hour, when C = 4: a has 2 idle slots.
+		{Org: "b", Pool: "p", End: t0.Add(2 * h), LatencyMS: 3_600_000, GPUHours: 1},
+		{Org: "b", Pool: "p", End: t0.Add(2 * h), LatencyMS: 3_600_000, GPUHours: 1},
+		{Org: "b", Pool: "p", End: t0.Add(2 * h), LatencyMS: 3_600_000, GPUHours: 1, Borrowing: true},
+	}
+	tl := []CapPoint{{t0, 2}, {t0.Add(h), 4}}
+	res, err := Compute(t0, t0.Add(2*h), []Pool{{Name: "p", Capacity: 0, Timeline: tl, Shares: shares}}, reqs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := res.Orgs[0], res.Orgs[1]
+	// a: 1 slot for an hour, then 2 for an hour = 3 slot-hours.
+	if !near(a.GuaranteedHours, 3, 1e-9) || !near(b.GuaranteedHours, 3, 1e-9) || !near(a.Lent, 1, 1e-6) || !near(b.BorrowedFromOthers, 1, 1e-6) || res.Unattributed > 1e-9 {
+		t.Fatalf("with the history: %+v unattributed %v", res.Orgs, res.Unattributed)
+	}
+	// The control: the configured capacity alone.
+	res, _ = Compute(t0, t0.Add(2*h), []Pool{{Name: "p", Capacity: 0, Shares: shares}}, reqs)
+	if res.Orgs[0].GuaranteedHours != 0 || res.Orgs[0].Lent != 0 || !near(res.Unattributed, 1, 1e-6) {
+		t.Fatalf("control: %+v unattributed %v", res.Orgs, res.Unattributed)
+	}
+}
+
+// The slot is held from the grant, not from the arrival: a request that waited
+// half an hour in the gateway's queue did not hold its reservation then.
+func TestAdmissionWaitIsNotSlotTime(t *testing.T) {
+	t0 := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	h := time.Hour
+	pool := []Pool{{Name: "p", Capacity: 2, Shares: map[string]float64{"a": .5, "b": .5}}}
+	mk := func(wait float64) []Req {
+		return []Req{
+			{Org: "a", Pool: "p", End: t0.Add(h), LatencyMS: 3_600_000, WaitMS: wait, GPUHours: 1},    // a's in-share request
+			{Org: "b", Pool: "p", End: t0.Add(h), LatencyMS: 3_600_000, GPUHours: 1},                  // b fills its reservation
+			{Org: "b", Pool: "p", End: t0.Add(h), LatencyMS: 3_600_000, GPUHours: 1, Borrowing: true}, // and borrows
+		}
+	}
+	// a waited 30 min: its slot was idle for the first half hour, so a lent
+	// 0.5 GPU-hour then; the second half hour a was busy, nothing to lend.
+	res, _ := Compute(t0, t0.Add(h), pool, mk(1_800_000))
+	if a := res.Orgs[0]; !near(a.Lent, 0.5, 1e-6) || !near(res.Unattributed, 0.5, 1e-6) {
+		t.Fatalf("with the wait: lent %v unattributed %v", a.Lent, res.Unattributed)
+	}
+	// The same requests counted from arrival (the first version): a never
+	// idle, nothing lent.
+	res, _ = Compute(t0, t0.Add(h), pool, mk(0))
+	if a := res.Orgs[0]; a.Lent != 0 || !near(res.Unattributed, 1, 1e-6) {
+		t.Fatalf("without the wait: lent %v unattributed %v", a.Lent, res.Unattributed)
+	}
+	// The wait is its own figure.
+	res, _ = Compute(t0, t0.Add(h), pool, mk(1_800_000))
+	if w := res.Orgs[0].WaitInShare; w.N != 1 || w.P50 != 1_800_000 {
+		t.Fatalf("wait percentiles %+v", w)
+	}
 }
