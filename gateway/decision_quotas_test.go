@@ -143,7 +143,7 @@ func TestDecisionQuotaViews(t *testing.T) {
 		t.Fatal(err)
 	}
 	html := b.String()
-	for _, want := range []string{"Budget against actual", "Quotas and profiles", "(&#43;50.0 %)","suppressed", "beyond 15 %", "Peak ratio"} {
+	for _, want := range []string{"Budget against actual", "Quotas and profiles", "(&#43;50.0 %)", "suppressed", "beyond 15 %", "Peak ratio"} {
 		if !strings.Contains(html, want) {
 			t.Errorf("no %q in the report", want)
 		}
