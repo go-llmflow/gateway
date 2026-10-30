@@ -59,6 +59,7 @@ type EnergyStore interface {
 type memEnergy struct {
 	ivs   []EnergyInterval
 	cells []memCell
+	caps  []CapacityPoint // lending.go
 }
 
 type memCell struct {

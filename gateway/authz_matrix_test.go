@@ -155,6 +155,9 @@ func matrixRows() []matrixRow {
 		// team-level role has no energy view, and another organisation's admin
 		// reads nothing of etabA's.
 		{"GET /admin/fluids", "GET", p("/admin/fluids" + span), "", []string{"master", "padmin", "pview", "oadmin", "oadminC", "oviewer"}, []string{"oadminC"}},
+		// Lending (#97): the same audience as fluids; only the proxy roles
+		// read the matrix across organisations.
+		{"GET /admin/lending", "GET", p("/admin/lending" + span), "", []string{"master", "padmin", "pview", "oadmin", "oadminC", "oviewer"}, []string{"oadminC"}},
 		{"GET /admin/usage.csv", "GET", p("/admin/usage.csv" + span), "", nil, outsiders},
 		{"GET /admin/export", "GET", p("/admin/export" + span + "&format=csv"), "", nil, outsiders},
 		{"POST /admin/export", "POST", p("/admin/export" + span + "&format=csv"), "", nil, outsiders},

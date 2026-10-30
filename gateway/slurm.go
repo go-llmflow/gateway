@@ -532,6 +532,7 @@ func (s *Server) recomputeCapacity(pool string) {
 	if old := p.setCapacity(c); old != c {
 		reserved, _ := json.Marshal(p.reserved())
 		s.audit("pool.capacity", "pool", pool, "before", old, "after", c, "reserved", string(reserved))
+		s.noteCapacity(pool) // the lending report integrates C over time (#97)
 	}
 }
 

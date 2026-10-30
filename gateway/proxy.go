@@ -293,6 +293,9 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			apiError(w, http.StatusServiceUnavailable, "service_unavailable", errNoOwner.Error())
 			return
 		}
+		// The grant: the request holds its slot from here (the lending report
+		// reads [tAcq, end]); the time since arrival is the admission wait.
+		tAcq := time.Now()
 		// Fallback on saturation (#58): vLLM queues rather than refusing, so
 		// the gateway decides. Only a BORROWING request moves, and only to a
 		// fallback whose pool has room right now (TryAcquire checks and takes
@@ -312,6 +315,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				adm.release(0)
 				s.met.fallbacks.add(1, g.cfg.Name, next.cfg.Name, "saturated")
 				g, grant, out, adm = next, tg, fb.out, fb.adm
+				tAcq = time.Now()
 				scope.model, scope.unit, scope.overflow = g.cfg.Name, g.cfg.Cost.Unit, adm.overflow
 				w.Header().Set("X-Llmflow-Model", g.cfg.Name)
 				w.Header().Del("X-Llmflow-Max-Tokens")
@@ -408,7 +412,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				Upstream: upstreamLabel, PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
 				CachedTokens: usage.Cached(), Cost: cost, Unit: g.cfg.Cost.Unit, LatencyMS: float64(end.Sub(t0).Microseconds()) / 1000,
 				Status: status, Priority: grant.Priority, Borrowing: grant.Borrowing, Stream: req.Stream,
-				Estimated: estimated, Tags: tags,
+				Estimated: estimated, Tags: tags, AdmissionWaitMS: float64(tAcq.Sub(t0).Microseconds()) / 1000,
 			}
 			s.recordHolds(&rec, adm, costNano)
 			s.rec.record(rec)
@@ -489,6 +493,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				return
 			}
 			grant = ng
+			tAcq = time.Now()
 			w.Header().Set("X-Llmflow-Model", g.cfg.Name)
 			w.Header().Del("X-Llmflow-Max-Tokens")
 			adm.header(w.Header())
