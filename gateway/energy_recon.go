@@ -1,9 +1,11 @@
 package gateway
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"sort"
+	"time"
 
 	"github.com/go-llmflow/gateway/energy"
 )
@@ -34,6 +36,10 @@ type EnergyReconRow struct {
 	// Slurm reports nothing to compare to).
 	DiffKWh float64  `json:"diff_kwh"`
 	DiffPct *float64 `json:"diff_pct"`
+	// Compared is false when there is nothing to compare (no Slurm data for the
+	// partner, or a file that does not cover the period): no difference is
+	// given, rather than one against zero.
+	Compared bool `json:"compared"`
 }
 
 // reconcileEnergy pairs the two measurements for the given partners, sorted.
@@ -51,10 +57,13 @@ func reconcileEnergy(slurmJoules map[string]float64, dcgmKWh map[string]float64)
 		if j, ok := slurmJoules[o]; ok {
 			r.HasSlurm, r.SlurmKWh = true, energy.KWh(int64(math.Round(j*1000))) // J → mJ
 		}
-		r.DiffKWh = r.DCGMKWh - r.SlurmKWh
-		if r.HasSlurm && r.SlurmKWh > 0 {
-			p := 100 * r.DiffKWh / r.SlurmKWh
-			r.DiffPct = &p
+		if r.HasSlurm {
+			r.Compared = true
+			r.DiffKWh = r.DCGMKWh - r.SlurmKWh
+			if r.SlurmKWh > 0 {
+				p := 100 * r.DiffKWh / r.SlurmKWh
+				r.DiffPct = &p
+			}
 		}
 		out = append(out, r)
 	}
@@ -62,24 +71,41 @@ func reconcileEnergy(slurmJoules map[string]float64, dcgmKWh map[string]float64)
 	return out
 }
 
-// sacctEnergy reads slurm.sacct_file: joules per organisation (accounts mapped
-// by slurm.accounts); nil, nil without the setting.
-func (s *Server) sacctEnergy() (map[string]float64, error) {
+// sacctEnergy reads slurm.sacct_file and attributes each job's energy to
+// [from, to) in proportion to the part of its run inside it, assuming constant
+// power: joules per organisation (accounts mapped by slurm.accounts), and what
+// the period got out of the file. nil without the setting.
+func (s *Server) sacctEnergy(from, to time.Time) (map[string]float64, *energy.SacctReport, energy.Coverage, error) {
 	if s.cfg.Slurm.SacctFile == "" {
-		return nil, nil
+		return nil, nil, energy.Coverage{}, nil
 	}
 	f, err := os.Open(s.cfg.Slurm.SacctFile)
 	if err != nil {
-		return nil, err
+		return nil, nil, energy.Coverage{}, err
 	}
 	defer f.Close()
 	rep, err := energy.ParseSacct(f)
 	if err != nil {
-		return nil, err
+		return nil, nil, energy.Coverage{}, err
 	}
+	byAcct, cov := rep.Prorate(from, to)
 	out := map[string]float64{}
-	for acct, j := range rep.Joules {
+	for acct, j := range byAcct {
 		out[s.cfg.Slurm.OrgOfAccount(acct)] += j
 	}
-	return out, nil
+	return out, rep, cov, nil
 }
+
+// coverageText says what the report used of the file: the reader must be able
+// to tell a file for this period from one that happens to be there.
+func coverageText(c energy.Coverage, rep *energy.SacctReport) string {
+	span := "no job"
+	if !c.Earliest.IsZero() {
+		span = "jobs from " + c.Earliest.Format("2006-01-02 15:04") + " to " + c.Latest.Format("2006-01-02 15:04") + " UTC"
+	}
+	return fmt.Sprintf("Slurm file: %d jobs, %s; %d used (%d only partly inside the period, prorated), %d outside the period, %d still running; %d job steps, %d without energy and %d never started left out.",
+		c.Jobs, span, c.Used, c.Prorated, c.Outside, c.Running, rep.Steps, rep.NoEnergy, rep.NotStarted)
+}
+
+// reconAssumption is printed next to the table.
+const reconAssumption = "A job's energy is attributed to the period in proportion to the share of its run inside it, assuming constant power."

@@ -40,7 +40,7 @@ func fixedDecision() *decisionData {
 			Models: []store.AdoptionModel{{Model: "llama", Users: 38, Requests: 4900}}},
 		Chargeback: []ChargebackRow{{From: t0, To: t0.AddDate(0, 1, 0), CostCenter: "GL-A", GPUHours: 120, KWh: 40, FluidsCostMinor: 1008, FluidsCost: "10.08", FluidsCurrency: "EUR", ProviderCost: "0.00"},
 			{From: t0, To: t0.AddDate(0, 1, 0), CostCenter: CostCenterUnmapped, GPUHours: 30, KWh: 12, FluidsCostMinor: 302, FluidsCost: "3.02", FluidsCurrency: "EUR", ProviderCost: "0.00"}},
-		HasRecon: true,
+		HasRecon: true, ReconNote: "Slurm file: 12 jobs, jobs from 2026-09-30 12:00 to 2026-11-02 08:00 UTC; 11 used (2 only partly inside the period, prorated), 1 outside the period, 0 still running; 14 job steps, 0 without energy and 0 never started left out.",
 		EnergyRecon: reconcileEnergy(map[string]float64{"etabA": 3.6e6 * 36, "etabB": 3.6e6 * 20}, // Slurm: 36 and 20 kWh
 			map[string]float64{"etabA": 40, "etabB": 12}), // DCGM: 40 (+11.1 %) and 12 (-40 %)
 		Daily: []chartPoint{{"2026-10-01", 4}, {"2026-10-02", 6}, {"2026-10-03", 5}},

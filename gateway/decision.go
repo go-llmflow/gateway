@@ -199,15 +199,29 @@ func (s *Server) buildDecision(r *http.Request, p *principal, from, to time.Time
 	// Slurm's energy against the DCGM energy attributed (#97).
 	if s.cfg.Slurm.SacctFile != "" {
 		d.HasRecon = true
-		slurmJ, err := s.sacctEnergy()
-		if err != nil {
+		slurmJ, rep, cov, err := s.sacctEnergy(from, to)
+		dcgm := map[string]float64{}
+		for o, x := range byOrg {
+			dcgm[o] = x.KWh
+		}
+		switch {
+		case err != nil:
 			s.log.Error("decision report: slurm.sacct_file unreadable", "err", err)
 			d.ReconNote = "The Slurm energy input (slurm.sacct_file) could not be read: " + clip(err.Error(), 160)
-		} else {
-			dcgm := map[string]float64{}
-			for o, x := range byOrg {
-				dcgm[o] = x.KWh
+			d.EnergyRecon = reconcileEnergy(nil, dcgm)
+		default:
+			note := coverageText(cov, rep)
+			if !p.reportView() { // the job counts of other partners are not this reader's
+				note = "Slurm file: jobs from " + cov.Earliest.Format("2006-01-02 15:04") + " to " + cov.Latest.Format("2006-01-02 15:04") + " UTC."
 			}
+			if !cov.Covers {
+				// A file for another period: a difference against it would be
+				// a confident wrong number.
+				d.ReconNote = "The Slurm file does not cover the report period: no difference is shown. " + note
+				d.EnergyRecon = reconcileEnergy(nil, dcgm)
+				break
+			}
+			d.ReconNote = note
 			visibleJ := map[string]float64{}
 			for o, j := range slurmJ {
 				if visible(o) {
@@ -308,20 +322,26 @@ func writeDecisionXLSX(w io.Writer, d *decisionData) error {
 		if err != nil {
 			return err
 		}
-		if d.ReconNote != "" {
-			if err := er.AppendRow(xlsx.String(d.ReconNote)); err != nil {
+		for _, note := range []string{reconAssumption, d.ReconNote} {
+			if note == "" {
+				continue
+			}
+			if err := er.AppendRow(xlsx.String(note)); err != nil {
 				return err
 			}
 		}
 		for _, r := range d.EnergyRecon {
-			slurm, pct := xlsx.String("no Slurm data"), xlsx.String("n/a")
+			slurm, diff, pct := xlsx.String("no Slurm data"), xlsx.String("-"), xlsx.String("n/a")
 			if r.HasSlurm {
 				slurm = num(r.SlurmKWh)
+			}
+			if r.Compared {
+				diff = num(r.DiffKWh)
 			}
 			if r.DiffPct != nil {
 				pct = xlsx.Number(*r.DiffPct / 100).Format(xlsx.Percent(1))
 			}
-			if err := er.AppendRow(xlsx.String(r.Org), slurm, num(r.DCGMKWh), num(r.DiffKWh), pct); err != nil {
+			if err := er.AppendRow(xlsx.String(r.Org), slurm, num(r.DCGMKWh), diff, pct); err != nil {
 				return err
 			}
 		}
@@ -411,6 +431,7 @@ type decisionView struct {
 	Chargeback               []chargebackView
 	HasRecon                 bool
 	ReconNote                string
+	ReconAssumption          string
 	Recon                    []reconView
 	Pie, Bars, Series        template.HTML
 }
@@ -433,9 +454,12 @@ type reconView struct{ Org, Slurm, DCGM, Diff, Pct string }
 func (d *decisionData) reconViews() []reconView {
 	var out []reconView
 	for _, r := range d.EnergyRecon {
-		v := reconView{Org: r.Org, Slurm: "no Slurm data", DCGM: fmtNum(r.DCGMKWh), Diff: signed(r.DiffKWh), Pct: "n/a"}
+		v := reconView{Org: r.Org, Slurm: "no Slurm data", DCGM: fmtNum(r.DCGMKWh), Diff: "-", Pct: "n/a"}
 		if r.HasSlurm {
 			v.Slurm = fmtNum(r.SlurmKWh)
+		}
+		if r.Compared {
+			v.Diff = signed(r.DiffKWh)
 		}
 		if r.DiffPct != nil {
 			v.Pct = signed(*r.DiffPct) + " %"
@@ -523,7 +547,7 @@ func (d *decisionData) view() decisionView {
 		}
 		v.Chargeback = append(v.Chargeback, chargebackView{c.From.UTC().Format("2006-01"), c.CostCenter, fmtNum(c.GPUHours), fmtNum(c.KWh), fl, prov})
 	}
-	v.HasRecon, v.ReconNote, v.Recon = d.HasRecon, d.ReconNote, d.reconViews()
+	v.HasRecon, v.ReconNote, v.Recon, v.ReconAssumption = d.HasRecon, d.ReconNote, d.reconViews(), reconAssumption
 	pc := plotCharts{}
 	v.Pie = pc.Pie("GPU-hours by partner", "GPU-hours", d.Pie)
 	v.Bars = pc.Bars("GPU-hours by partner, against the previous period", "GPU-hours", d.Bars)
@@ -622,6 +646,7 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 {{end}}</table>{{else}}<p>No adoption figures.</p>{{end}}
 {{if .HasRecon}}<h2 id="d-recon">Energy reconciliation: Slurm against DCGM</h2>
 <p class="note">Slurm's energy for the partner's accounts (sacct ConsumedEnergyRaw, which reflects a job's real energy only for an exclusive allocation) against the IT energy the gateway attributed from the DCGM counters. The difference is DCGM minus Slurm, in kWh and as a percentage of Slurm's figure.</p>
+<p class="note">{{.ReconAssumption}}</p>
 {{if .ReconNote}}<p>{{.ReconNote}}</p>{{end}}
 <table><tr><th>Partner</th><th class="n">Slurm kWh</th><th class="n">DCGM kWh</th><th class="n">Difference kWh</th><th class="n">Difference</th></tr>
 {{range .Recon}}<tr><td>{{.Org}}</td><td class="n">{{.Slurm}}</td><td class="n">{{.DCGM}}</td><td class="n">{{.Diff}}</td><td class="n">{{.Pct}}</td></tr>
@@ -819,7 +844,7 @@ func (d *decisionData) json() map[string]any {
 	return map[string]any{
 		"from": d.From.UTC(), "to": d.To.UTC(), "generated": d.Generated, "partners": d.Partners, "matrix": d.Matrix,
 		"unattributed_gpu_hours": d.Unattributed, "chargeback": d.Chargeback, "currency": d.Currency,
-		"energy_reconciliation": d.EnergyRecon, "energy_reconciliation_note": d.ReconNote,
+		"energy_reconciliation": d.EnergyRecon, "energy_reconciliation_note": d.ReconNote, "energy_reconciliation_assumption": reconAssumption,
 	}
 }
 

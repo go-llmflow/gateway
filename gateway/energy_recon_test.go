@@ -30,7 +30,7 @@ func TestReconcileEnergyKnownValues(t *testing.T) {
 	if r := by["b"]; !near(r.SlurmKWh, 2) || !near(r.DiffKWh, -1.5) || r.DiffPct == nil || !near(*r.DiffPct, -75) {
 		t.Fatalf("b: %+v", r)
 	}
-	if r := by["dcgm-only"]; r.HasSlurm || r.DiffPct != nil || !near(r.DiffKWh, 2) {
+	if r := by["dcgm-only"]; r.HasSlurm || r.Compared || r.DiffPct != nil || r.DiffKWh != 0 {
 		t.Fatalf("dcgm-only: %+v", r)
 	}
 	if r := by["slurm-only"]; !r.HasSlurm || !near(r.SlurmKWh, 0.001) || !near(r.DiffKWh, -0.001) || r.DiffPct == nil || !near(*r.DiffPct, -100) {
@@ -48,7 +48,7 @@ func FuzzReconcileEnergy(f *testing.F) {
 			return
 		}
 		for _, r := range reconcileEnergy(map[string]float64{"o": joules}, map[string]float64{"o": kwh}) {
-			if math.IsNaN(r.DiffKWh) || math.IsInf(r.DiffKWh, 0) || math.Abs(r.DiffKWh-(r.DCGMKWh-r.SlurmKWh)) > 1e-9 {
+			if math.IsNaN(r.DiffKWh) || math.IsInf(r.DiffKWh, 0) || r.Compared && math.Abs(r.DiffKWh-(r.DCGMKWh-r.SlurmKWh)) > 1e-9 {
 				t.Fatalf("diff %+v", r)
 			}
 			if (r.DiffPct != nil) != (r.HasSlurm && r.SlurmKWh > 0) {
@@ -61,12 +61,27 @@ func FuzzReconcileEnergy(f *testing.F) {
 	})
 }
 
-const sacctFixture = "JobID|Account|ConsumedEnergyRaw\n" +
-	"1|lab-a|2160000\n" + // 0.6 kWh (1 kWh is 3.6 MJ)
-	"1.batch|lab-a|999\n" + // a job step: not counted twice
-	"2|lab-a|1440000\n" + // 0.4 kWh: lab-a is etabA's account, 1 kWh together
-	"3|etabB|7200000\n" + // 2 kWh for etabB
-	"4|etabB|\n" // energy not collected: counted as nothing, not as an error
+// reportWindow is the period decisionJSON asks for: yesterday to the end of tomorrow (UTC).
+func reportWindow() (from, to time.Time) {
+	d := time.Now().UTC()
+	from = time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1)
+	return from, from.AddDate(0, 0, 3)
+}
+
+func ts(t time.Time) string { return t.Format(energy.SacctTimeLayout) }
+
+// sacctFixture is a file for the report window, with steps (a file made
+// without -X) and known energy: etabA's account has 1 kWh, etabB 2 kWh.
+func sacctFixture() string {
+	from, to := reportWindow()
+	mid := from.Add(36 * time.Hour)
+	return "JobID|Account|Start|End|ConsumedEnergyRaw\n" +
+		"1|lab-a|" + ts(from) + "|" + ts(mid) + "|2160000\n" + // 0.6 kWh (1 kWh is 3.6 MJ)
+		"1.batch|lab-a|" + ts(from) + "|" + ts(mid) + "|2160000\n" + // a job step: not counted twice
+		"2|lab-a|" + ts(mid) + "|" + ts(to) + "|1440000\n" + // 0.4 kWh: lab-a is etabA's account, 1 kWh together
+		"3|etabB|" + ts(from) + "|" + ts(to) + "|7200000\n" + // 2 kWh for etabB
+		"4|etabB|" + ts(from) + "|" + ts(to) + "|\n" // energy not collected: counted as nothing, not as an error
+}
 
 func reconEnv(t *testing.T, sacct string) *env {
 	t.Helper()
@@ -107,13 +122,17 @@ func decisionJSON(t *testing.T, e *env, tok string) (code int, body string) {
 // The sacct input, per partner: a known difference and a planted mismatch
 // that the report must show, in the JSON, the workbook and the PDF.
 func TestDecisionEnergyReconciliation(t *testing.T) {
-	e := reconEnv(t, sacctFixture)
+	e := reconEnv(t, sacctFixture())
 	code, body := decisionJSON(t, e, master)
 	var a struct {
 		Rows []EnergyReconRow `json:"energy_reconciliation"`
 		Note string           `json:"energy_reconciliation_note"`
+		Hyp  string           `json:"energy_reconciliation_assumption"`
 	}
-	if code != 200 || json.Unmarshal([]byte(body), &a) != nil || a.Note != "" {
+	// The coverage is stated (jobs used, steps left out), the assumption too,
+	// and nothing says the file does not cover the period.
+	if code != 200 || json.Unmarshal([]byte(body), &a) != nil || !strings.Contains(a.Note, "4 jobs") || !strings.Contains(a.Note, "1 job steps") ||
+		strings.Contains(a.Note, "does not cover") || !strings.Contains(a.Hyp, "constant power") {
 		t.Fatalf("%d %s", code, body)
 	}
 	by := map[string]EnergyReconRow{}
@@ -146,8 +165,39 @@ func TestDecisionEnergyReconciliation(t *testing.T) {
 	if _, body := decisionJSON(t, e2, master); !strings.Contains(body, `"energy_reconciliation":null`) {
 		t.Fatalf("without sacct: %s", body)
 	}
-	e3 := reconEnv(t, "Account|Something\nx|y\n")
+	// The format of the first version (no instants, no JobID) is refused and said.
+	e3 := reconEnv(t, "Account|ConsumedEnergyRaw\nlab-a|1000\n")
 	if _, body := decisionJSON(t, e3, master); !strings.Contains(body, "could not be read") {
 		t.Fatalf("a bad input must be said: %s", body)
+	}
+}
+
+// The scheduled report reads the same file every month: a file for another
+// period must be flagged, not compared.
+func TestDecisionSacctFileForAnotherPeriod(t *testing.T) {
+	from, _ := reportWindow()
+	old := from.AddDate(0, -3, 0)
+	e := reconEnv(t, "JobID|Account|Start|End|ConsumedEnergyRaw\n"+
+		"1|lab-a|"+ts(old)+"|"+ts(old.AddDate(0, 0, 20))+"|2160000\n3|etabB|"+ts(old)+"|"+ts(old.AddDate(0, 0, 20))+"|7200000\n")
+	code, body := decisionJSON(t, e, master)
+	var a struct {
+		Rows []EnergyReconRow `json:"energy_reconciliation"`
+		Note string           `json:"energy_reconciliation_note"`
+	}
+	if code != 200 || json.Unmarshal([]byte(body), &a) != nil || !strings.Contains(a.Note, "does not cover the report period") || len(a.Rows) == 0 {
+		t.Fatalf("%d %s", code, body)
+	}
+	for _, r := range a.Rows {
+		if r.Compared || r.DiffPct != nil || r.DiffKWh != 0 || r.HasSlurm {
+			t.Fatalf("a difference against a file for another period: %+v", r)
+		}
+	}
+	// The workbook and the PDF still build.
+	for _, f := range []string{"xlsx", "pdf"} {
+		day := time.Now().UTC()
+		resp := e.do("GET", "/admin/decision?format="+f+"&from="+day.AddDate(0, 0, -1).Format("2006-01-02")+"&to="+day.AddDate(0, 0, 2).Format("2006-01-02"), master, "")
+		if data := readAll(t, resp); resp.StatusCode != 200 || len(data) < 1000 {
+			t.Fatalf("%s: %d", f, resp.StatusCode)
+		}
 	}
 }
