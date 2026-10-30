@@ -443,4 +443,3 @@ func (s *Server) quotaSection(ctx context.Context, p *principal, from, to time.T
 		"Used workload days are the GPU-hours of the profile's people over the GPU-hour workday; assigned days are the days in force times days a week over 7.")
 	return q, nil
 }
-
