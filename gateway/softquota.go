@@ -679,7 +679,7 @@ func (s *Server) warnWindow(ctx context.Context, user string, w winUse, levels [
 		fired := true
 		if !ws.noDedup {
 			var err error
-			fired, err = s.st.MarkWarning(ctx, store.WarnMark{User: user, Window: w.Window, Threshold: th, Instance: instance, Rolling: w.Rolling}, s.outboxFor(out))
+			fired, err = s.st.MarkWarning(ctx, store.WarnMark{User: user, Window: w.Window, Threshold: th, Instance: instance, Rolling: w.Rolling, At: s.now()}, s.outboxFor(out))
 			if err != nil {
 				s.log.Warn("soft quotas: threshold not recorded; retried next round", "err", err)
 				continue
