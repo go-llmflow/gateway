@@ -1057,6 +1057,151 @@ next caller gets 429 with `Retry-After`. `org_admin` and org-level `viewer` read
 their own row, not the matrix; team roles get 403. The identities above are
 property-tested against the real `fairshare.Pool` driven on random timelines.
 
+### Soft quotas: warnings before a window runs out (since v0.19.0)
+
+The hard budgets never let a window be exceeded; soft quotas tell people
+**before** it runs out, the way Anthropic does for its five-hour session and
+weekly limits. By default a person is warned once past **75 %** and again past
+**95 %** of a window (Anthropic's values:
+[usage warnings in Claude Code](https://code.claude.com/docs/en/claude-apps-gateway-spend-limits.md);
+[usage limits](https://code.claude.com/docs/en/errors.md#usage-limits)). The
+windows are the profile's *session* (rolling, 5 h) and *week* (ISO week), and a
+money budget with a user scope.
+
+**What is not done.** Claude Code's *own* warnings and `/usage` ring read the
+`anthropic-ratelimit-unified-*` response headers. Their exact format is
+documented only in a Claude apps gateway's own `<public_url>/protocol`
+reference, which is not public, so **this gateway does not emit them** and
+guesses nothing. A follow-up adopts them if a primary source documents the
+format. Until then the warnings reach people through the channels below, which
+the gateway controls.
+
+**Channels**
+
+| | |
+|---|---|
+| response headers | on every successful response, for the caller's own windows only: `X-Llmflow-Usage-Session: 85`, `X-Llmflow-Usage-Session-Reset: <RFC 3339>`, `X-Llmflow-Usage-Week`, `X-Llmflow-Usage-Week-Reset`, and, once a threshold is passed, `X-Llmflow-Usage-Warning: You've used 85% of your session allowance · resets 15:45` (French with `Accept-Language: fr`) |
+| `GET /v1/me/usage` | authenticated with the caller's own key or token, rate limited (60 a minute per key), `Cache-Control: no-store`, served from memory: windows, percentages, reset times, the profile and the thresholds in force |
+| `llmflow-status` | a small cobra program (`cmd/llmflow-status`) for Claude Code's `statusLine`, below |
+| notifications | at each threshold, once per window: a webhook (with its `Idempotency-Key`) and/or mail from the `alerts` block. The mail goes to the person when their user name is an address (an SSO or SCIM user's is) and, with `notify = ["user", "team_admin"]`, to the administrators of their teams. They go through the soft-budget alert outbox: at least once, shared by the replicas |
+| admin UI | `/ui/softquotas`: who is above a threshold in the current windows, and the thresholds of each level |
+
+**The hard limit** now speaks as Anthropic's does: `429` with
+`You've hit your session allowance · resets 15:45` (or `weekly`; French with
+`Accept-Language: fr`), `retry-after` in integer seconds, the existing
+`X-Llmflow-Budget-Reset`, and `x-should-retry: false`. Claude Code stops
+retrying above 60 seconds and shows the message at once
+([gateway protocol, response headers](https://code.claude.com/docs/en/llm-gateway-protocol.md)).
+
+**Thresholds.** Configured from the most general level to the most specific,
+which wins:
+
+```hcl
+soft_quotas {
+  warn_at  = [75, 95]          # the gateway; Anthropic's values when omitted
+  language = "fr"              # of warnings when a request names none (en by default)
+  timezone = "Europe/Paris"    # the zone reset times are spelled in (UTC by default)
+  notify   = ["user", "team_admin"]   # who is mailed (user by default)
+}
+org "etabA" {
+  share = 0.8125
+  soft_quotas {
+    warn_at = [80, 95]         # one organisation
+  }
+}
+profile "2d" {
+  days = 2
+  session_share = 0.5
+  soft_quotas {
+    warn_at = [50, 75, 95]     # one profile
+  }
+}
+```
+
+A user budget takes `warn_at` from the budgets API (`PUT /admin/budgets`,
+`"warn_at": [60]`, user scope only). Resolution: **gateway → organisation →
+profile → budget** (the budget's wins). **1 to 5 thresholds, integers from 1 to
+99, strictly increasing; `[]` turns warnings off for that level.** `check-config`
+refuses the rest. An organisation administrator sets their organisation's
+thresholds in the UI (`PUT /admin/soft-quotas/orgs/{name}`); the gateway
+default and the profiles' are the proxy administrators'
+(`PUT /admin/soft-quotas/gateway`, `/profiles/{name}`); `DELETE` goes back to
+the configured value. A runtime override replaces the configured value of its
+level, every change is audited (`soft_quota.levels`), and the other replicas
+apply it at their next evaluation (15 s). A person in several organisations:
+the key's organisation on the response path, the first of their organisations
+by name in notifications.
+
+**Once per window instance, across replicas.** A threshold fires once per
+window *instance*, decided by one row per (person, window, threshold) in
+PostgreSQL (`llmflow_warn_marks`), written with one conditional
+`INSERT … ON CONFLICT DO UPDATE` whose row lock serialises the replicas, in the
+same transaction as the notification's outbox rows (a replica killed in between
+leaves both or neither). The week (and a calendar budget) has an instance: its
+start. The **session has none: it is a rolling window of 5-minute buckets.** The
+rule is therefore: the instance is the bucket in which the first replica fired
+the threshold, and a fired threshold is **armed again only when usage falls
+below the threshold minus a hysteresis** (5 points, or half the threshold when
+smaller: 75 re-arms below 70). When several thresholds are crossed at once only
+the highest is notified; the lower ones are marked, so they do not fire later.
+`TestSoftQuotaOnceAcrossReplicasPG` runs three replicas on PostgreSQL with
+random kills and checks exactly one firing per week and per episode; its planted
+control (the store's decision skipped) fires more than once.
+
+**Claude Code's status line.** Install `llmflow-status`
+(`go install github.com/go-llmflow/gateway/cmd/llmflow-status@latest`, or
+build it from this repository) and add to `~/.claude/settings.json`
+([status line](https://code.claude.com/docs/en/statusline.md)):
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "llmflow-status",
+    "refreshInterval": 30
+  }
+}
+```
+
+`refreshInterval` re-runs the command every N seconds (minimum 1) in addition
+to the event-driven updates, so the window's usage and reset time stay current
+while the session is idle. The program reads the status line's JSON on stdin,
+calls `/v1/me/usage` at `ANTHROPIC_BASE_URL` with `ANTHROPIC_AUTH_TOKEN` (else
+`ANTHROPIC_API_KEY`: the same credential Claude Code sends) and prints, for
+example,
+
+```
+session 85% · 15:45 │ week 40% · Mon 00:00        (semaine, lun. with --lang fr or LANG=fr_FR)
+```
+
+coloured green below the first threshold, yellow past some, red past the last
+(`NO_COLOR` or `--no-color` for none). It caches the answer for `--ttl` (30 s)
+in the user cache directory (the directory mode 0700, the file 0600, **no
+secret in it**: the answer, and a file name derived from a hash of the gateway
+and the credential). **On any error or timeout (`--timeout`, 2 s) it prints
+nothing and exits 0**, and it never prints the credential (a planted test
+proves the check can see a leak). It refuses to send the credential over plain
+http except to this machine (`--allow-http` to override) and never follows a
+redirect. If your `apiKeyHelper` supplies the credential and neither variable
+is set in the status line's environment, pass `--token-file`. (The status line
+documentation does not say which environment variables the command inherits;
+Claude Code's own are assumed, and `--url` / `--token-file` are the fallback.)
+
+**Continue** (and any client without a status line) shows no native warning:
+read the `X-Llmflow-Usage-*` response headers from your own tooling, or
+`GET /v1/me/usage`; the notifications reach people regardless of the client.
+
+**Migration (v0.18 → v0.19).** Start-up adds `llmflow_warn_marks`,
+`llmflow_warn_levels` and the `warn_at` column of `llmflow_budgets_v2`.
+Nothing changes for a person without a profile or a user budget. The refusal
+text of a profile changed (Anthropic's wording; the numbers in days now follow
+it in parentheses). Upgrade every replica: a v0.18 replica does not evaluate
+thresholds, so it only misses the firings it would have shared.
+
+**Not measured.** `BenchmarkAdmission` was not run for this change: the machine
+was loaded (load average above 30; the rule is 4). The request path adds one
+profile lookup and a handful of in-memory reads per request (`usageHeaders`).
+
 ### Cost units (since v0.12.0)
 
 A cost has a **unit**. vLLM models cost GPU-hours by default (`unit`
@@ -1480,7 +1625,7 @@ entries, and checkpoints sign a self-describing message
 
 Client routes: `POST /v1/chat/completions`, `/v1/completions`,
 `/v1/embeddings`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/rerank`, `/v2/rerank`,
-`/v1/audio/transcriptions`, `/tokenize`, `/detokenize`, `GET /v1/models`, and `POST /mcp` with `mcp_server` blocks. `GET /healthz` returns 503 when the budget
+`/v1/audio/transcriptions`, `/tokenize`, `/detokenize`, `GET /v1/models`, `GET /v1/me/usage` (the caller's own soft-quota windows), and `POST /mcp` with `mcp_server` blocks. `GET /healthz` returns 503 when the budget
 state is stale and fail-closed is on.
 
 ### Fallbacks

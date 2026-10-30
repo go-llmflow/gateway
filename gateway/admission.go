@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -72,9 +73,9 @@ func (e *admitError) Error() string { return e.msg }
 // message names only the caller's own scope (the key's org, team, project,
 // key, tags, the person), its room left and the request's maximum cost; a
 // workload profile's budget is spelled in workdays (profiles.go).
-func (s *Server) budgetRefusal(k store.BudgetKey, room, w int64, unit string, reset time.Time) *admitError {
+func (s *Server) budgetRefusal(k store.BudgetKey, room, w int64, unit string, reset time.Time, lang string) *admitError {
 	if k.Kind.Profile() && s.prof != nil {
-		if ae, ok := s.profileRefusal(k, room, w, reset); ok {
+		if ae, ok := s.profileRefusal(k, room, w, reset, lang); ok {
 			return ae
 		}
 	}
@@ -172,7 +173,7 @@ func (s *Server) admitBudget(ctx context.Context, ep openai.Endpoint, g *group, 
 	if oerr != nil {
 		// Both refuse: say both, and the earlier of their resets.
 		both := *oe
-		both.msg = ae.msg + "; and the " + oe.msg
+		both.msg = ae.msg + " (the overflow allowance too: " + oe.msg + ")"
 		if !ae.reset.IsZero() && (both.reset.IsZero() || ae.reset.Before(both.reset)) {
 			both.reset = ae.reset
 		}
@@ -243,7 +244,7 @@ func (s *Server) admitScope(ctx context.Context, ep openai.Endpoint, g *group, s
 			return armingRefusal(nr.key)
 		}
 		if errors.As(err, &nr) {
-			return s.budgetRefusal(nr.key, nr.room, w, scope.unit, nr.resetIn(refs))
+			return s.budgetRefusal(nr.key, nr.room, w, scope.unit, nr.resetIn(refs), scope.lang)
 		}
 		return &admitError{http.StatusServiceUnavailable, "service_unavailable", "the budget ledger cannot be reached; requests under a budget are refused", "store_unavailable", time.Time{}, store.BudgetKey{}}
 	}
@@ -279,7 +280,7 @@ func (s *Server) admitScope(ctx context.Context, ep openai.Endpoint, g *group, s
 		next := g.prices.largestFit(sh, l, lo, m, nr.room, provider)
 		if next < 0 {
 			wlo, _ := g.prices.worstCase(sh, l, lo, provider)
-			return nil, nil, s.budgetRefusal(nr.key, nr.room, wlo, scope.unit, nr.resetIn(refs))
+			return nil, nil, s.budgetRefusal(nr.key, nr.room, wlo, scope.unit, nr.resetIn(refs), scope.lang)
 		}
 		if next == m {
 			next = m - 1 // the room shrank meanwhile
@@ -384,6 +385,15 @@ func (s *Server) writeAdmitError(w http.ResponseWriter, team string, err error) 
 	}
 	if !ae.reset.IsZero() {
 		w.Header().Set(budgetResetHeader, ae.reset.UTC().Format(time.RFC3339))
+	}
+	if ae.status == http.StatusTooManyRequests && (ae.denyTag == "profile" || ae.denyTag == "budget") {
+		// An exhausted allowance is not a temporary throttle: retry-after is
+		// integer seconds (llm-gateway-protocol.md: Claude Code stops retrying
+		// above 60 and shows the message at once), and x-should-retry says no.
+		if !ae.reset.IsZero() {
+			w.Header().Set("Retry-After", strconv.FormatInt(max(1, int64(math.Ceil(ae.reset.Sub(s.now()).Seconds()))), 10))
+		}
+		w.Header().Set("X-Should-Retry", "false")
 	}
 	apiError(w, ae.status, ae.typ, ae.msg)
 }

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -66,8 +67,12 @@ func TestProfileWeekAndOverflow(t *testing.T) {
 	e.srv.escrow.forgetRoom()
 	resp := e.do("POST", "/v1/chat/completions", key, chat20)
 	out := readAll(t, resp)
-	if resp.StatusCode != 429 || !strings.Contains(out, "weekly allowance of 0.4 day: 0.07 day left, and this request may cost up to 0.21 day") ||
-		!strings.Contains(out, "resets Monday") ||
+	// Anthropic's words (#96), and a retry-after in integer seconds above 60
+	// (Claude Code then stops retrying) with x-should-retry: false.
+	ra, raErr := strconv.Atoi(resp.Header.Get("Retry-After"))
+	if resp.StatusCode != 429 || !strings.Contains(out, "You've hit your weekly allowance · resets Mon 00:00") ||
+		!strings.Contains(out, "0.07 day left of 0.4 day, and this request may cost up to 0.21 day") ||
+		raErr != nil || ra <= 60 || resp.Header.Get("X-Should-Retry") != "false" ||
 		resp.Header.Get(budgetResetHeader) != monday {
 		t.Fatalf("beyond the week: %d %q %s", resp.StatusCode, resp.Header.Get(budgetResetHeader), out)
 	}
@@ -92,7 +97,7 @@ func TestProfileWeekAndOverflow(t *testing.T) {
 	if m := store.Month.ResetAt(time.Now()); m.Before(first) {
 		first = m
 	}
-	if resp.StatusCode != 429 || !strings.Contains(out, "monthly overflow allowance of 0.3 day") || !strings.Contains(out, "weekly allowance") ||
+	if resp.StatusCode != 429 || !strings.Contains(out, "You've hit your monthly overflow allowance") || !strings.Contains(out, "0.14 day left of 0.3 day") || !strings.Contains(out, "weekly allowance") ||
 		resp.Header.Get(budgetResetHeader) != first.Format(time.RFC3339) {
 		t.Fatalf("beyond the overflow cap: %d %q %s", resp.StatusCode, resp.Header.Get(budgetResetHeader), out)
 	}
@@ -142,8 +147,12 @@ func TestProfileSession(t *testing.T) {
 	resp := e.do("POST", "/v1/chat/completions", key, chat20)
 	out := readAll(t, resp)
 	reset, err := time.Parse(time.RFC3339, resp.Header.Get(budgetResetHeader))
-	if resp.StatusCode != 429 || !strings.Contains(out, "session allowance of 0.25 day per 5h: 0.09 day left") || !strings.Contains(out, "room again from") || err != nil ||
-		reset.Before(time.Now().Add(5*time.Hour)) || reset.After(time.Now().Add(5*time.Hour+10*time.Minute)) {
+	if resp.StatusCode != 429 || !strings.Contains(out, "You've hit your session allowance · resets ") || !strings.Contains(out, "0.09 day left of 0.25 day") || err != nil ||
+		resp.Header.Get("X-Should-Retry") != "false" || resp.Header.Get("Retry-After") == "" ||
+		// The reset is the end of the 5-minute bucket of the request plus the
+		// window; the assertion may run a bucket later (the test failed once
+		// just past a bucket boundary).
+		reset.Before(time.Now().Add(5*time.Hour-store.BucketWidth)) || reset.After(time.Now().Add(5*time.Hour+10*time.Minute)) {
 		t.Fatalf("session full: %d %q %s", resp.StatusCode, resp.Header.Get(budgetResetHeader), out)
 	}
 }

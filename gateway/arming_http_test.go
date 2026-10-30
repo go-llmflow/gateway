@@ -26,6 +26,17 @@ func TestBudgetArmsOverARunningRequest(t *testing.T) {
 		up.gate = make(chan struct{})
 		e := newEnv(t, testConfig(up.URL()))
 		e.st.NoArming = control
+		// The first request must be tracked at its real worst case (0.208).
+		// Sent before the health loop has read the model's context length,
+		// it is admitted (there is no budget yet) but tracked as unbounded
+		// (maxLedgerNano): the budget created beneath it then reserves
+		// everything and the next request is refused with "0 left" where
+		// 0.092 was expected. That refusal is the conservative, correct answer
+		// to an unbounded request in flight (the store held Σ reports = 2^62:
+		// spent + grants + pre never above the limit). The flake was the test
+		// racing the probe: 331 failures in 800 runs with -cpu 1,4 under load,
+		// none once it waits.
+		eventually(t, 10*time.Second, "the context length is known", func() bool { return e.srv.groups["llama"].contextLen() > 0 })
 		key := e.createKey(`{"team":"etabA"}`)
 		first := make(chan int, 1)
 		go func() { first <- e.chatWith(key, body) }()
@@ -74,8 +85,17 @@ func TestBudgetArmsOverARunningRequest(t *testing.T) {
 		resp := e.do("POST", "/v1/chat/completions", key, body)
 		if out := readAll(t, resp); resp.StatusCode != 429 || !strings.Contains(out, "0.092000000 gpu_hours left") {
 			st, _ := e.st.Ledger(context.Background(), team, store.Day.Start(time.Now()))
+			arming, pre, ready := e.st.ArmingState(team)
+			e.srv.tracker.mu.Lock()
+			ids := 0
+			if as := e.srv.tracker.arming[team]; as != nil {
+				ids = len(as.ids)
+			}
+			pend := len(e.srv.tracker.pending)
+			e.srv.tracker.mu.Unlock()
 			release()
-			t.Fatalf("beside the running request (0.3 - 0.208 reserved): %d %s (ledger %+v)", resp.StatusCode, out, st)
+			t.Fatalf("beside the running request (0.3 - 0.208 reserved): %d %s (ledger %+v; store: arming %v, Σ reports %d, all reported %v; tracker: %d counted, %d pending; limit 300000000)",
+				resp.StatusCode, out, st, arming, pre, ready, ids, pend)
 		}
 		release()
 		if code := <-first; code != 200 {

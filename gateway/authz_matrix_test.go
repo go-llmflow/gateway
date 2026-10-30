@@ -177,6 +177,20 @@ func matrixRows() []matrixRow {
 			[]string{"master", "padmin", "pview", "oadmin", "tadmin", "tviewer", "oviewer"}, nil},
 		{"PUT /admin/users/{name}/profile", "PUT", p("/admin/users/target/profile"), `{"profile":"p"}`, teamAdmins, nil},
 		{"DELETE /admin/users/{name}/profile", "DELETE", p("/admin/users/target/profile"), "", teamAdmins, nil},
+		// Soft quotas (#96): the listings are open to every administrator and
+		// filtered (an organisation's thresholds only to those who view it; the
+		// people above a threshold only among those the caller may read); the
+		// gateway default and the profiles' thresholds are the proxy admins',
+		// an organisation's its own admins' (never another organisation's:
+		// oadminC gets 403 on etabA).
+		{"GET /admin/soft-quotas", "GET", p("/admin/soft-quotas"), "", nil, outsiders},
+		{"GET /admin/soft-quotas/standing", "GET", p("/admin/soft-quotas/standing"), "", nil, outsiders},
+		{"PUT /admin/soft-quotas/gateway", "PUT", p("/admin/soft-quotas/gateway"), `{"warn_at":[70,90]}`, writeAll, nil},
+		{"DELETE /admin/soft-quotas/gateway", "DELETE", p("/admin/soft-quotas/gateway"), "", writeAll, nil},
+		{"PUT /admin/soft-quotas/orgs/{name}", "PUT", p("/admin/soft-quotas/orgs/etabA"), `{"warn_at":[80,95]}`, orgAdmins, nil},
+		{"DELETE /admin/soft-quotas/orgs/{name}", "DELETE", p("/admin/soft-quotas/orgs/etabA"), "", orgAdmins, nil},
+		{"PUT /admin/soft-quotas/profiles/{name}", "PUT", p("/admin/soft-quotas/profiles/p"), `{"warn_at":[50]}`, writeAll, nil},
+		{"DELETE /admin/soft-quotas/profiles/{name}", "DELETE", p("/admin/soft-quotas/profiles/p"), "", writeAll, nil},
 	}
 }
 

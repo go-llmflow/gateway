@@ -274,6 +274,16 @@ func (a *armRun) check(ctx context.Context, where string) {
 	}
 }
 
+// exercised: the run has refused a request for lack of room, and a request
+// that held on the new budget has been stored (so the budget armed and was
+// used, not merely refused throughout).
+func (a *armRun) exercised(ctx context.Context) bool {
+	if !a.created.Load() || a.refused.Load() == 0 {
+		return false
+	}
+	return a.truth(ctx)-a.unheldCost.Load() > 0 || a.unheldCost.Load() >= a.limit.Load()
+}
+
 func runArming(t *testing.T, control bool, seed uint64) (truth, bound int64) {
 	direct, _ := freshDB(t, "")
 	ctx := context.Background()
@@ -333,9 +343,28 @@ func runArming(t *testing.T, control bool, seed uint64) (truth, bound int64) {
 		}()
 	}
 	const createAt, slow = 30, 10
+	// The run is made of two phases. Until killsEnd (150 ticks) replicas are
+	// killed every 7th tick: that is the chaos the property is checked under,
+	// and it is fixed by the tick count, not by the clock. Then the kills stop
+	// and the run goes on, up to maxTicks, until it has exercised what the
+	// guard below demands.
+	//
+	// v0.18.0's CI tripped that guard once ("held cost 0", 316031 refused): on
+	// a slow runner (race detector, arm64) the last kills landed so late that
+	// the restarted processes had not yet reported for the new budget, which
+	// therefore stayed arming for the whole fixed-length run and refused
+	// everything, correctly. The property held; the run proved nothing. What a
+	// fixed number of ticks cannot promise, waiting for the condition (with a
+	// bound, and a failure when the bound is hit) does. The unheld request is
+	// no longer left to chance either: one is issued by the slow replica at
+	// the budget's creation.
+	const killsEnd, maxTicks = 150, 3000
 	rng := rand.New(rand.NewPCG(seed, 999))
 	tk := time.NewTicker(10 * time.Millisecond)
-	for n := 0; n < 150; n++ {
+	for n := 0; n < maxTicks; n++ {
+		if n >= killsEnd && a.exercised(ctx) {
+			break
+		}
 		<-tk.C
 		if n == createAt {
 			// Created, then set to what its period had stored at creation
@@ -354,6 +383,10 @@ func runArming(t *testing.T, control bool, seed uint64) (truth, bound int64) {
 			a.limit.Store(store.ToNano(limit))
 			a.created.Store(true)
 			t.Logf("budget created: limit %d, starting spent %d (%d admitted, %d refused so far)", a.limit.Load(), led.Spent, a.admits.Load(), a.refused.Load())
+			// r2 has not loaded the budget (it sees it `slow` ticks late) and
+			// is never killed in this window: its request below is admitted
+			// without a hold on the new budget, whatever the scheduler does.
+			a.request(ctx, reps[2], rng)
 		}
 		for i, r := range reps {
 			// Every replica refreshes every tick; the first r2 process sees
@@ -363,7 +396,7 @@ func runArming(t *testing.T, control bool, seed uint64) (truth, bound int64) {
 			r.mu.Unlock()
 			a.learn(r, knows || n >= createAt && (i < 2 || n >= createAt+slow))
 		}
-		if n%7 == 3 { // kill a replica; it comes back
+		if n < killsEnd && n%7 == 3 { // kill a replica; it comes back
 			r := reps[rng.IntN(len(reps))]
 			if n >= createAt-10 && n < createAt+45 {
 				// r2 lives through the window: its long requests are the
@@ -393,10 +426,30 @@ func runArming(t *testing.T, control bool, seed uint64) (truth, bound int64) {
 	if v := a.violated.Load(); v != nil && !control {
 		t.Fatal(*v)
 	}
+	if control {
+		// The planted control must overshoot, not merely be able to. v0.17.0's
+		// flaw: a budget active at once starts from the spend stored at its
+		// creation, so a request admitted before it (holding nothing on it)
+		// that settles and is stored afterwards lands on top of a period whose
+		// room was already handed out. Whether the random run produced one big
+		// enough was luck (about 1 run in 15 stayed within the bound, and the
+		// guard below said the test could not see the overshoot). Here one
+		// is made certain: a request of 200 units, admitted before the budget
+		// and stored after the room was used (held cost > 0, which the run
+		// waited for), so that period cost = unheld + held > max(limit, unheld).
+		late := store.ToNano(200)
+		rec := store.Record{ID: "late-unheld", Time: a.now, AdmittedAt: a.now, Org: "o", Team: "t", KeyID: "k", Model: "m",
+			Cost: 200, CostNano: late, Status: 200}
+		// Deliberately not added to unheldCost: v0.17.0 did not account for it,
+		// so the period cost exceeds max(limit, unheld) whatever the schedule.
+		if err := st.InsertRecords(ctx, []store.Record{rec}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	truth = a.truth(ctx)
-	if a.kills.Load() < 20 || a.admits.Load() == 0 || a.refused.Load() == 0 || a.unheld.Load() == 0 || truth == a.unheldCost.Load() {
-		t.Fatalf("the run exercised nothing: %d kills, %d admitted, %d refused, %d unheld after creation, held cost %d",
-			a.kills.Load(), a.admits.Load(), a.refused.Load(), a.unheld.Load(), truth-a.unheldCost.Load())
+	if a.kills.Load() < 20 || a.admits.Load() == 0 || a.refused.Load() == 0 || a.unheld.Load() == 0 || truth == a.unheldCost.Load() && a.unheldCost.Load() < a.limit.Load() {
+		t.Fatalf("the run exercised nothing even after waiting %d ticks: %d kills, %d admitted, %d refused, %d unheld after creation, held cost %d",
+			maxTicks, a.kills.Load(), a.admits.Load(), a.refused.Load(), a.unheld.Load(), truth-a.unheldCost.Load())
 	}
 	t.Logf("control=%v: %d admitted (%d without a hold on the new budget after its creation), %d refused, %d kills; period cost %d, limit %d, cost held nothing on it %d",
 		control, a.admits.Load(), a.unheld.Load(), a.refused.Load(), a.kills.Load(), truth, a.limit.Load(), a.unheldCost.Load())

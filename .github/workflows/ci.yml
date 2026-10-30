@@ -103,6 +103,9 @@ jobs:
           - { target: FuzzParseText, pkg: ./energy }
           - { target: FuzzParseSacct, pkg: ./energy }
           - { target: FuzzParseFluids, pkg: ./config }
+          - { target: FuzzParse, pkg: ./internal/warnat }
+          - { target: FuzzSoftQuotas, pkg: ./config }
+          - { target: FuzzRender, pkg: ./cmd/llmflow-status }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -132,7 +135,9 @@ jobs:
           CGO_ENABLED: '0'
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: go build -trimpath -o llmflow-gateway ./cmd/llmflow-gateway
+        run: |
+          go build -trimpath -o llmflow-gateway ./cmd/llmflow-gateway
+          go build -trimpath -o llmflow-status ./cmd/llmflow-status
 
   govulncheck:
     runs-on: ubuntu-latest

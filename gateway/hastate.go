@@ -359,20 +359,25 @@ func (s *Server) deliverDue(ctx context.Context) {
 		return
 	}
 	for _, a := range due {
-		var p alertPayload
-		if json.Unmarshal(a.Payload, &p) != nil {
-			s.finishAlert(ctx, a, "failed", 0, "undecodable payload")
-			continue
-		}
 		sctx, cancel := context.WithTimeout(ctx, time.Minute)
 		var err error
-		switch a.Channel {
-		case "webhook":
-			err = s.alerts.webhook(sctx, p)
-		case "smtp":
-			err = s.alerts.mail(p)
-		default:
-			err = permanent{errors.New("unknown channel")}
+		if handled, qerr := s.deliverQuota(sctx, a); handled {
+			err = qerr // a soft-quota notification (softquota_notify.go)
+		} else {
+			var p alertPayload
+			if json.Unmarshal(a.Payload, &p) != nil {
+				cancel()
+				s.finishAlert(ctx, a, "failed", 0, "undecodable payload")
+				continue
+			}
+			switch a.Channel {
+			case "webhook":
+				err = s.alerts.webhook(sctx, p)
+			case "smtp":
+				err = s.alerts.mail(p)
+			default:
+				err = permanent{errors.New("unknown channel")}
+			}
 		}
 		cancel()
 		var perm permanent
