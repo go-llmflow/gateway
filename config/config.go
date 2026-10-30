@@ -89,6 +89,10 @@ type Config struct {
 	// Fluids prices and attributes measured energy; nil without a fluids
 	// block (#97).
 	Fluids *Fluids
+	// AdoptionMinUsers is the small-cell threshold of the adoption figures: a
+	// day, a week or a model used by fewer distinct people is not shown
+	// (default 5, at least 2: one person is never a figure).
+	AdoptionMinUsers int
 	// Profiles are the workload profiles (profiles.go, #90).
 	Profiles Profiles
 	// SoftQuotas are the warnings before a window runs out (softquotas.go, #96).
@@ -475,6 +479,31 @@ type Org struct {
 	// WarnAt overrides the soft-quota thresholds of the organisation's people
 	// (nil: not set; #96).
 	WarnAt []int
+	// CostCenter is the organisation's general-ledger code for the chargeback
+	// (#97); LabCostCenter and ProjectCostCenter (by team and project) give a
+	// lab or a project its own, which then wins over the organisation's.
+	CostCenter        string
+	LabCostCenter     map[string]string
+	ProjectCostCenter map[[2]string]string
+}
+
+// CostCenterOf resolves the cost centre of a consumer: the project's, else
+// the lab's, else the organisation's; "" when none is configured. The
+// organisation is looked up by name, whatever the other arguments.
+func (c *Config) CostCenterOf(org, lab, team, project string) string {
+	for _, o := range c.Orgs {
+		if o.Name != org {
+			continue
+		}
+		if cc := o.ProjectCostCenter[[2]string{team, project}]; cc != "" && project != "" {
+			return cc
+		}
+		if cc := o.LabCostCenter[lab]; cc != "" && lab != "" {
+			return cc
+		}
+		return o.CostCenter
+	}
+	return ""
 }
 
 // Attribution says how a request names its project.

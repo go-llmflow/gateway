@@ -21,6 +21,12 @@ const (
 	RoleProxyAdmin Role = "proxy_admin"
 	// RoleProxyViewer reads everything and changes nothing.
 	RoleProxyViewer Role = "proxy_viewer"
+	// RoleFinanceViewer reads the reports of every organisation (spend,
+	// exports, fluids, lending, chargeback, decision reports) and nothing
+	// else: no listing of keys, teams or users, no audit log, no write. It is
+	// what a platform agreement's finance office needs (#97) and is granted by
+	// a proxy admin only.
+	RoleFinanceViewer Role = "finance_viewer"
 	// RoleOrgAdmin administers one organisation: its teams, projects,
 	// keys, budgets and the roles of its members.
 	RoleOrgAdmin Role = "org_admin"
@@ -84,7 +90,7 @@ func (b Binding) Validate() error {
 		return fmt.Errorf("unknown provenance %q", b.Provenance)
 	}
 	switch b.Role {
-	case RoleProxyAdmin, RoleProxyViewer:
+	case RoleProxyAdmin, RoleProxyViewer, RoleFinanceViewer:
 		if b.Org != "" || b.Team != "" {
 			return fmt.Errorf("role %s takes no scope", b.Role)
 		}

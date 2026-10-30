@@ -91,7 +91,7 @@ func (s *Server) usageCSV(w http.ResponseWriter, r *http.Request, p *principal) 
 func (s *Server) visibleReport(r *http.Request, p *principal, from, to time.Time, dims []string) ([]store.ReportRow, error) {
 	ctx, cancel := context.WithTimeout(r.Context(), ReportTimeout)
 	defer cancel()
-	if p.proxyView() {
+	if p.reportView() { // the proxy roles and finance_viewer read every organisation
 		return s.st.Report(ctx, from, to, dims)
 	}
 	inner, _ := store.ValidateDims(append(append([]string{}, dims...), "team", "key"))

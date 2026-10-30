@@ -37,6 +37,15 @@ func (p *principal) has(role store.Role, org, team string) bool {
 func (p *principal) proxyAdmin() bool { return p.master || p.has(store.RoleProxyAdmin, "", "") }
 func (p *principal) proxyView() bool  { return p.proxyAdmin() || p.has(store.RoleProxyViewer, "", "") }
 
+// financeView is the finance_viewer role: reports across organisations.
+func (p *principal) financeView() bool { return p.has(store.RoleFinanceViewer, "", "") }
+
+// reportView reports whether p may read the reports of every organisation:
+// the proxy roles and finance_viewer. It is deliberately not part of orgView,
+// which also opens listings of teams, keys and users: a finance office reads
+// money and energy, not people.
+func (p *principal) reportView() bool { return p.proxyView() || p.financeView() }
+
 func (p *principal) orgAdmin(org string) bool {
 	return p.proxyAdmin() || org != "" && p.has(store.RoleOrgAdmin, org, "")
 }
@@ -181,7 +190,9 @@ func (s *Server) grantProvenance(ctx context.Context, p *principal, b store.Bind
 // administer (personAccess, userBudgetAccess decide from team bindings).
 func (s *Server) canGrant(ctx context.Context, p *principal, b store.Binding) (bool, error) {
 	switch b.Role {
-	case store.RoleProxyAdmin, store.RoleProxyViewer:
+	case store.RoleProxyAdmin, store.RoleProxyViewer, store.RoleFinanceViewer:
+		// Cross-organisation roles: a proxy admin grants them, nobody else, so
+		// an organisation's admin can never open another organisation's reports.
 		return p.proxyAdmin(), nil
 	case store.RoleOrgAdmin:
 		return p.orgAdmin(b.Org), nil

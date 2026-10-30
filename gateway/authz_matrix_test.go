@@ -33,7 +33,7 @@ type matrixFixture struct {
 	targetTok  string // an admin token of user "target"
 }
 
-var matrixPrincipals = []string{"master", "padmin", "pview", "oadmin", "oadminC", "tadmin", "member", "tviewer", "oviewer", "nobody", "infkey", "jwtish"}
+var matrixPrincipals = []string{"master", "padmin", "pview", "oadmin", "oadminC", "tadmin", "member", "tviewer", "oviewer", "nobody", "fviewer", "infkey", "jwtish"}
 
 func matrixSetup(e *env) matrixFixture {
 	t := e.t
@@ -55,6 +55,7 @@ func matrixSetup(e *env) matrixFixture {
 		"tviewer": e.adminToken("tviewer", `{"role":"viewer","team":"etabA"}`),
 		"oviewer": e.adminToken("oviewer", `{"role":"viewer","org":"etabA"}`),
 		"nobody":  e.adminToken("nobody"),
+		"fviewer": e.adminToken("fviewer", `{"role":"finance_viewer"}`),
 		"jwtish":  "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln",
 	}}
 	f.targetTok = e.adminToken("target", `{"role":"viewer","team":"etabA"}`)
@@ -105,7 +106,13 @@ var (
 	teamAdmins = []string{"master", "padmin", "oadmin", "tadmin"}
 	teamViews  = []string{"master", "padmin", "pview", "oadmin", "tadmin", "member", "tviewer", "oviewer"}
 	proxyViews = []string{"master", "padmin", "pview"}
-	outsiders  = []string{"oadminC", "nobody"}
+	// outsiders must not see etabA's objects in a listing. finance_viewer
+	// reads reports of every organisation and nothing else: a listing of
+	// teams, keys or users is not a report.
+	outsiders = []string{"oadminC", "nobody", "fviewer"}
+	// reportOutsiders are the outsiders of a report: finance_viewer is
+	// meant to read etabA's spend there.
+	reportOutsiders = []string{"oadminC", "nobody"}
 )
 
 func matrixRows() []matrixRow {
@@ -150,17 +157,19 @@ func matrixRows() []matrixRow {
 		// Hard budgets (#87): releasing a gone replica's grants, the proxy's
 		// and the budget's own organisation admins only.
 		{"POST /admin/budgets/release-replica", "POST", p("/admin/budgets/release-replica"), `{"replica":"ghost"}`, orgAdmins, nil},
-		{"GET /admin/spend", "GET", p("/admin/spend" + span), "", nil, outsiders},
+		{"GET /admin/spend", "GET", p("/admin/spend" + span), "", nil, reportOutsiders},
 		// Fluids (#97): the proxy roles and the organisation-level roles; a
 		// team-level role has no energy view, and another organisation's admin
 		// reads nothing of etabA's.
-		{"GET /admin/fluids", "GET", p("/admin/fluids" + span), "", []string{"master", "padmin", "pview", "oadmin", "oadminC", "oviewer"}, []string{"oadminC"}},
+		{"GET /admin/fluids", "GET", p("/admin/fluids" + span), "", []string{"master", "padmin", "pview", "oadmin", "oadminC", "oviewer", "fviewer"}, []string{"oadminC"}},
 		// Lending (#97): the same audience as fluids; only the proxy roles
 		// read the matrix across organisations.
-		{"GET /admin/lending", "GET", p("/admin/lending" + span), "", []string{"master", "padmin", "pview", "oadmin", "oadminC", "oviewer"}, []string{"oadminC"}},
-		{"GET /admin/usage.csv", "GET", p("/admin/usage.csv" + span), "", nil, outsiders},
-		{"GET /admin/export", "GET", p("/admin/export" + span + "&format=csv"), "", nil, outsiders},
-		{"POST /admin/export", "POST", p("/admin/export" + span + "&format=csv"), "", nil, outsiders},
+		{"GET /admin/lending", "GET", p("/admin/lending" + span), "", []string{"master", "padmin", "pview", "oadmin", "oadminC", "oviewer", "fviewer"}, []string{"oadminC"}},
+		{"GET /admin/chargeback", "GET", p("/admin/chargeback" + span), "", []string{"master", "padmin", "pview", "oadmin", "oadminC", "oviewer", "fviewer"}, []string{"oadminC"}},
+		{"GET /admin/adoption", "GET", p("/admin/adoption" + span), "", []string{"master", "padmin", "pview", "oadmin", "oadminC", "oviewer", "fviewer"}, []string{"oadminC"}},
+		{"GET /admin/usage.csv", "GET", p("/admin/usage.csv" + span), "", nil, reportOutsiders},
+		{"GET /admin/export", "GET", p("/admin/export" + span + "&format=csv"), "", nil, reportOutsiders},
+		{"POST /admin/export", "POST", p("/admin/export" + span + "&format=csv"), "", nil, reportOutsiders},
 		{"GET /admin/fairshare", "GET", p("/admin/fairshare"), "", nil, outsiders},
 		{"GET /admin/audit", "GET", p("/admin/audit"), "", proxyViews, nil},
 		{"POST /admin/audit/verify", "POST", p("/admin/audit/verify"), "", proxyViews, nil},

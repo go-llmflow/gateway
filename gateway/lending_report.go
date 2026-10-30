@@ -137,10 +137,10 @@ func (s *Server) lendingReport(w http.ResponseWriter, r *http.Request, p *princi
 		storeError(w, err)
 		return
 	}
-	visible := func(org string) bool { return p.proxyView() || p.orgView(org) }
+	visible := func(org string) bool { return p.reportView() || p.orgView(org) }
 	rows := lendingRows(res, visible)
 	var cells []LendingCell
-	if p.proxyView() {
+	if p.reportView() {
 		for l, m := range res.Matrix {
 			for b, v := range m {
 				cells = append(cells, LendingCell{l, b, v})
@@ -178,7 +178,7 @@ func (s *Server) lendingReport(w http.ResponseWriter, r *http.Request, p *princi
 	}
 	out := map[string]any{"from": from.UTC(), "to": to.UTC(), "orgs": rows, "matrix": cells,
 		"wait_note": "wait is the admission wait in the gateway's fair-share queue (arrival to grant); latency is arrival to end. The time a granted request spends in vLLM's own queue is not recorded."}
-	if p.proxyView() {
+	if p.reportView() {
 		out["unattributed_gpu_hours"] = res.Unattributed
 	}
 	w.Header().Set("Content-Type", "application/json")

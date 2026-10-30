@@ -75,6 +75,8 @@ type fileHCL struct {
 	MCPServers           []mcpServerHCL  `hcl:"mcp_server,block"`
 	Budgets              *budgetsHCL     `hcl:"budgets,block"`
 	Fluids               *fluidsHCL      `hcl:"fluids,block"`
+	AdoptionMinUsers     *int            `hcl:"adoption_min_users,optional"`
+	AdoptionMinRange     hcl.Range       `hcl:"adoption_min_users,attr_value_range"`
 	Workday              *workdayHCL     `hcl:"workday,block"`
 	Profiles             []profileHCL    `hcl:"profile,block"`
 	DefaultProfile       *string         `hcl:"default_profile,optional"`
@@ -370,7 +372,7 @@ type ssoRoleHCL struct {
 // scope, org_admin an org, team roles a team, viewer one of the two.
 func validRoleScope(role, org, team string) bool {
 	switch role {
-	case "proxy_admin", "proxy_viewer":
+	case "proxy_admin", "proxy_viewer", "finance_viewer":
 		return org == "" && team == ""
 	case "org_admin":
 		return org != "" && team == "" && ValidName(org)
@@ -544,7 +546,12 @@ type orgHCL struct {
 	ShareRange hcl.Range           `hcl:"share,attr_value_range"`
 	Teams      []orgTeamHCL        `hcl:"team,block"`
 	SoftQuotas *softQuotasLevelHCL `hcl:"soft_quotas,block"`
-	DefRange   hcl.Range           `hcl:",def_range"`
+	// General-ledger codes of the chargeback (#97).
+	CostCenter      *string        `hcl:"cost_center,optional"`
+	CostCenterRange hcl.Range      `hcl:"cost_center,attr_value_range"`
+	LabCCs          []labCCHCL     `hcl:"lab,block"`
+	ProjectCCs      []projectCCHCL `hcl:"project,block"`
+	DefRange        hcl.Range      `hcl:",def_range"`
 }
 
 type orgTeamHCL struct {
@@ -923,6 +930,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 				org.Labs[t.Name] = *t.Lab
 			}
 		}
+		v.costCenters(&org, o)
 		c.Orgs = append(c.Orgs, org)
 	}
 	if sum > 1+1e-9 {
@@ -1512,6 +1520,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	v.external(raw, c)
 	v.budgets(raw, c)
 	v.fluids(raw, c)
+	v.adoptionPrivacy(raw, c)
 	v.profiles(raw, c)
 	v.softQuotas(raw, c)
 	// Every *_file attribute is a secret reference: a file, or a field of

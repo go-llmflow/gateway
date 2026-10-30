@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,11 +45,19 @@ func TestLendingUsesTheCapacityHistory(t *testing.T) {
 // What the gateway applies is what the history says.
 func TestNoteCapacity(t *testing.T) {
 	up := newFakeVLLM(t)
-	e := newEnv(t, testConfig(up.URL()))
+	// A clock the test moves: two changes in one millisecond are one instant.
+	var ns atomic.Int64
+	ns.Store(time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC).UnixNano())
+	e := newEnv(t, testConfig(up.URL()), WithClock(func() time.Time { return time.Unix(0, ns.Load()).UTC() }))
 	ctx := context.Background()
+	around := func() (time.Time, time.Time) {
+		now := time.Unix(0, ns.Load())
+		return now.Add(-time.Hour), now.Add(time.Hour)
+	}
 	e.srv.noteCapacity("b300")
 	e.srv.noteCapacity("b300") // unchanged: nothing more
-	pts, _ := e.st.CapacityBetween(ctx, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	lo, hi := around()
+	pts, _ := e.st.CapacityBetween(ctx, lo, hi)
 	if len(pts) != 1 || pts[0].C != 4 || pts[0].Pool != "b300" {
 		t.Fatalf("%+v", pts)
 	}
@@ -57,8 +66,10 @@ func TestNoteCapacity(t *testing.T) {
 	} else {
 		t.Fatal("not an elastic pool")
 	}
+	ns.Add(int64(time.Minute))
 	e.srv.noteCapacity("b300")
-	if pts, _ = e.st.CapacityBetween(ctx, time.Now().Add(-time.Hour), time.Now().Add(time.Hour)); len(pts) != 2 || pts[1].C != 10 {
+	lo, hi = around()
+	if pts, _ = e.st.CapacityBetween(ctx, lo, hi); len(pts) != 2 || pts[1].C != 10 {
 		t.Fatalf("%+v", pts)
 	}
 }

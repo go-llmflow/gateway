@@ -27,6 +27,10 @@ type Fluids struct {
 	PUE         float64
 	PricePerKWh float64
 	Currency    string
+	// CurrencyDecimals is the currency's minor unit in decimal digits (2 for
+	// EUR and USD, 0 for JPY): the chargeback rounds to it, once per row, half
+	// to even.
+	CurrencyDecimals int
 	// IdleEnergy is energy.IdleByShare (default: pro rata to the guaranteed
 	// shares) or energy.IdleByUsage.
 	IdleEnergy string
@@ -87,6 +91,8 @@ type fluidsHCL struct {
 	PriceRange     hcl.Range         `hcl:"price_per_kwh,attr_value_range"`
 	Currency       *string           `hcl:"currency,optional"`
 	CurrencyRange  hcl.Range         `hcl:"currency,attr_value_range"`
+	Decimals       *int              `hcl:"currency_decimals,optional"`
+	DecimalsRange  hcl.Range         `hcl:"currency_decimals,attr_value_range"`
 	IdleEnergy     *string           `hcl:"idle_energy,optional"`
 	IdleRange      hcl.Range         `hcl:"idle_energy,attr_value_range"`
 	WPrefill       *float64          `hcl:"w_prefill,optional"`
@@ -141,7 +147,7 @@ func (v *validator) fluids(raw *fileHCL, c *Config) {
 		return
 	}
 	out := &Fluids{
-		PUE: 1, IdleEnergy: energy.IdleByShare, WPrefill: energy.DefaultWeights.Prefill, WDecode: energy.DefaultWeights.Decode,
+		PUE: 1, CurrencyDecimals: 2, IdleEnergy: energy.IdleByShare, WPrefill: energy.DefaultWeights.Prefill, WDecode: energy.DefaultWeights.Decode,
 		Interval: DefaultFluidsInterval, Settle: DefaultFluidsSettle, Periods: map[string]FluidsPeriod{},
 	}
 	pos := func(p *float64, r hcl.Range, name string, lo, hi float64) float64 {
@@ -163,6 +169,12 @@ func (v *validator) fluids(raw *fileHCL, c *Config) {
 	}
 	if out.PricePerKWh > 0 && out.Currency == "" {
 		v.errf(f.DefRange, "Missing currency", "price_per_kwh is set: name its currency (currency = \"EUR\"); a price without a unit cannot be billed")
+	}
+	if f.Decimals != nil {
+		if *f.Decimals < 0 || *f.Decimals > 4 {
+			v.errf(f.DecimalsRange, "Invalid currency_decimals", "currency_decimals = %d: want 0..4 (2 for EUR and USD)", *f.Decimals)
+		}
+		out.CurrencyDecimals = *f.Decimals
 	}
 	out.IdleEnergy = strOr(f.IdleEnergy, energy.IdleByShare)
 	if !energy.ValidIdleMode(out.IdleEnergy) {
