@@ -216,6 +216,10 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		adm, held, aerr := s.admitBudget(r.Context(), ep, g, scope, out, eg.betas, reqID)
 		if aerr != nil {
 			s.tracker.untrack(reqID)
+			var ae *admitError
+			if errors.As(aerr, &ae) {
+				s.noteRefusal(scope, ae)
+			}
 			s.writeAdmitError(w, key.Team, aerr)
 			return
 		}
