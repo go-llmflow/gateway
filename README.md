@@ -879,10 +879,12 @@ whole 5 minutes; no `soft_limit`). Replica clocks must be in sync, as they
 must be for calendar periods.
 
 **Who assigns.**
+Who a person belongs to is decided by their **team bindings** (which SSO and SCIM also create), as in the
+[v0.18.1](#security-fixes-in-v0181) and [v0.18.2](#security-fix-in-v0182-who-may-place-a-person-in-an-organisation-104) security sections.
 - A proxy admin assigns anyone.
-- An organisation admin assigns a person all of whose role bindings are in their organisation.
-- A team admin assigns a person all of whose bindings are in teams they administer.
-- A person with a binding in another organisation, a proxy role, or no binding at all (a JWT's user) is the proxy admins' only. A profile limits the person everywhere, so one organisation does not decide it for another.
+- An organisation admin assigns a person all of whose team bindings are in their organisation; a team admin, a person all of whose team bindings are in teams they administer.
+- An organisation-level binding (`viewer`, `org_admin`) is authority, not membership: it gives no access to the person, whoever granted it. A team binding that an organisation admin granted does not make the person theirs either (it is ignored by the access rules; SCIM, an SSO claim or a proxy admin make one that counts).
+- A person with a binding in another organisation, a proxy role, or no team binding at all (a JWT's user, or one only an org admin placed) is the proxy admins' only: **the first grant to a binding-less user, or to another organisation's user, needs a proxy admin**. A profile limits the person everywhere, so one organisation does not decide it for another.
 - People read their own profile, and administrators and viewers read the people of their scope.
 
 Every assignment is stored with its history (who, when, which profile) and
