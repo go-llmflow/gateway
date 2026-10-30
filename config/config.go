@@ -543,6 +543,11 @@ type Slurm struct {
 	// SreportFile is the output of `sreport cluster AccountUtilizationByUser
 	// -T gres/gpu -P`, read when a report is built ("" for none).
 	SreportFile string
+	// SacctFile is the output of `sacct -a -X -P -o Account,ConsumedEnergyRaw`
+	// over the period reported (energy.ParseSacct): the energy Slurm measured
+	// for batch jobs, compared in the decision report with the DCGM energy the
+	// gateway attributed ("" for none, #97).
+	SacctFile string
 	// Accounts maps a Slurm account to a gateway organisation; an account
 	// absent from the map counts for the organisation of the same name.
 	Accounts map[string]string

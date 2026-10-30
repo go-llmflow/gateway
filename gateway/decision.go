@@ -78,9 +78,15 @@ type decisionData struct {
 	HasFluids                     bool
 	Adoption                      *store.Adoption
 	Chargeback                    []ChargebackRow
-	Daily                         []chartPoint
-	Pie                           []chartSlice
-	Bars                          []chartBar
+	// EnergyRecon compares Slurm's energy (sacct) with the DCGM energy
+	// attributed, per partner; ReconNote says why it is empty when the input
+	// is set and unreadable.
+	EnergyRecon []EnergyReconRow
+	ReconNote   string
+	HasRecon    bool
+	Daily       []chartPoint
+	Pie         []chartSlice
+	Bars        []chartBar
 }
 
 // buildDecision gathers the figures from the reports p may read.
@@ -190,6 +196,27 @@ func (s *Server) buildDecision(r *http.Request, p *principal, from, to time.Time
 	} else {
 		return nil, err
 	}
+	// Slurm's energy against the DCGM energy attributed (#97).
+	if s.cfg.Slurm.SacctFile != "" {
+		d.HasRecon = true
+		slurmJ, err := s.sacctEnergy()
+		if err != nil {
+			s.log.Error("decision report: slurm.sacct_file unreadable", "err", err)
+			d.ReconNote = "The Slurm energy input (slurm.sacct_file) could not be read: " + clip(err.Error(), 160)
+		} else {
+			dcgm := map[string]float64{}
+			for o, x := range byOrg {
+				dcgm[o] = x.KWh
+			}
+			visibleJ := map[string]float64{}
+			for o, j := range slurmJ {
+				if visible(o) {
+					visibleJ[o] = j
+				}
+			}
+			d.EnergyRecon = reconcileEnergy(visibleJ, dcgm)
+		}
+	}
 	// Adoption: overall for the readers of the whole platform, and per partner.
 	if as, ok := s.st.(store.AdoptionStore); ok {
 		var orgs []string
@@ -275,6 +302,30 @@ func writeDecisionXLSX(w io.Writer, d *decisionData) error {
 			return err
 		}
 	}
+	if d.HasRecon {
+		er, err := sheet("Energy reconciliation", []float64{24, 16, 16, 18, 14}, "Partner", "Slurm energy (kWh, sacct)", "DCGM energy attributed (kWh)",
+			"Difference DCGM - Slurm (kWh)", "Difference (% of Slurm)")
+		if err != nil {
+			return err
+		}
+		if d.ReconNote != "" {
+			if err := er.AppendRow(xlsx.String(d.ReconNote)); err != nil {
+				return err
+			}
+		}
+		for _, r := range d.EnergyRecon {
+			slurm, pct := xlsx.String("no Slurm data"), xlsx.String("n/a")
+			if r.HasSlurm {
+				slurm = num(r.SlurmKWh)
+			}
+			if r.DiffPct != nil {
+				pct = xlsx.Number(*r.DiffPct / 100).Format(xlsx.Percent(1))
+			}
+			if err := er.AppendRow(xlsx.String(r.Org), slurm, num(r.DCGMKWh), num(r.DiffKWh), pct); err != nil {
+				return err
+			}
+		}
+	}
 	ad, err := sheet("Adoption", []float64{16, 14}, "Series", "Period or model", "Active people", "Requests")
 	if err != nil {
 		return err
@@ -358,6 +409,9 @@ type decisionView struct {
 	HasAdoption              bool
 	MinUsers                 int
 	Chargeback               []chargebackView
+	HasRecon                 bool
+	ReconNote                string
+	Recon                    []reconView
 	Pie, Bars, Series        template.HTML
 }
 
@@ -372,6 +426,32 @@ type partnerView struct {
 // adoptionRowView is a week or a model, counts as text ("suppressed" for a
 // small cell).
 type adoptionRowView struct{ Name, Users, Requests string }
+
+// reconView is one partner of the energy reconciliation, as text.
+type reconView struct{ Org, Slurm, DCGM, Diff, Pct string }
+
+func (d *decisionData) reconViews() []reconView {
+	var out []reconView
+	for _, r := range d.EnergyRecon {
+		v := reconView{Org: r.Org, Slurm: "no Slurm data", DCGM: fmtNum(r.DCGMKWh), Diff: signed(r.DiffKWh), Pct: "n/a"}
+		if r.HasSlurm {
+			v.Slurm = fmtNum(r.SlurmKWh)
+		}
+		if r.DiffPct != nil {
+			v.Pct = signed(*r.DiffPct) + " %"
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// signed is fmtNum with an explicit + for a positive number.
+func signed(v float64) string {
+	if v > 0 {
+		return "+" + fmtNum(v)
+	}
+	return fmtNum(v)
+}
 
 type matrixView struct{ Lender, Borrower, GPUHours string }
 
@@ -443,6 +523,7 @@ func (d *decisionData) view() decisionView {
 		}
 		v.Chargeback = append(v.Chargeback, chargebackView{c.From.UTC().Format("2006-01"), c.CostCenter, fmtNum(c.GPUHours), fmtNum(c.KWh), fl, prov})
 	}
+	v.HasRecon, v.ReconNote, v.Recon = d.HasRecon, d.ReconNote, d.reconViews()
 	pc := plotCharts{}
 	v.Pie = pc.Pie("GPU-hours by partner", "GPU-hours", d.Pie)
 	v.Bars = pc.Bars("GPU-hours by partner, against the previous period", "GPU-hours", d.Bars)
@@ -483,7 +564,8 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 {{end}}<li><a class="toc" href="#d-lending">Lending matrix and balance</a></li>
 {{if .HasFluids}}<li><a class="toc" href="#d-fluids">Fluids</a></li>
 {{end}}<li><a class="toc" href="#d-adoption">Adoption</a></li>
-<li><a class="toc" href="#d-chargeback">Chargeback</a></li>
+{{if .HasRecon}}<li><a class="toc" href="#d-recon">Energy reconciliation</a></li>
+{{end}}<li><a class="toc" href="#d-chargeback">Chargeback</a></li>
 <li><a class="toc" href="#d-charts">Charts</a></li>
 </ol>
 <p class="note">Units are never added: GPU-hours, kWh and each currency have their own columns. GPU-hours are the gateway's cost unit; the guaranteed capacity is the reserved slots of the partner's share of each pool times the hours of the period. Latency is end-to-end: the gateway does not record queue time.</p>
@@ -538,6 +620,12 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 <table><tr><th>Model</th><th class="n">Active people</th><th class="n">Requests</th></tr>
 {{range .Models}}<tr><td>{{.Name}}</td><td class="n">{{.Users}}</td><td class="n">{{.Requests}}</td></tr>
 {{end}}</table>{{else}}<p>No adoption figures.</p>{{end}}
+{{if .HasRecon}}<h2 id="d-recon">Energy reconciliation: Slurm against DCGM</h2>
+<p class="note">Slurm's energy for the partner's accounts (sacct ConsumedEnergyRaw, which reflects a job's real energy only for an exclusive allocation) against the IT energy the gateway attributed from the DCGM counters. The difference is DCGM minus Slurm, in kWh and as a percentage of Slurm's figure.</p>
+{{if .ReconNote}}<p>{{.ReconNote}}</p>{{end}}
+<table><tr><th>Partner</th><th class="n">Slurm kWh</th><th class="n">DCGM kWh</th><th class="n">Difference kWh</th><th class="n">Difference</th></tr>
+{{range .Recon}}<tr><td>{{.Org}}</td><td class="n">{{.Slurm}}</td><td class="n">{{.DCGM}}</td><td class="n">{{.Diff}}</td><td class="n">{{.Pct}}</td></tr>
+{{end}}</table>{{end}}
 <h2 id="d-chargeback">Chargeback</h2>
 {{if .Chargeback}}<table><tr><th>Month</th><th>Cost centre</th><th class="n">GPU-hours</th><th class="n">kWh</th><th class="n">Fluids</th><th class="n">Provider spend</th></tr>
 {{range .Chargeback}}<tr><td>{{.Period}}</td><td>{{.CostCenter}}</td><td class="n">{{.GPUHours}}</td><td class="n">{{.KWh}}</td><td class="n">{{.Fluids}}</td><td class="n">{{.Provider}}</td></tr>
@@ -731,6 +819,7 @@ func (d *decisionData) json() map[string]any {
 	return map[string]any{
 		"from": d.From.UTC(), "to": d.To.UTC(), "generated": d.Generated, "partners": d.Partners, "matrix": d.Matrix,
 		"unattributed_gpu_hours": d.Unattributed, "chargeback": d.Chargeback, "currency": d.Currency,
+		"energy_reconciliation": d.EnergyRecon, "energy_reconciliation_note": d.ReconNote,
 	}
 }
 

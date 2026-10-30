@@ -1307,6 +1307,24 @@ size, never the content).
 2 minutes, the build runs under a timeout, and at most 2 heavy reports run at
 once (429 with `Retry-After` otherwise).
 
+#### Energy reconciliation: Slurm against DCGM
+
+With `slurm { sacct_file = "/abs/path" }` the report compares, per partner, the
+energy Slurm measured for the jobs of the partner's accounts with the IT energy
+the gateway attributed from the DCGM counters. The file is
+`sacct -a -X -P -o Account,ConsumedEnergyRaw -S <from> -E <to>` over the period
+reported (its rows carry no date, the operator picks the period); accounts map to
+partners by `slurm.accounts` (else by name), job steps are skipped, a row without
+energy counts as nothing, and a value with a unit prefix is refused (the base is
+not documented). The difference is **DCGM minus Slurm**, in kWh and as a
+percentage of Slurm's figure (`n/a` when Slurm reports nothing). It is shown as
+a table in the PDF, a sheet "Energy reconciliation" in the XLSX, and
+`energy_reconciliation` in the JSON; an unreadable input is said in the report,
+not hidden. A difference is a question, not an error: Slurm counts a job's
+allocation ("only in the case of an exclusive job allocation does this value
+reflect the job's real energy consumption", sacct.html), DCGM counts the GPUs.
+Organisation admins see their own partner only.
+
 #### Mail transport: TLS is required (changed in this release)
 
 Alert and report mail went through `net/smtp.SendMail`, which upgrades to TLS

@@ -27,6 +27,7 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 <li><a class="toc" href="#d-lending">Lending matrix and balance</a></li>
 <li><a class="toc" href="#d-fluids">Fluids</a></li>
 <li><a class="toc" href="#d-adoption">Adoption</a></li>
+<li><a class="toc" href="#d-recon">Energy reconciliation</a></li>
 <li><a class="toc" href="#d-chargeback">Chargeback</a></li>
 <li><a class="toc" href="#d-charts">Charts</a></li>
 </ol>
@@ -115,6 +116,13 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 <h3>Models</h3>
 <table><tr><th>Model</th><th class="n">Active people</th><th class="n">Requests</th></tr>
 <tr><td>llama</td><td class="n">38</td><td class="n">4900</td></tr>
+</table>
+<h2 id="d-recon">Energy reconciliation: Slurm against DCGM</h2>
+<p class="note">Slurm's energy for the partner's accounts (sacct ConsumedEnergyRaw, which reflects a job's real energy only for an exclusive allocation) against the IT energy the gateway attributed from the DCGM counters. The difference is DCGM minus Slurm, in kWh and as a percentage of Slurm's figure.</p>
+
+<table><tr><th>Partner</th><th class="n">Slurm kWh</th><th class="n">DCGM kWh</th><th class="n">Difference kWh</th><th class="n">Difference</th></tr>
+<tr><td>etabA</td><td class="n">36.00</td><td class="n">40.00</td><td class="n">&#43;4.00</td><td class="n">&#43;11.11 %</td></tr>
+<tr><td>etabB</td><td class="n">20.00</td><td class="n">12.00</td><td class="n">-8.00</td><td class="n">-40.00 %</td></tr>
 </table>
 <h2 id="d-chargeback">Chargeback</h2>
 <table><tr><th>Month</th><th>Cost centre</th><th class="n">GPU-hours</th><th class="n">kWh</th><th class="n">Fluids</th><th class="n">Provider spend</th></tr>

@@ -40,6 +40,9 @@ func fixedDecision() *decisionData {
 			Models: []store.AdoptionModel{{Model: "llama", Users: 38, Requests: 4900}}},
 		Chargeback: []ChargebackRow{{From: t0, To: t0.AddDate(0, 1, 0), CostCenter: "GL-A", GPUHours: 120, KWh: 40, FluidsCostMinor: 1008, FluidsCost: "10.08", FluidsCurrency: "EUR", ProviderCost: "0.00"},
 			{From: t0, To: t0.AddDate(0, 1, 0), CostCenter: CostCenterUnmapped, GPUHours: 30, KWh: 12, FluidsCostMinor: 302, FluidsCost: "3.02", FluidsCurrency: "EUR", ProviderCost: "0.00"}},
+		HasRecon: true,
+		EnergyRecon: reconcileEnergy(map[string]float64{"etabA": 3.6e6 * 36, "etabB": 3.6e6 * 20}, // Slurm: 36 and 20 kWh
+			map[string]float64{"etabA": 40, "etabB": 12}), // DCGM: 40 (+11.1 %) and 12 (-40 %)
 		Daily: []chartPoint{{"2026-10-01", 4}, {"2026-10-02", 6}, {"2026-10-03", 5}},
 		Pie:   []chartSlice{{"etabA", 120}, {"etabB", 30}},
 		Bars:  []chartBar{{"etabA", 120, 100}, {"etabB", 30, 0}},
@@ -130,7 +133,7 @@ func TestDecisionXLSX(t *testing.T) {
 			sheets += string(data)
 		}
 	}
-	for _, name := range []string{"Partners", "Lending matrix", "Chargeback", "Adoption"} {
+	for _, name := range []string{"Partners", "Lending matrix", "Chargeback", "Adoption", "Energy reconciliation"} {
 		if !strings.Contains(wbxml, name) {
 			t.Errorf("no sheet %q in %s", name, wbxml)
 		}

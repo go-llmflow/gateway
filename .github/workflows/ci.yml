@@ -102,6 +102,7 @@ jobs:
           - { target: FuzzProfileAPI, pkg: ./gateway }
           - { target: FuzzProfileForms, pkg: ./gateway }
           - { target: FuzzParseText, pkg: ./energy }
+          - { target: FuzzReconcileEnergy, pkg: ./gateway }
           - { target: FuzzParseSacct, pkg: ./energy }
           - { target: FuzzParseFluids, pkg: ./config }
           - { target: FuzzParse, pkg: ./internal/warnat }
