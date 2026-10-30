@@ -470,6 +470,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.bg.Add(1)
 		go func() { defer s.bg.Done(); s.profilesLoop(bctx) }()
 	}
+	s.startFluids(bctx)
 	if s.cfg.KeyRotation != nil {
 		if s.secretWriter == nil {
 			return errors.New("gateway: key_rotation needs a secret writer (vault)")

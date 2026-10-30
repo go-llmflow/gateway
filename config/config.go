@@ -86,6 +86,9 @@ type Config struct {
 	SCIM *SCIM
 	// Budgets tunes the hard budgets' escrow (budgets.go).
 	Budgets Budgets
+	// Fluids prices and attributes measured energy; nil without a fluids
+	// block (#97).
+	Fluids *Fluids
 	// Profiles are the workload profiles (profiles.go, #90).
 	Profiles Profiles
 	// HA, when set, runs this gateway as one of several replicas sharing
@@ -554,6 +557,9 @@ type Upstream struct {
 	// KeyFile holds the vLLM --api-key of this server (the model's
 	// key_file when the upstream block does not set one).
 	KeyFile string
+	// DcgmURL is the node's NVIDIA DCGM exporter, scraped for energy when a
+	// fluids block exists ("" for none).
+	DcgmURL string
 }
 
 // ModelGroup is a model name exposed to clients, served by one or more

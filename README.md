@@ -952,6 +952,69 @@ HCL allows one attribute only in a block written on one line
 - Upgrade every replica before assigning profiles. A v0.17 replica does not know the profile kinds: it admits without holding on them, and the arming of each new profile budget covers its requests only until their records are stored.
 - Fixed on the way: a budget deleted and created again now re-reads its period's spend from the records. Records stored while it did not exist were missing from it.
 
+### Fluids: measured energy, attributed to consumers (#97)
+
+Electricity and cooling are re-billed on **measured** consumption, not on a
+guess. Name the NVIDIA DCGM exporter of each node on its upstreams and price
+the energy:
+
+```hcl
+fluids {
+  pue           = 1.4        # facility energy / IT energy, 1..5 (default 1)
+  price_per_kwh = 0.18
+  currency      = "EUR"      # required with a price; never summed with GPU-hours
+  idle_energy   = "by_share" # or "by_usage" (default by_share)
+  w_prefill     = 1          # relative energy of a prefill and a decode token
+  w_decode      = 1          #   (a modelling choice: calibrate on your models)
+  idle_watts    = 0          # per GPU; energy up to it is idle (0: none)
+  interval      = "15s"      # scrape period
+  settle        = "1m"       # wait before attributing, so accounting has landed
+  period "2026-07" { price_per_kwh = 0.21 }   # per-month override (pue too)
+}
+model "llama" {
+  upstream "gpu01" {
+    base_url = "http://10.0.0.1:8000"
+    dcgm_url = "http://10.0.0.1:9400/metrics"
+  }
+}
+```
+
+- **Source.** `DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION` is a counter "since the
+  driver was last reloaded (in mJ)" (dcgm-exporter `etc/default-counters.csv`).
+  The gateway turns it into per-interval deltas per GPU. A counter that goes
+  down (driver reload) counts its new value as the energy since the reload and
+  is counted in `resets`; a failed scrape loses nothing, since the next delta
+  spans the gap; a GPU seen for the first time only sets a baseline. Energy used
+  while the gateway is down is not counted. The URL follows the rules of
+  `base_url` (http or https, no credentials, no query), is read with a timeout
+  and a bounded body (8 MiB), and **follows no redirect**. The Prometheus text
+  parser is fuzzed. Several upstreams on one node share its `dcgm_url`; Slurm
+  discovered members are not metered yet.
+- **Attribution.** All arithmetic is in integer millijoules, so what is
+  attributed adds up exactly to what was measured (property-tested). In an
+  interval, *active* energy is split between the requests that finished in it by
+  `prefill tokens × w_prefill + decode tokens × w_decode` (prefill tokens are the
+  prompt minus cached tokens). *Idle* energy (an interval with no work, or the
+  `idle_watts` floor) is allocated over a month by the agreement: `by_share`
+  pro rata to the organisations' shares, `by_usage` to their energy; energy no
+  one can be charged for is `(unallocated)`, visible to the proxy roles only.
+  An organisation's idle energy is spread over its rows pro rata to their active
+  energy, so every grouping adds up to the measured total.
+- **Cost** is `kWh_IT × PUE × price_per_kWh`, priced per month (a `period` block
+  overrides PUE and price for one month).
+- **Report.** `GET /admin/fluids?from=&to=&group_by=&format=json|csv` with
+  `group_by` in org, lab, team, project, user, model, pool, day. Columns:
+  `gpu_hours`, `kwh_active`, `kwh_idle`, `kwh`, `fluids_cost`, `currency`: three
+  units in three columns, never added. Proxy roles read every organisation;
+  `org_admin` and org-level `viewer` read their own; team-level roles get 403.
+  Periods are capped at 366 days. Stored in PostgreSQL as one row per interval
+  (`llmflow_energy_intervals`) and per consumer (`llmflow_energy_active`).
+- **Batch.** `energy.ParseSacct` reads `sacct -P -o Account,ConsumedEnergyRaw`
+  (joules; sacct.html). It refuses a unit-prefixed `ConsumedEnergy` (the page
+  does not say the base) and skips job steps. Slurm notes the value is a job's
+  real energy only for an exclusive allocation. It is not yet wired into the
+  reconciliation sheet.
+
 ### Cost units (since v0.12.0)
 
 A cost has a **unit**. vLLM models cost GPU-hours by default (`unit`

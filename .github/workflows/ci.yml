@@ -99,6 +99,9 @@ jobs:
           - { target: FuzzProfileHCL, pkg: ./config }
           - { target: FuzzProfileAPI, pkg: ./gateway }
           - { target: FuzzProfileForms, pkg: ./gateway }
+          - { target: FuzzParseText, pkg: ./energy }
+          - { target: FuzzParseSacct, pkg: ./energy }
+          - { target: FuzzParseFluids, pkg: ./config }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
