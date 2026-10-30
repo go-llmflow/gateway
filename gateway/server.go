@@ -113,9 +113,13 @@ type Server struct {
 	// prof holds the workload profiles (profiles.go, #90); nil without
 	// profile blocks.
 	prof *profiler
-	rec  *recorder
-	met  *metrics
-	keys *keyCache
+	// warn evaluates soft-quota thresholds (softquota.go, #96); softLoc is the
+	// zone reset times are spelled in.
+	warn    *warnState
+	softLoc *time.Location
+	rec     *recorder
+	met     *metrics
+	keys    *keyCache
 	// authFails limits failed authentications per client network.
 	authFails *failLimiter
 	// allowedTags is the request-tag allow-list; alerts sends soft-budget
@@ -200,10 +204,13 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 		cfg: cfg, st: st, secrets: secrets, now: time.Now,
 		log:    slog.New(slog.DiscardHandler),
 		groups: map[string]*group{}, pools: map[string]admitter{},
-		met: newMetrics(), probed: make(chan struct{}),
+		met: newMetrics(), probed: make(chan struct{}), warn: newWarnState(),
 	}
 	for _, o := range opts {
 		o(s)
+	}
+	if loc, err := time.LoadLocation(cfg.SoftQuotas.Timezone); err == nil {
+		s.softLoc = loc
 	}
 	shares := map[string]float64{}
 	// Shares, reservations and borrowing are per organisation: the
@@ -474,6 +481,8 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	s.startFluids(bctx)
 	s.startCapacityHistory(bctx)
+	s.bg.Add(1)
+	go func() { defer s.bg.Done(); s.warnLoop(bctx) }()
 	if s.cfg.KeyRotation != nil {
 		if s.secretWriter == nil {
 			return errors.New("gateway: key_rotation needs a secret writer (vault)")
@@ -566,6 +575,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /tokenize", inf(s.proxyFor(openai.Tokenize, "/tokenize")))
 	mux.Handle("POST /detokenize", inf(s.proxyFor(openai.Detokenize, "/detokenize")))
 	mux.Handle("GET /v1/models", inf(s.models))
+	// The caller's own usage windows (soft quotas, #96): for statusLine
+	// scripts and anything else that wants to show them.
+	mux.Handle("GET /v1/me/usage", inf(s.meUsageHandler))
 	mux.Handle("GET /healthz", s.withClientAddr(s.cfg.Routes.Healthz, http.HandlerFunc(s.healthz)))
 	// /metrics: from an allowed network, or anywhere with the metrics token.
 	mux.Handle("GET /metrics", s.withClientAddr(nil, http.HandlerFunc(s.metrics)))

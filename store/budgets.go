@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-llmflow/gateway/internal/warnat"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -116,6 +117,11 @@ type Budget struct {
 	// gateway process to report what it had in flight (ledger.go). Set by
 	// the store.
 	Arming bool `json:"arming,omitempty"`
+	// WarnAt overrides the soft-quota warning thresholds of a user budget
+	// (#96): percentages of MaxCost, 1 to 5 strictly increasing integers in
+	// 1..99. nil: not set (the profile's, the organisation's, the gateway's,
+	// else 75 and 95 apply); empty: no warnings for this budget.
+	WarnAt []int `json:"warn_at,omitzero"`
 }
 
 // Limit returns the effective maximum at now.
@@ -155,6 +161,14 @@ func ValidateBudget(b Budget) error {
 	}
 	if !validAmount(b.SoftLimit) {
 		return fmt.Errorf("soft_limit %v: want 0..1e15", b.SoftLimit)
+	}
+	if b.WarnAt != nil {
+		if b.Kind != ScopeUser {
+			return fmt.Errorf("warn_at: only on a user budget (the profiles' thresholds are set per profile)")
+		}
+		if err := warnat.Validate(b.WarnAt); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -363,7 +377,7 @@ func (p *Postgres) DeleteBudget(ctx context.Context, k BudgetKey) error {
 }
 
 func (p *Postgres) Budgets(ctx context.Context) ([]Budget, error) {
-	rows, err := p.pool.Query(ctx, `SELECT kind, name, model, unit, period, max_cost, soft_limit, temp_increase, temp_expiry, limit_epoch, arming
+	rows, err := p.pool.Query(ctx, `SELECT kind, name, model, unit, period, max_cost, soft_limit, temp_increase, temp_expiry, limit_epoch, arming, warn_at
 		FROM llmflow_budgets_v2`)
 	if err != nil {
 		return nil, err
@@ -371,8 +385,9 @@ func (p *Postgres) Budgets(ctx context.Context) ([]Budget, error) {
 	out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (Budget, error) {
 		var b Budget
 		var kind, period string
-		err := r.Scan(&kind, &b.Name, &b.Model, &b.Unit, &period, &b.MaxCost, &b.SoftLimit, &b.TempIncrease, &b.TempExpiry, &b.Epoch, &b.Arming)
-		b.Kind, b.Period = ScopeKind(kind), Period(period)
+		var warn []int32
+		err := r.Scan(&kind, &b.Name, &b.Model, &b.Unit, &period, &b.MaxCost, &b.SoftLimit, &b.TempIncrease, &b.TempExpiry, &b.Epoch, &b.Arming, &warn)
+		b.Kind, b.Period, b.WarnAt = ScopeKind(kind), Period(period), fromInt32(warn)
 		return b, err
 	})
 	if err != nil {

@@ -80,6 +80,7 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	h("GET /admin/audit", s.listAudit)
 	h("POST /admin/audit/verify", s.verifyAudit)
 	s.profileRoutes(h)
+	s.softQuotaRoutes(h)
 	s.uiRoutes(mux)
 }
 

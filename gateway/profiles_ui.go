@@ -19,6 +19,7 @@ func (s *Server) profilesUIRoutes(mux *http.ServeMux, page func(func(http.Respon
 	mux.Handle("GET /ui/profiles/capacity", page(s.uiProfileCapacity))
 	mux.Handle("GET /ui/profiles/calibrate", page(s.uiCalibrate))
 	mux.Handle("POST /ui/profiles/calibrate", page(s.uiAcceptCalibration))
+	s.softQuotaUIRoutes(mux, page)
 }
 
 // profileChoice is a profile in the assignment form.

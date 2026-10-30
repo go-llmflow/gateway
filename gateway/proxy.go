@@ -204,7 +204,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			apiError(w, http.StatusBadRequest, "invalid_request_error", msg)
 			return
 		}
-		scope := reqScope{org: key.Org, team: key.Team, project: key.Project, key: key.ID, user: recordUser(key), model: g.cfg.Name, tags: tags, unit: g.cfg.Cost.Unit}
+		scope := reqScope{org: key.Org, team: key.Team, project: key.Project, key: key.ID, user: recordUser(key), model: g.cfg.Name, tags: tags, unit: g.cfg.Cost.Unit, lang: s.langOf(r)}
 		// For an external provider: the organisation (its key) and the
 		// client's Anthropic headers, filtered when the request is built.
 		eg := clientEgress(r, key.Org)
@@ -226,6 +226,9 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		// no record was written.
 		defer func() { adm.release(0); s.finishUnrecorded(adm) }()
 		adm.header(w.Header())
+		// The caller's own session and week, and a warning past a threshold
+		// (soft quotas, #96).
+		s.usageHeaders(w.Header(), r, scope.user, key.Org)
 		if err := s.limiter.admit(key.ID, key.RPM, key.TPM, key.MaxInFlight); err != nil {
 			s.met.denied.add(1, key.Team, "rate_limit")
 			apiError(w, http.StatusTooManyRequests, "rate_limit_exceeded", err.Error())

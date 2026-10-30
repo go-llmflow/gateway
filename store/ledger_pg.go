@@ -205,10 +205,10 @@ func (p *Postgres) SetBudgetChecked(ctx context.Context, b Budget, now time.Time
 		// Every change takes a new epoch (ledger.go).
 		b.Epoch = nextEpoch(b.Epoch, now)
 		_, err = tx.Exec(ctx, `
-			INSERT INTO llmflow_budgets_v2 (kind, name, model, unit, period, max_cost, soft_limit, limit_epoch, arming) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			INSERT INTO llmflow_budgets_v2 (kind, name, model, unit, period, max_cost, soft_limit, limit_epoch, arming, warn_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			ON CONFLICT (kind, name, model, unit) DO UPDATE
-			SET period = EXCLUDED.period, max_cost = EXCLUDED.max_cost, soft_limit = EXCLUDED.soft_limit, limit_epoch = EXCLUDED.limit_epoch, arming = EXCLUDED.arming`,
-			string(b.Kind), b.Name, b.Model, b.Unit, string(b.Period), b.MaxCost, b.SoftLimit, b.Epoch, b.Arming)
+			SET period = EXCLUDED.period, max_cost = EXCLUDED.max_cost, soft_limit = EXCLUDED.soft_limit, limit_epoch = EXCLUDED.limit_epoch, arming = EXCLUDED.arming, warn_at = EXCLUDED.warn_at`,
+			string(b.Kind), b.Name, b.Model, b.Unit, string(b.Period), b.MaxCost, b.SoftLimit, b.Epoch, b.Arming, toInt32(b.WarnAt))
 		return err
 	})
 }

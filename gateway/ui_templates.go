@@ -28,7 +28,7 @@ const uiHTML = `
 <title>{{.Title}} · llmflow</title><link rel="stylesheet" href="/ui/style.css"></head><body>
 <header><strong>llmflow</strong>
 <a href="/ui/">Home</a><a href="/ui/keys">Keys</a><a href="/ui/budgets">Budgets</a><a href="/ui/spend">Spend</a>
-<a href="/ui/reports">Reports</a><a href="/ui/profiles">Profiles</a><a href="/ui/fairshare">Fair share</a><a href="/ui/audit">Audit</a>
+<a href="/ui/reports">Reports</a><a href="/ui/profiles">Profiles</a><a href="/ui/softquotas">Soft quotas</a><a href="/ui/fairshare">Fair share</a><a href="/ui/audit">Audit</a>
 {{if .User}}<span class="who">{{.User}}
 <form class="inline" method="post" action="/ui/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Sign out</button></form></span>{{end}}
 </header><main><h1>{{.Title}}</h1>
@@ -194,6 +194,29 @@ Accepting it changes every profile's allowance at once, and is in the audit log.
 {{else}}<p>No usage in this unit over the period: nothing to propose yet.</p>{{end}}
 {{end}}
 <p><a href="/ui/profiles">Back to the profiles</a></p>
+{{template "foot" .}}{{end}}
+
+{{define "softquotas"}}{{template "head" .}}
+<p>People are warned before a window runs out: in the response headers (<code>X-Llmflow-Usage-*</code>), at
+<code>/v1/me/usage</code> (for Claude Code's status line), and by notification, once per window when a threshold is passed
+(75 % and 95 % unless set otherwise). The most specific level that sets thresholds wins: budget, profile, organisation, gateway.</p>
+<h2>Above a threshold now</h2>
+<form method="get" action="/ui/softquotas"><label>Organisation <input name="org" value="{{.Data.Org}}" size="10"></label>
+<label>Team <input name="team" value="{{.Data.Team}}" size="10"></label> <button>Show</button></form>
+<table><tr><th>person</th><th>window</th><th>used</th><th>passed</th><th>thresholds</th><th>resets</th></tr>
+{{range .Data.Standing}}<tr><td>{{.User}}{{if .Profile}}<br><span class="hint">{{.Profile}}</span>{{end}}</td><td>{{.Window}}</td>
+<td><meter min="0" max="100" value="{{.Bar}}"></meter> {{.UsedPct}} %</td><td class="num">{{.Level}} %</td><td>{{.Thresholds}}</td><td>{{.Resets}}</td></tr>
+{{else}}<tr><td colspan="6">Nobody is above a threshold in the current windows.</td></tr>{{end}}</table>
+<h2>Thresholds</h2>
+{{$csrf := .CSRF}}
+<table><tr><th>level</th><th>configured</th><th>override</th><th>in force</th><th></th></tr>
+{{range .Data.Levels}}<tr><td>{{.Label}}</td><td>{{.Config}}</td><td>{{.Override}}{{if .SetBy}}<br><span class="hint">by {{.SetBy}}</span>{{end}}</td><td><strong>{{.Effective}}</strong></td>
+<td>{{if .CanSet}}<form class="inline" method="post" action="/ui/softquotas"><input type="hidden" name="csrf" value="{{$csrf}}">
+<input type="hidden" name="scope" value="{{.Scope}}"><input type="hidden" name="name" value="{{.Name}}">
+<input name="warn_at" size="14" placeholder="80,95 · off · empty: inherit" value="{{.Input}}"><button>Save</button></form>{{end}}</td></tr>{{end}}</table>
+<p class="hint">1 to 5 increasing whole percentages from 1 to 99; <em>off</em> turns warnings off for the level; empty goes back to the level above.
+A user budget's own thresholds are set with its budget (<code>warn_at</code>). An organisation administrator sets their organisation's;
+the gateway default and the profiles' are the proxy administrators'. Every change is in the audit log.</p>
 {{template "foot" .}}{{end}}
 
 {{define "loggedout"}}{{template "head" .}}<p>You are signed out. <a href="/admin/login?next=ui">Sign in again</a>.</p>{{template "foot" .}}{{end}}

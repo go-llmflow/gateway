@@ -301,12 +301,19 @@ func TestSlurmDrainWaitsForInflight(t *testing.T) {
 // slurmrestd's answer is untrusted input: errors, oversize, a redirect
 // (which would carry the JWT elsewhere) and garbage are all failures.
 func TestSlurmFetchRefuses(t *testing.T) {
+	// The environment's own discovery loop fetches as soon as it starts, before
+	// the loop below stores its first mode: a request that arrives then (v0.18.0
+	// CI: "http: panic serving", mode.Load() was nil) gets an empty answer
+	// instead of a panic. (elsewhere is atomic: the handler runs in the
+	// server's goroutines.)
 	var mode atomic.Value
-	elsewhere := 0
-	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { elsewhere++ }))
+	mode.Store("idle")
+	var elsewhere atomic.Int64
+	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { elsewhere.Add(1) }))
 	defer other.Close()
 	restd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch mode.Load().(string) {
+		m, _ := mode.Load().(string)
+		switch m {
 		case "errors":
 			fmt.Fprint(w, `{"jobs":[],"errors":[{"error":"Invalid authentication","description":"token expired"}]}`)
 		case "redirect":
@@ -326,7 +333,7 @@ func TestSlurmFetchRefuses(t *testing.T) {
 			t.Errorf("%s: accepted", m)
 		}
 	}
-	if elsewhere != 0 {
+	if elsewhere.Load() != 0 {
 		t.Error("the redirect was followed")
 	}
 }

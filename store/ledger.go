@@ -747,6 +747,20 @@ func (m *Memory) LedgerAt(_ context.Context, k BudgetKey, start, now time.Time) 
 	return LedgerState{}, nil
 }
 
+// ArmingState tells, for tests and diagnostics, a budget's arming flag, the
+// sum of the reports in force and whether every registered process has
+// reported.
+func (m *Memory) ArmingState(k BudgetKey) (arming bool, pre int64, ready bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	mb := m.budgets[k]
+	if mb == nil {
+		return false, 0, true
+	}
+	pre, ready = m.armingPre(mb.b)
+	return mb.b.Arming, pre, ready
+}
+
 // armingPre is the sum of an arming budget's reports, and whether every
 // registered process has reported (m.mu held).
 func (m *Memory) armingPre(b Budget) (int64, bool) {

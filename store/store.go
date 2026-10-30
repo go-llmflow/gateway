@@ -418,5 +418,6 @@ type Store interface {
 	Report(ctx context.Context, from, to time.Time, dims []string) ([]ReportRow, error)
 	BudgetLedger
 	ProfileStore
+	WarnStore
 	Close()
 }

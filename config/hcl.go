@@ -81,6 +81,7 @@ type fileHCL struct {
 	DefaultProfileRange  hcl.Range       `hcl:"default_profile,attr_value_range"`
 	SessionWindow        *string         `hcl:"session_window,optional"`
 	SessionWindowRange   hcl.Range       `hcl:"session_window,attr_value_range"`
+	SoftQuotas           *softQuotasHCL  `hcl:"soft_quotas,block"`
 }
 
 type loggingHCL struct {
@@ -537,12 +538,13 @@ type smtpHCL struct {
 }
 
 type orgHCL struct {
-	Name       string       `hcl:"name,label"`
-	NameRange  hcl.Range    `hcl:"name,label_range"`
-	Share      float64      `hcl:"share"`
-	ShareRange hcl.Range    `hcl:"share,attr_value_range"`
-	Teams      []orgTeamHCL `hcl:"team,block"`
-	DefRange   hcl.Range    `hcl:",def_range"`
+	Name       string              `hcl:"name,label"`
+	NameRange  hcl.Range           `hcl:"name,label_range"`
+	Share      float64             `hcl:"share"`
+	ShareRange hcl.Range           `hcl:"share,attr_value_range"`
+	Teams      []orgTeamHCL        `hcl:"team,block"`
+	SoftQuotas *softQuotasLevelHCL `hcl:"soft_quotas,block"`
+	DefRange   hcl.Range           `hcl:",def_range"`
 }
 
 type orgTeamHCL struct {
@@ -899,6 +901,9 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		}
 		sum += o.Share
 		org := Org{Name: o.Name, Share: o.Share}
+		if o.SoftQuotas != nil {
+			org.WarnAt = v.warnAt(o.SoftQuotas.WarnAt, "org "+strconv.Quote(o.Name))
+		}
 		for _, t := range o.Teams {
 			if !ValidName(t.Name) {
 				v.errf(t.NameRange, "Invalid team name", "%q: want [A-Za-z0-9_.-]{1,64}", t.Name)
@@ -1508,6 +1513,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	v.budgets(raw, c)
 	v.fluids(raw, c)
 	v.profiles(raw, c)
+	v.softQuotas(raw, c)
 	// Every *_file attribute is a secret reference: a file, or a field of
 	// an OpenBao/Vault KV v2 secret (package secret).
 	for _, ref := range c.SecretRefs() {

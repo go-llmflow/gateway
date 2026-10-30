@@ -91,6 +91,8 @@ type Config struct {
 	Fluids *Fluids
 	// Profiles are the workload profiles (profiles.go, #90).
 	Profiles Profiles
+	// SoftQuotas are the warnings before a window runs out (softquotas.go, #96).
+	SoftQuotas SoftQuotas
 	// HA, when set, runs this gateway as one of several replicas sharing
 	// the pools through PostgreSQL (pool ownership by lease, package ha).
 	// Absent: one replica, everything in its memory, as before.
@@ -470,6 +472,9 @@ type Org struct {
 	// for reports only (RBAC does not use it). Teams without a lab, and
 	// teams created through the API, belong to no lab.
 	Labs map[string]string
+	// WarnAt overrides the soft-quota thresholds of the organisation's people
+	// (nil: not set; #96).
+	WarnAt []int
 }
 
 // Attribution says how a request names its project.

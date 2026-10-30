@@ -385,29 +385,34 @@ func fmtWindow(d time.Duration) string {
 
 // profileRefusal answers a request that does not fit its person's profile,
 // in workdays. It names the caller's own allowance only.
-func (s *Server) profileRefusal(k store.BudgetKey, room, w int64, reset time.Time) (*admitError, bool) {
+func (s *Server) profileRefusal(k store.BudgetKey, room, w int64, reset time.Time, lang string) (*admitError, bool) {
 	wd, ok := s.prof.workdayOf(k.Unit)
 	limit, have := s.budget.limitOf(k)
 	if !ok || !have || wd <= 0 {
 		return nil, false
 	}
 	days := func(nano int64) string { return fmtDays(float64(nano) / nanoPerUnit / wd) }
-	when := reset.UTC().Format("Monday 2 Jan 15:04 UTC")
-	var what, verb string
+	var what string
 	switch k.Kind {
 	case store.ScopeProfileWeek:
-		what, verb = "weekly allowance of "+fmtDays(limit/wd), "resets"
+		what = windowWeek
 	case store.ScopeProfileSession:
-		what, verb = "session allowance of "+fmtDays(limit/wd)+" per "+fmtWindow(s.cfg.Profiles.SessionWindow), "room again from"
+		what = windowSession
 	case store.ScopeProfileOverflow:
-		what, verb = "monthly overflow allowance of "+fmtDays(limit/wd), "resets"
+		what = "overflow"
 	default:
 		return nil, false
 	}
-	msg := fmt.Sprintf("%s used; %s %s", what, verb, when)
+	// Anthropic's words (code.claude.com/docs/en/errors.md, "Usage limits"):
+	// "You've hit your session limit · resets 3:45pm", with our noun.
+	msg := s.hitText(what, reset, lang)
 	if room > 0 {
-		msg = fmt.Sprintf("%s: %s left, and this request may cost up to %s (send a smaller max_tokens, or wait: %s %s)",
-			what, days(room), days(w), verb, when)
+		// The allowance is not used up: this request alone does not fit.
+		if lang == config.LangFR {
+			msg += fmt.Sprintf(" (il reste %s de %s, cette requête peut coûter jusqu'à %s : envoyez un max_tokens plus petit)", days(room), fmtDays(limit/wd), days(w))
+		} else {
+			msg += fmt.Sprintf(" (%s left of %s, and this request may cost up to %s: send a smaller max_tokens)", days(room), fmtDays(limit/wd), days(w))
+		}
 	}
 	return &admitError{http.StatusTooManyRequests, "insufficient_quota", msg, "profile", reset, k}, true
 }

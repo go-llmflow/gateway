@@ -52,6 +52,9 @@ type Profile struct {
 	// use beyond their allowance, when an administrator allows them to
 	// (0: never). Requests beyond the profile are refused without it.
 	OverflowCap float64
+	// WarnAt overrides the soft-quota thresholds of this profile's people
+	// (nil: not set; #96).
+	WarnAt []int
 }
 
 // Profile bounds (security audit #90).
@@ -104,16 +107,17 @@ type workdayHCL struct {
 }
 
 type profileHCL struct {
-	ID                string    `hcl:"id,label"`
-	IDRange           hcl.Range `hcl:"id,label_range"`
-	Label             *string   `hcl:"label,optional"`
-	LabelRange        hcl.Range `hcl:"label,attr_value_range"`
-	Days              float64   `hcl:"days"`
-	DaysRange         hcl.Range `hcl:"days,attr_value_range"`
-	SessionShare      float64   `hcl:"session_share"`
-	SessionShareRange hcl.Range `hcl:"session_share,attr_value_range"`
-	OverflowCap       *float64  `hcl:"overflow_cap,optional"`
-	OverflowCapRange  hcl.Range `hcl:"overflow_cap,attr_value_range"`
+	ID                string              `hcl:"id,label"`
+	IDRange           hcl.Range           `hcl:"id,label_range"`
+	Label             *string             `hcl:"label,optional"`
+	LabelRange        hcl.Range           `hcl:"label,attr_value_range"`
+	Days              float64             `hcl:"days"`
+	DaysRange         hcl.Range           `hcl:"days,attr_value_range"`
+	SessionShare      float64             `hcl:"session_share"`
+	SessionShareRange hcl.Range           `hcl:"session_share,attr_value_range"`
+	OverflowCap       *float64            `hcl:"overflow_cap,optional"`
+	OverflowCapRange  hcl.Range           `hcl:"overflow_cap,attr_value_range"`
+	SoftQuotas        *softQuotasLevelHCL `hcl:"soft_quotas,block"`
 }
 
 // validProfileID accepts [a-z0-9_-]{1,32} (store.ValidProfileID).
@@ -199,6 +203,9 @@ func (v *validator) profiles(raw *fileHCL, c *Config) {
 		}
 		cp := Profile{ID: p.ID, Days: p.Days, SessionShare: p.SessionShare}
 		where := "profile " + strconv.Quote(p.ID)
+		if p.SoftQuotas != nil {
+			cp.WarnAt = v.warnAt(p.SoftQuotas.WarnAt, where)
+		}
 		switch {
 		case !validProfileID(p.ID):
 			v.errf(p.IDRange, "Invalid profile id", "%s: want [a-z0-9_-]{1,32}", where)

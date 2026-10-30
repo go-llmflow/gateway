@@ -39,6 +39,8 @@ type reqScope struct {
 	user string
 	tags []string
 	unit string
+	// lang is the language of refusals (Accept-Language, #96).
+	lang string
 	// overflow: admitted beyond the user's workload profile (#90).
 	overflow bool
 }
@@ -91,14 +93,16 @@ type softAlert struct {
 // never waits on PostgreSQL. Between refreshes it adds the cost of the
 // requests this process finished. It also holds the team model lists.
 type budgeter struct {
-	mu      sync.Mutex
-	st      store.Store
-	now     func() time.Time
-	budgets map[store.BudgetKey]*budgetState
-	pending map[store.BudgetKey]float64 // charged here, record not yet stored
-	written map[store.BudgetKey]float64 // stored since the last refresh query
-	models  map[string]map[string]bool  // team → allowed model groups
-	allow   map[store.AllowKey][]netip.Prefix
+	// refreshMu serialises refresh (see there); mu guards the state.
+	refreshMu sync.Mutex
+	mu        sync.Mutex
+	st        store.Store
+	now       func() time.Time
+	budgets   map[store.BudgetKey]*budgetState
+	pending   map[store.BudgetKey]float64 // charged here, record not yet stored
+	written   map[store.BudgetKey]float64 // stored since the last refresh query
+	models    map[string]map[string]bool  // team → allowed model groups
+	allow     map[store.AllowKey][]netip.Prefix
 	// projects: team → enabled project names; members: user → the scopes
 	// their stored bindings cover ("team:<t>", "org:<o>", "*" for a proxy
 	// admin). Both serve project attribution without a store read.
@@ -135,7 +139,21 @@ func newBudgeter(st store.Store, refresh time.Duration, failClosed bool, now fun
 // at each refresh, so records still in the accounting queue were counted
 // nowhere: a key could overspend by everything it did since the last
 // write.)
+//
+// Refreshes are serialised (refreshMu). Two at once (the periodic one and the
+// one a budget change triggers) read the store at different moments and
+// installed their answers in either order: the older one, installed last,
+// made a budget just created disappear, and tracker.sync then forgot its
+// arming state; the next refresh took a new snapshot that counted the
+// requests admitted meanwhile a second time (they already held on the
+// budget). The guarantee was never at stake (the overcount refuses, never
+// admits), but a person was refused room the budget had
+// (TestRefreshesInstallInTheOrderTheyRead holds the ordering; it was found
+// while chasing TestBudgetArmsOverARunningRequest, whose flake had another
+// cause: see there).
 func (b *budgeter) refresh(ctx context.Context) error {
+	b.refreshMu.Lock()
+	defer b.refreshMu.Unlock()
 	b.mu.Lock()
 	snapshot := b.written
 	b.written = map[store.BudgetKey]float64{}
