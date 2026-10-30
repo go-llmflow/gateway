@@ -334,7 +334,7 @@ model "llama-3.3-70b" {
 | `cache_isolation`, `cache_salt_key_file` | prefix-cache tenant scope (`org` default, `team`, `key`, `none`) and the file holding the HMAC key (at least 32 bytes, required unless `none`); see Security |
 | `trusted_proxies` | CIDR prefixes of the reverse proxies whose `X-Forwarded-For` is read; see Security |
 | `routes { inference, admin, metrics, healthz { allow = [...] } }` | networks allowed per route class; `metrics` and `healthz` default to loopback |
-| `alerts { webhook_url, webhook_token_file, smtp { server, from, to, username, password_file } }` | where soft-budget alerts go |
+| `alerts { webhook_url, webhook_token_file, smtp { server, from, to, username, password_file, tls, timeout, allow_cleartext } }` | where soft-budget alerts go; the mail session requires TLS by default (see "Mail transport") |
 
 HCL design decisions:
 
@@ -1255,6 +1255,96 @@ profile lookup and a handful of in-memory reads per request (`usageHeaders`).
   (`suppressed`), models suppressed together are merged into `(other models)`
   with their requests, and the overall figure is hidden below k. k is
   `adoption_min_users` (top level, default 5, at least 2).
+
+### The monthly decision report (#97)
+
+`GET /admin/decision?from=&to=&format=pdf|xlsx|json` gathers the figures above
+for a period (at most 366 days) into the document a partnership's steering
+committee reads:
+
+- **PDF**, typeset by `go-pdfkit/html2pdf` v0.3.0: A4, page numbers in the
+  margin (`counter(page)`), a table of contents whose page numbers come from CSS
+  `target-counter`, then **one page per partner** (guaranteed capacity, use in
+  share, borrowed and lent GPU-hours, net balance, inference GPU-hours against the
+  previous period, fluids on measured energy, latency in share against borrowing,
+  active people, cost centre), then the lending matrix, fluids, adoption,
+  chargeback rows and go-plot charts. The HTML is a golden file in the tests.
+- **XLSX**: sheets Partners, Lending matrix, Chargeback and Adoption; typed
+  cells, one column per unit.
+- **json**: the same data. Proxy roles and `finance_viewer` read every partner and
+  the matrix; `org_admin` and org-level viewers their own partner only. Every
+  download is audited.
+
+Scheduled delivery:
+
+```hcl
+decision_report {
+  destination = "reports"          # an export block (S3-compatible or a directory)
+  formats     = ["pdf", "xlsx"]    # default both
+  day         = 2                  # of the month, UTC, 1..28 (default 2)
+  mail_to     = ["finance@partner-a.example", "finance@partner-b.example"]  # optional, max 50
+}
+```
+
+From that day on, the previous calendar month is delivered twice over:
+
+- to the export, as `decision/YYYY-MM/decision-YYYY-MM.pdf` and `.xlsx`
+  (write-once under Object Lock where the export has it);
+- by mail to `mail_to`, through the `alerts { smtp { … } }` relay (which
+  `mail_to` requires): a MIME message with the PDF attached, the XLSX too when
+  both fit in 8 MiB, else a line saying where the export holds them. The relay
+  session follows `smtp.tls` (below).
+
+The sink is the state: an object that exists is delivered, and the marker
+`decision/YYYY-MM/mailed.json` says the mail went out, so a restart or a second
+replica does nothing twice, and an upload still retrying is not typeset again.
+Every delivery is audited (actor `decision-report`) **when the object is seen in
+the export**, not when it is queued, and so is every mail (period, format,
+size, never the content).
+
+**Bounds.** The report is refused (413) beyond 100 partners, 2 000 matrix cells,
+3 000 chargeback rows, 400 adoption rows or 16 MiB, typesetting is limited to
+2 minutes, the build runs under a timeout, and at most 2 heavy reports run at
+once (429 with `Retry-After` otherwise).
+
+#### Mail transport: TLS is required (changed in this release)
+
+Alert and report mail went through `net/smtp.SendMail`, which upgrades to TLS
+only when the server offers it: a relay that did not advertise STARTTLS got the
+message, and an unauthenticated session got it in clear text. Now:
+
+```hcl
+alerts {
+  smtp {
+    server  = "mail.example.org:587"
+    from    = "llmflow@example.org"
+    to      = ["ops@example.org"]
+    tls     = "starttls"   # default; "implicit" (port 465); "none"
+    timeout = "30s"        # dial and whole session
+  }
+}
+```
+
+- `starttls` (the default): the session is refused, and nothing is sent, unless
+  the server offers STARTTLS and the handshake succeeds (certificate verified
+  against the host name, TLS 1.2 or later).
+- `implicit`: TLS from the first byte.
+- `none`: clear text, the old behaviour. Accepted without more for a relay on
+  this host (`127.0.0.1`, `localhost`); for any other host it needs
+  `allow_cleartext = true`. A password is never sent over a clear connection
+  to another host.
+
+**Migration:** an existing `smtp` block that points at a relay without TLS now
+fails every send ("does not offer STARTTLS"). Enable STARTTLS on the relay, or
+set `tls = "none"` (plus `allow_cleartext = true` off the local host) to keep
+the old behaviour knowingly.
+
+#### Binary size
+
+`go-pdfkit/html2pdf` brings go-webengine (layout, a JavaScript engine, esbuild)
+into the module graph: the stripped gateway binary grows from 28.8 MB to 43.8 MB
+(+52 %), 60.2 MB unstripped. See issue #97 for the options (a build tag, or a
+separate `llmflow-report` command that renders the PDF from `format=json`).
 
 ### Cost units (since v0.12.0)
 

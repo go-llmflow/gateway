@@ -99,6 +99,8 @@ type Server struct {
 	capMu sync.Mutex
 	// capNotes remembers the C last written to the pool's history (#97).
 	capNotes capacityNotes
+	// decision is what the decision report's schedule remembers (#97).
+	decision decisionState
 	client   *http.Client
 	limiter  *limiter
 	budget   *budgeter
@@ -483,6 +485,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.startCapacityHistory(bctx)
 	s.bg.Add(1)
 	go func() { defer s.bg.Done(); s.warnLoop(bctx) }()
+	s.startDecision(bctx)
 	if s.cfg.KeyRotation != nil {
 		if s.secretWriter == nil {
 			return errors.New("gateway: key_rotation needs a secret writer (vault)")

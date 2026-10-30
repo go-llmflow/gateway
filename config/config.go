@@ -93,6 +93,9 @@ type Config struct {
 	// day, a week or a model used by fewer distinct people is not shown
 	// (default 5, at least 2: one person is never a figure).
 	AdoptionMinUsers int
+	// DecisionReport schedules the monthly decision report into an export;
+	// nil: reports are only downloaded (#97).
+	DecisionReport *DecisionReport
 	// Profiles are the workload profiles (profiles.go, #90).
 	Profiles Profiles
 	// SoftQuotas are the warnings before a window runs out (softquotas.go, #96).
@@ -400,7 +403,25 @@ type SMTP struct {
 	To           []string
 	Username     string
 	PasswordFile string
+	// TLS is how the session is protected: SMTPStartTLS (the default: the
+	// session is refused unless the server offers STARTTLS and it succeeds),
+	// SMTPImplicit (TLS from the first byte, port 465) or SMTPNone (clear text,
+	// for a relay on this host; elsewhere it needs AllowCleartext).
+	TLS            string
+	AllowCleartext bool
+	// Timeout bounds the dial and the whole session (default 30s).
+	Timeout time.Duration
 }
+
+// SMTP session protections.
+const (
+	SMTPStartTLS = "starttls"
+	SMTPImplicit = "implicit"
+	SMTPNone     = "none"
+)
+
+// DefaultSMTPTimeout bounds a mail session.
+const DefaultSMTPTimeout = 30 * time.Second
 
 // Store selects where persistent state lives.
 type Store struct {
