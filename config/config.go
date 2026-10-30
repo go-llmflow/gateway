@@ -403,7 +403,25 @@ type SMTP struct {
 	To           []string
 	Username     string
 	PasswordFile string
+	// TLS is how the session is protected: SMTPStartTLS (the default: the
+	// session is refused unless the server offers STARTTLS and it succeeds),
+	// SMTPImplicit (TLS from the first byte, port 465) or SMTPNone (clear text,
+	// for a relay on this host; elsewhere it needs AllowCleartext).
+	TLS            string
+	AllowCleartext bool
+	// Timeout bounds the dial and the whole session (default 30s).
+	Timeout time.Duration
 }
+
+// SMTP session protections.
+const (
+	SMTPStartTLS = "starttls"
+	SMTPImplicit = "implicit"
+	SMTPNone     = "none"
+)
+
+// DefaultSMTPTimeout bounds a mail session.
+const DefaultSMTPTimeout = 30 * time.Second
 
 // Store selects where persistent state lives.
 type Store struct {

@@ -56,9 +56,9 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 </table>
 <h3>The guarantee held?</h3>
 <table>
-<tr><th>Requests</th><th>End-to-end latency</th></tr>
-<tr><td>Within the share</td><td>p50 820 ms, p95 4100 ms (3800 requests)</td></tr>
-<tr><td>Borrowing</td><td>p50 1500 ms, p95 8000 ms (200 requests)</td></tr>
+<tr><th>Requests</th><th>Admission wait (gateway queue)</th><th>End-to-end latency</th></tr>
+<tr><td>Within the share</td><td>no request</td><td>p50 820 ms, p95 4100 ms (3800 requests)</td></tr>
+<tr><td>Borrowing</td><td>no request</td><td>p50 1500 ms, p95 8000 ms (200 requests)</td></tr>
 </table>
 <h3>Adoption</h3>
 <p>31 active people over the period.</p>
@@ -87,12 +87,12 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 </table>
 <h3>The guarantee held?</h3>
 <table>
-<tr><th>Requests</th><th>End-to-end latency</th></tr>
-<tr><td>Within the share</td><td>p50 700 ms, p95 3000 ms (900 requests)</td></tr>
-<tr><td>Borrowing</td><td>no request</td></tr>
+<tr><th>Requests</th><th>Admission wait (gateway queue)</th><th>End-to-end latency</th></tr>
+<tr><td>Within the share</td><td>p50 12.00 ms, p95 80.00 ms (900 requests)</td><td>p50 700 ms, p95 3000 ms (900 requests)</td></tr>
+<tr><td>Borrowing</td><td>no request</td><td>no request</td></tr>
 </table>
 <h3>Adoption</h3>
-<p>9 active people over the period.</p>
+<p>fewer than 5 active people over the period.</p>
 </section>
 
 <h2 id="d-lending">Lending matrix and balance</h2>
@@ -106,10 +106,11 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 <tr><td>etabB</td><td class="n">12.00</td><td class="n">8.00</td><td class="n">3.02 EUR</td></tr>
 </table>
 <h2 id="d-adoption">Adoption</h2>
-<p>38 active people over the period.</p>
+<p>38 active people over the period. Figures over fewer than 5 people are not shown.</p>
 <table><tr><th>Week of</th><th class="n">Active people</th><th class="n">Requests</th></tr>
 <tr><td>2026-09-28</td><td class="n">20</td><td class="n">1200</td></tr>
 <tr><td>2026-10-05</td><td class="n">33</td><td class="n">2000</td></tr>
+<tr><td>2026-10-12</td><td class="n">suppressed</td><td class="n">suppressed</td></tr>
 </table>
 <h3>Models</h3>
 <table><tr><th>Model</th><th class="n">Active people</th><th class="n">Requests</th></tr>

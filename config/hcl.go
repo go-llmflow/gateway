@@ -537,6 +537,11 @@ type smtpHCL struct {
 	ToRange      hcl.Range `hcl:"to,attr_value_range"`
 	Username     *string   `hcl:"username,optional"`
 	PasswordFile *string   `hcl:"password_file,optional"`
+	TLS          *string   `hcl:"tls,optional"`
+	TLSRange     hcl.Range `hcl:"tls,attr_value_range"`
+	Cleartext    *bool     `hcl:"allow_cleartext,optional"`
+	Timeout      *string   `hcl:"timeout,optional"`
+	TimeoutRange hcl.Range `hcl:"timeout,attr_value_range"`
 	DefRange     hcl.Range `hcl:",def_range"`
 }
 
@@ -1168,6 +1173,22 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			c.Alerts.SMTP = &SMTP{Server: s.Server, From: s.From, To: s.To, Username: strOr(s.Username, ""), PasswordFile: strOr(s.PasswordFile, "")}
 			if (c.Alerts.SMTP.Username == "") != (c.Alerts.SMTP.PasswordFile == "") {
 				v.errf(s.DefRange, "Incomplete SMTP credentials", "username and password_file go together")
+			}
+			c.Alerts.SMTP.TLS = strOr(s.TLS, SMTPStartTLS)
+			c.Alerts.SMTP.Timeout = v.dur(s.Timeout, s.TimeoutRange, "timeout", DefaultSMTPTimeout)
+			c.Alerts.SMTP.AllowCleartext = s.Cleartext != nil && *s.Cleartext
+			if c.Alerts.SMTP.Timeout < time.Second || c.Alerts.SMTP.Timeout > 5*time.Minute {
+				v.errf(s.TimeoutRange, "Invalid timeout", "timeout = %s: want 1s..5m", c.Alerts.SMTP.Timeout)
+			}
+			switch c.Alerts.SMTP.TLS {
+			case SMTPStartTLS, SMTPImplicit:
+			case SMTPNone:
+				host, _, _ := net.SplitHostPort(s.Server)
+				if !loopbackHost(host) && !c.Alerts.SMTP.AllowCleartext {
+					v.errf(s.TLSRange, "Clear-text SMTP", "tls = \"none\" sends mail, and a password, in clear text to %q: it is for a relay on this host; use \"starttls\" or \"implicit\", or set allow_cleartext = true to accept it", host)
+				}
+			default:
+				v.errf(s.TLSRange, "Invalid tls", "tls = %q: want %q (the default), %q or %q", c.Alerts.SMTP.TLS, SMTPStartTLS, SMTPImplicit, SMTPNone)
 			}
 		}
 		if c.Alerts.WebhookURL == "" && c.Alerts.SMTP == nil {

@@ -28,17 +28,18 @@ func fixedDecision() *decisionData {
 				BorrowedFromOthers: 18, SelfServed: 2, Lent: 5, Net: -13, Utilisation: 100.0 / 2232, KWh: 40, KWhIdle: 10, FluidsCost: 10.08,
 				InShare: lending.Latency{N: 3800, P50: 820, P95: 4100, P99: 9000}, Borrowing: lending.Latency{N: 200, P50: 1500, P95: 8000, P99: 12000}, ActiveUsers: 31},
 			{Org: "etabB", Share: 0.25, GPUHours: 30, Requests: 900, Guaranteed: 744, UsedInShare: 30, Lent: 18, Net: 18, Utilisation: 30.0 / 744,
-				KWh: 12, KWhIdle: 8, FluidsCost: 3.02, InShare: lending.Latency{N: 900, P50: 700, P95: 3000, P99: 5000}, ActiveUsers: 9},
+				KWh: 12, KWhIdle: 8, FluidsCost: 3.02, InShare: lending.Latency{N: 900, P50: 700, P95: 3000, P99: 5000},
+				WaitInShare: lending.Latency{N: 900, P50: 12, P95: 80, P99: 200}, ActiveUsers: 3}, // a small cell: shown as "fewer than 5"
 		},
 		Matrix:       []LendingCell{{"etabB", "etabA", 18}},
 		Unattributed: 0.5,
-		Currency:     "EUR", HasFluids: true,
+		Currency:     "EUR", CurrencyDecimals: 2, MinUsers: 5, HasFluids: true,
 		Adoption: &store.Adoption{Users: 38,
 			Daily:  []store.AdoptionPoint{{Day: "2026-10-01", ActiveUsers: 12, Requests: 300}},
-			Weekly: []store.AdoptionPoint{{Day: "2026-09-28", ActiveUsers: 20, Requests: 1200}, {Day: "2026-10-05", ActiveUsers: 33, Requests: 2000}},
+			Weekly: []store.AdoptionPoint{{Day: "2026-09-28", ActiveUsers: 20, Requests: 1200}, {Day: "2026-10-05", ActiveUsers: 33, Requests: 2000}, {Day: "2026-10-12", ActiveUsers: 3, Requests: 40}},
 			Models: []store.AdoptionModel{{Model: "llama", Users: 38, Requests: 4900}}},
-		Chargeback: []ChargebackRow{{From: t0, To: t0.AddDate(0, 1, 0), CostCenter: "GL-A", GPUHours: 120, KWh: 40, FluidsCost: 10.08, FluidsCurrency: "EUR"},
-			{From: t0, To: t0.AddDate(0, 1, 0), CostCenter: CostCenterUnmapped, GPUHours: 30, KWh: 12, FluidsCost: 3.02, FluidsCurrency: "EUR"}},
+		Chargeback: []ChargebackRow{{From: t0, To: t0.AddDate(0, 1, 0), CostCenter: "GL-A", GPUHours: 120, KWh: 40, FluidsCostMinor: 1008, FluidsCost: "10.08", FluidsCurrency: "EUR", ProviderCost: "0.00"},
+			{From: t0, To: t0.AddDate(0, 1, 0), CostCenter: CostCenterUnmapped, GPUHours: 30, KWh: 12, FluidsCostMinor: 302, FluidsCost: "3.02", FluidsCurrency: "EUR", ProviderCost: "0.00"}},
 		Daily: []chartPoint{{"2026-10-01", 4}, {"2026-10-02", 6}, {"2026-10-03", 5}},
 		Pie:   []chartSlice{{"etabA", 120}, {"etabB", 30}},
 		Bars:  []chartBar{{"etabA", 120, 100}, {"etabB", 30, 0}},
@@ -166,8 +167,11 @@ func TestDecisionScheduledDelivery(t *testing.T) {
 	dir := t.TempDir()
 	cfg := testConfig(up.URL())
 	cfg.Exports = []config.Export{{Name: "reports", Kind: "file", Directory: dir, QueueSize: 8}}
-	cfg.DecisionReport = &config.DecisionReport{Destination: "reports", Formats: []string{"pdf", "xlsx"}, Day: 2}
-	cfg.Fluids = &config.Fluids{PUE: 1, PricePerKWh: 1, Currency: "EUR", IdleEnergy: energy.IdleByShare, WPrefill: 1, WDecode: 1}
+	relay, pool := newFakeSMTP(t, true, false, false)
+	withTrust(t, pool)
+	cfg.Alerts.SMTP = &config.SMTP{Server: relay.addr(), From: "gw@example.org", To: []string{"ops@example.org"}, TLS: config.SMTPStartTLS, Timeout: 10 * time.Second}
+	cfg.DecisionReport = &config.DecisionReport{Destination: "reports", Formats: []string{"pdf", "xlsx"}, Day: 2, MailTo: []string{"fin@example.org"}}
+	cfg.Fluids = &config.Fluids{PUE: 1, PricePerKWh: 1, Currency: "EUR", CurrencyDecimals: 2, IdleEnergy: energy.IdleByShare, WPrefill: 1, WDecode: 1}
 	now := time.Date(2026, 11, 5, 8, 0, 0, 0, time.UTC)
 	e := newEnv(t, cfg, WithClock(func() time.Time { return now }))
 	if err := e.st.InsertRecords(context.Background(), []store.Record{
@@ -192,12 +196,116 @@ func TestDecisionScheduledDelivery(t *testing.T) {
 			t.Fatalf("%s: %v", f, err)
 		}
 	}
-	// Idempotent: a new round finds both objects and writes nothing.
+	// The mail: the PDF and the XLSX attached, to the configured recipient,
+	// over a session that used STARTTLS.
+	mailKey := filepath.Join(dir, "decision", "2026-10", "mailed.json")
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		if _, err := os.Stat(mailKey); err == nil {
+			break
+		}
+	}
+	if _, err := os.Stat(mailKey); err != nil {
+		t.Fatalf("no mail marker: %v", err)
+	}
+	relay.mu.Lock()
+	data := relay.data
+	relay.mu.Unlock()
+	if !relay.saw("STARTTLS") || !strings.Contains(data, "filename=\"decision-2026-10.pdf\"") || !strings.Contains(data, "filename=\"decision-2026-10.xlsx\"") ||
+		!strings.Contains(data, "Content-Transfer-Encoding: base64") || !strings.Contains(data, "To: fin@example.org") {
+		t.Fatalf("the mail: starttls=%v\n%.600s", relay.saw("STARTTLS"), data)
+	}
+	// Idempotent: a new round finds the objects and the marker, builds and
+	// sends nothing, and audits what the sink now holds exactly once.
 	q := e.srv.exports["reports"]
 	e.srv.decisionRound(context.Background(), q)
+	e.srv.decisionRound(context.Background(), q)
 	body := readAll(t, e.do("GET", "/admin/audit", master, ""))
-	if strings.Count(body, "deliver to reports") != 2 {
-		t.Fatalf("want 2 audited deliveries: %s", body)
+	if n := strings.Count(body, "deliver to reports"); n != 2 {
+		t.Fatalf("want 2 audited deliveries, got %d: %s", n, body)
+	}
+	if n := strings.Count(body, "mail to 1 recipients"); n != 1 {
+		t.Fatalf("want 1 audited mail, got %d", n)
+	}
+	relay.mu.Lock()
+	mails := 0
+	for _, c := range relay.commands {
+		if strings.HasPrefix(strings.ToUpper(c), "DATA") {
+			mails++
+		}
+	}
+	relay.mu.Unlock()
+	if mails != 1 {
+		t.Fatalf("%d mails sent, want 1", mails)
+	}
+}
+
+// While an upload is in flight the report is not built again.
+func TestDecisionPendingUploadIsNotRebuilt(t *testing.T) {
+	up := newFakeVLLM(t)
+	cfg := testConfig(up.URL())
+	cfg.Exports = []config.Export{{Name: "reports", Kind: "file", Directory: t.TempDir(), QueueSize: 8}}
+	e := newEnv(t, cfg, WithClock(func() time.Time { return time.Date(2026, 11, 5, 8, 0, 0, 0, time.UTC) }))
+	// Configured after the start: the test drives the rounds, the server's
+	// loop must not run beside it.
+	cfg.DecisionReport = &config.DecisionReport{Destination: "reports", Formats: []string{"xlsx"}, Day: 2}
+	q := e.srv.exports["reports"]
+	key := decisionKey(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), "xlsx")
+	e.srv.decision.mu.Lock()
+	e.srv.decision.pending = map[string]pendingObject{key: {at: time.Date(2026, 11, 5, 7, 0, 0, 0, time.UTC), size: 10, format: "xlsx"}}
+	e.srv.decision.mailed = map[string]bool{}
+	e.srv.decision.mu.Unlock()
+	before := len(readAll(t, e.do("GET", "/admin/audit", master, "")))
+	e.srv.decisionRound(context.Background(), q)
+	if after := len(readAll(t, e.do("GET", "/admin/audit", master, ""))); after != before {
+		t.Fatal("a queued upload was built and delivered again")
+	}
+	if _, err := os.Stat(filepath.Join(cfg.Exports[0].Directory, key)); err == nil {
+		t.Fatal("the object was written while its upload was pending")
+	}
+}
+
+// A report too large to typeset is refused, not half-written; heavy reports
+// are bounded in number.
+func TestDecisionBounds(t *testing.T) {
+	d := fixedDecision()
+	for i := 0; i <= MaxDecisionPartners; i++ {
+		d.Partners = append(d.Partners, partner{Org: "p"})
+	}
+	if _, err := renderDecision(DecisionPDF, d); err == nil || !strings.Contains(err.Error(), "partners") {
+		t.Fatalf("too many partners: %v", err)
+	}
+	d = fixedDecision()
+	d.Chargeback = make([]ChargebackRow, MaxDecisionChargeback+1)
+	if _, err := renderDecision(DecisionXLSX, d); err == nil {
+		t.Fatal("too many chargeback rows accepted")
+	}
+	up := newFakeVLLM(t)
+	e := newEnv(t, testConfig(up.URL()))
+	for i := 0; i < heavyReports; i++ {
+		heavySem <- struct{}{}
+	}
+	resp := e.do("GET", "/admin/decision?from=2026-10-01&to=2026-11-01&format=json", master, "")
+	_ = readAll(t, resp)
+	for i := 0; i < heavyReports; i++ {
+		<-heavySem
+	}
+	if resp.StatusCode != 429 || resp.Header.Get("Retry-After") == "" {
+		t.Fatalf("a busy gateway: %d %v", resp.StatusCode, resp.Header)
+	}
+}
+
+func TestMailMessageIsMIME(t *testing.T) {
+	msg := string(buildReportMail("gw@example.org\r\nBcc: x@evil", []string{"a@b.c"}, "subject\r\nBcc: y@evil", "text", []mailAttachment{{Name: "r.pdf", Type: "application/pdf", Data: make([]byte, 200)}}))
+	if strings.Contains(msg, "\r\nBcc:") {
+		t.Fatalf("header injection: %s", msg)
+	}
+	for _, line := range strings.Split(msg, "\r\n") {
+		if len(line) > 200 {
+			t.Fatalf("a line of %d bytes", len(line))
+		}
+	}
+	if !strings.Contains(msg, "multipart/mixed") || !strings.HasSuffix(msg, "--\r\n") {
+		t.Fatalf("not multipart: %s", msg)
 	}
 }
 

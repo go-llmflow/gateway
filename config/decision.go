@@ -1,7 +1,9 @@
 package config
 
 import (
+	"net/mail"
 	"slices"
+	"strings"
 
 	"github.com/hashicorp/hcl/v2"
 )
@@ -21,6 +23,9 @@ type DecisionReport struct {
 	Destination string
 	Formats     []string
 	Day         int
+	// MailTo are the recipients of the report by mail, through the alerts'
+	// SMTP relay (TLS required there); empty: no mail.
+	MailTo []string
 }
 
 // Decision report defaults.
@@ -33,6 +38,8 @@ type decisionHCL struct {
 	FormatsRange     hcl.Range `hcl:"formats,attr_value_range"`
 	Day              *int      `hcl:"day,optional"`
 	DayRange         hcl.Range `hcl:"day,attr_value_range"`
+	MailTo           []string  `hcl:"mail_to,optional"`
+	MailToRange      hcl.Range `hcl:"mail_to,attr_value_range"`
 }
 
 func (v *validator) decisionReport(raw *fileHCL, c *Config) {
@@ -67,6 +74,20 @@ func (v *validator) decisionReport(raw *fileHCL, c *Config) {
 			v.errf(d.DayRange, "Invalid day", "decision_report: day = %d: want 1..28", *d.Day)
 		}
 		out.Day = *d.Day
+	}
+	if len(d.MailTo) > 0 {
+		if c.Alerts.SMTP == nil {
+			v.errf(d.MailToRange, "No mail relay", "decision_report: mail_to needs an alerts { smtp { ... } } block: the report is sent through its relay")
+		}
+		if len(d.MailTo) > 50 {
+			v.errf(d.MailToRange, "Too many recipients", "decision_report: mail_to lists %d addresses: at most 50", len(d.MailTo))
+		}
+		for _, a := range d.MailTo {
+			if _, err := mail.ParseAddress(a); err != nil || strings.ContainsAny(a, "\r\n") {
+				v.errf(d.MailToRange, "Invalid address", "decision_report: mail_to: %q", a)
+			}
+		}
+		out.MailTo = d.MailTo
 	}
 	c.DecisionReport = out
 }

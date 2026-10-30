@@ -45,7 +45,7 @@ type CapacityPoint struct {
 // changing C is integrated as it was (#97, #108).
 type CapacityStore interface {
 	// RecordCapacity stores a point; a point for the same pool and instant is
-	// kept once (replicas record the same change).
+	// kept once, the last value winning (replicas record the same change).
 	RecordCapacity(ctx context.Context, p CapacityPoint) error
 	// CapacityBetween returns the points in [from, to) and, for each pool,
 	// the last point before from, sorted by pool then time.
@@ -112,8 +112,9 @@ func (m *Memory) RecordCapacity(ctx context.Context, p CapacityPoint) error {
 	if m.Fail != nil {
 		return m.Fail
 	}
-	for _, q := range m.en.caps {
+	for i, q := range m.en.caps {
 		if q.Pool == p.Pool && q.At.Equal(p.At) {
+			m.en.caps[i].C = p.C // the last value at an instant is the C then
 			return nil
 		}
 	}
@@ -152,7 +153,7 @@ func (m *Memory) CapacityBetween(ctx context.Context, from, to time.Time) ([]Cap
 }
 
 func (p *Postgres) RecordCapacity(ctx context.Context, c CapacityPoint) error {
-	_, err := p.pool.Exec(ctx, `INSERT INTO llmflow_pool_capacity (pool, ts, capacity) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, c.Pool, c.At.UTC(), c.C)
+	_, err := p.pool.Exec(ctx, `INSERT INTO llmflow_pool_capacity (pool, ts, capacity) VALUES ($1, $2, $3) ON CONFLICT (pool, ts) DO UPDATE SET capacity = EXCLUDED.capacity`, c.Pool, c.At.UTC(), c.C)
 	return err
 }
 

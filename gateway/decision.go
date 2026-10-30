@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -56,6 +57,9 @@ type partner struct {
 	// From lending: guaranteed capacity, use in share, borrowing, lending.
 	Guaranteed, UsedInShare, Borrowed, BorrowedFromOthers, SelfServed, Lent, Net, Utilisation float64
 	InShare, Borrowing                                                                        lending.Latency
+	// Admission wait (the gateway's fair-share queue), in share and borrowing:
+	// the evidence that the guarantee held.
+	WaitInShare, WaitBorrowing lending.Latency
 	// Fluids: IT energy and its cost.
 	KWh, KWhIdle, FluidsCost float64
 	// ActiveUsers of the period.
@@ -69,6 +73,8 @@ type decisionData struct {
 	Matrix                        []LendingCell // proxy roles and finance_viewer only
 	Unattributed                  float64
 	Currency                      string // of the fluids; "" without a fluids block
+	CurrencyDecimals              int    // its minor unit
+	MinUsers                      int    // the small-cell threshold of the adoption figures
 	HasFluids                     bool
 	Adoption                      *store.Adoption
 	Chargeback                    []ChargebackRow
@@ -79,7 +85,10 @@ type decisionData struct {
 
 // buildDecision gathers the figures from the reports p may read.
 func (s *Server) buildDecision(r *http.Request, p *principal, from, to time.Time) (*decisionData, error) {
-	d := &decisionData{From: from, To: to, PrevFrom: from.Add(-to.Sub(from)), Generated: s.now().UTC()}
+	d := &decisionData{From: from, To: to, PrevFrom: from.Add(-to.Sub(from)), Generated: s.now().UTC(), MinUsers: s.adoptionMin(), CurrencyDecimals: 2}
+	if s.cfg.Fluids != nil {
+		d.CurrencyDecimals = s.cfg.Fluids.CurrencyDecimals
+	}
 	visible := func(org string) bool { return p.reportView() || p.orgView(org) }
 	byOrg := map[string]*partner{}
 	get := func(org string) *partner {
@@ -137,6 +146,7 @@ func (s *Server) buildDecision(r *http.Request, p *principal, from, to time.Time
 			x := get(o.Org)
 			x.Guaranteed, x.UsedInShare, x.Borrowed, x.Lent, x.Net = o.GuaranteedHours, o.UsedInShare, o.Borrowed, o.Lent, o.Net
 			x.BorrowedFromOthers, x.SelfServed, x.InShare, x.Borrowing = o.BorrowedFromOthers, o.SelfServed, o.InShare, o.Borrow
+			x.WaitInShare, x.WaitBorrowing = o.WaitInShare, o.WaitBorrow
 			if o.GuaranteedHours > 0 {
 				x.Utilisation = o.UsedInShare / o.GuaranteedHours
 			}
@@ -230,6 +240,7 @@ func writeDecisionXLSX(w io.Writer, d *decisionData) error {
 	sh, err := sheet("Partners", []float64{24, 16}, "Partner", "Cost centre", "Share", "Guaranteed (GPU-hours)", "Used in share (GPU-hours)",
 		"Borrowed (GPU-hours)", "Borrowed from others (GPU-hours)", "Lent (GPU-hours)", "Net lent (GPU-hours)", "Guarantee used", "Inference (GPU-hours)",
 		"Previous period (GPU-hours)", "Requests", "Energy (kWh)", "of which idle (kWh)", "Fluids cost ("+currencyOr(d.Currency)+")",
+		"Admission wait p50 in share (ms)", "Admission wait p95 in share (ms)", "Admission wait p50 borrowing (ms)", "Admission wait p95 borrowing (ms)",
 		"Latency p50 in share (ms)", "Latency p95 in share (ms)", "Latency p50 borrowing (ms)", "Latency p95 borrowing (ms)", "Active people")
 	if err != nil {
 		return err
@@ -238,7 +249,8 @@ func writeDecisionXLSX(w io.Writer, d *decisionData) error {
 		if err := sh.AppendRow(xlsx.String(x.Org), xlsx.String(x.CostCenter), xlsx.Number(x.Share).Format(xlsx.Percent(1)), num(x.Guaranteed),
 			num(x.UsedInShare), num(x.Borrowed), num(x.BorrowedFromOthers), num(x.Lent), num(x.Net), xlsx.Number(x.Utilisation).Format(xlsx.Percent(1)),
 			num(x.GPUHours), num(x.PrevGPUHours), xlsx.Number(float64(x.Requests)), num(x.KWh), num(x.KWhIdle), num(x.FluidsCost),
-			num(x.InShare.P50), num(x.InShare.P95), num(x.Borrowing.P50), num(x.Borrowing.P95), xlsx.Number(float64(x.ActiveUsers))); err != nil {
+			num(x.WaitInShare.P50), num(x.WaitInShare.P95), num(x.WaitBorrowing.P50), num(x.WaitBorrowing.P95),
+			num(x.InShare.P50), num(x.InShare.P95), num(x.Borrowing.P50), num(x.Borrowing.P95), usersCell(x.ActiveUsers, d.MinUsers)); err != nil {
 			return err
 		}
 	}
@@ -258,7 +270,8 @@ func writeDecisionXLSX(w io.Writer, d *decisionData) error {
 	}
 	for _, c := range d.Chargeback {
 		if err := cb.AppendRow(xlsx.String(c.From.UTC().Format("2006-01-02")), xlsx.String(c.To.UTC().Format("2006-01-02")), xlsx.String(c.CostCenter),
-			num(c.GPUHours), num(c.KWh), num(c.FluidsCost), xlsx.String(c.FluidsCurrency), num(c.ProviderCost), xlsx.String(c.ProviderCurrency)); err != nil {
+			num(c.GPUHours), num(c.KWh), money(c.FluidsCostMinor, d.CurrencyDecimals), xlsx.String(c.FluidsCurrency),
+			money(c.ProviderCostMinor, ProviderDecimals), xlsx.String(c.ProviderCurrency)); err != nil {
 			return err
 		}
 	}
@@ -267,22 +280,29 @@ func writeDecisionXLSX(w io.Writer, d *decisionData) error {
 		return err
 	}
 	if d.Adoption != nil {
-		emit := func(series string, ps []store.AdoptionPoint) error {
+		av := suppressAdoption(d.Adoption, d.MinUsers)
+		cnt := func(p *int64) xlsx.Cell {
+			if p == nil {
+				return xlsx.String("suppressed")
+			}
+			return xlsx.Number(float64(*p))
+		}
+		emit := func(series string, ps []adoptionPoint) error {
 			for _, x := range ps {
-				if err := ad.AppendRow(xlsx.String(series), xlsx.String(x.Day), xlsx.Number(float64(x.ActiveUsers)), xlsx.Number(float64(x.Requests))); err != nil {
+				if err := ad.AppendRow(xlsx.String(series), xlsx.String(x.Period), cnt(x.ActiveUsers), cnt(x.Requests)); err != nil {
 					return err
 				}
 			}
 			return nil
 		}
-		if err := emit("day", d.Adoption.Daily); err != nil {
+		if err := emit("day", av.Daily); err != nil {
 			return err
 		}
-		if err := emit("week", d.Adoption.Weekly); err != nil {
+		if err := emit("week", av.Weekly); err != nil {
 			return err
 		}
-		for _, m := range d.Adoption.Models {
-			if err := ad.AppendRow(xlsx.String("model"), xlsx.String(m.Model), xlsx.Number(float64(m.Users)), xlsx.Number(float64(m.Requests))); err != nil {
+		for _, m := range av.Models {
+			if err := ad.AppendRow(xlsx.String("model"), xlsx.String(m.Model), cnt(m.ActiveUsers), cnt(m.Requests)); err != nil {
 				return err
 			}
 		}
@@ -293,6 +313,27 @@ func writeDecisionXLSX(w io.Writer, d *decisionData) error {
 	}
 	_, err = w.Write(data)
 	return err
+}
+
+// usersCell is a count of distinct people, or the words for a small cell.
+func usersCell(n int64, k int) xlsx.Cell {
+	if hidden(n, k) {
+		return xlsx.String("fewer than " + strconv.Itoa(k))
+	}
+	return xlsx.Number(float64(n))
+}
+
+// usersLabel is usersCell as text.
+func usersLabel(n int64, k int) string {
+	if hidden(n, k) {
+		return "fewer than " + strconv.Itoa(k)
+	}
+	return strconv.FormatInt(n, 10)
+}
+
+// money is an amount in minor units as a typed cell with the currency's decimals.
+func money(minor int64, decimals int) xlsx.Cell {
+	return xlsx.Number(float64(minor) / math.Pow10(decimals)).Format(xlsx.Decimal(decimals))
 }
 
 func currencyOr(c string) string {
@@ -311,8 +352,11 @@ type decisionView struct {
 	Matrix                   []matrixView
 	Unattributed             string
 	HasFluids                bool
-	Adoption                 *store.Adoption
-	AdoptionUsers            int64
+	AdoptionUsers            string
+	Weekly                   []adoptionRowView
+	Models                   []adoptionRowView
+	HasAdoption              bool
+	MinUsers                 int
 	Chargeback               []chargebackView
 	Pie, Bars, Series        template.HTML
 }
@@ -322,8 +366,12 @@ type partnerView struct {
 	Anchor                                                                 string
 	ShareS, GuaranteedS, UsedS, BorrowedS, FromOthersS, SelfS, LentS, NetS string
 	UtilS, GPUS, PrevS, ChangeS, KWhS, KWhIdleS, CostS                     string
-	LatIn, LatBorrow                                                       string
+	LatIn, LatBorrow, WaitIn, WaitBorrow, UsersS                           string
 }
+
+// adoptionRowView is a week or a model, counts as text ("suppressed" for a
+// small cell).
+type adoptionRowView struct{ Name, Users, Requests string }
 
 type matrixView struct{ Lender, Borrower, GPUHours string }
 
@@ -342,17 +390,31 @@ func (d *decisionData) view() decisionView {
 	v := decisionView{
 		Title:     "Decision report",
 		Period:    d.From.UTC().Format("2006-01-02") + " to " + d.To.UTC().Add(-time.Nanosecond).Format("2006-01-02") + " (UTC)",
-		Generated: d.Generated.Format("2006-01-02 15:04 UTC"), HasFluids: d.HasFluids, Adoption: d.Adoption,
+		Generated: d.Generated.Format("2006-01-02 15:04 UTC"), HasFluids: d.HasFluids, MinUsers: d.MinUsers,
 	}
 	if d.Adoption != nil {
-		v.AdoptionUsers = d.Adoption.Users
+		v.HasAdoption = true
+		av := suppressAdoption(d.Adoption, d.MinUsers)
+		cnt := func(p *int64) string {
+			if p == nil {
+				return "suppressed"
+			}
+			return strconv.FormatInt(*p, 10)
+		}
+		v.AdoptionUsers = usersLabel(d.Adoption.Users, d.MinUsers)
+		for _, x := range av.Weekly {
+			v.Weekly = append(v.Weekly, adoptionRowView{x.Period, cnt(x.ActiveUsers), cnt(x.Requests)})
+		}
+		for _, m := range av.Models {
+			v.Models = append(v.Models, adoptionRowView{m.Model, cnt(m.ActiveUsers), cnt(m.Requests)})
+		}
 	}
 	for _, x := range d.Partners {
 		change := "no previous period"
 		if x.PrevGPUHours > 0 {
 			change = strconv.FormatFloat(100*(x.GPUHours-x.PrevGPUHours)/x.PrevGPUHours, 'f', 1, 64) + " % against the previous period"
 		}
-		cost := fmtNum(x.FluidsCost)
+		cost := formatMinor(minorUnits(x.FluidsCost, d.CurrencyDecimals), d.CurrencyDecimals)
 		if d.Currency != "" {
 			cost += " " + d.Currency
 		}
@@ -361,6 +423,7 @@ func (d *decisionData) view() decisionView {
 			BorrowedS: fmtNum(x.Borrowed), FromOthersS: fmtNum(x.BorrowedFromOthers), SelfS: fmtNum(x.SelfServed), LentS: fmtNum(x.Lent),
 			NetS: fmtNum(x.Net), UtilS: pctS(x.Utilisation), GPUS: fmtNum(x.GPUHours), PrevS: fmtNum(x.PrevGPUHours), ChangeS: change,
 			KWhS: fmtNum(x.KWh), KWhIdleS: fmtNum(x.KWhIdle), CostS: cost, LatIn: latS(x.InShare), LatBorrow: latS(x.Borrowing),
+			WaitIn: latS(x.WaitInShare), WaitBorrow: latS(x.WaitBorrowing), UsersS: usersLabel(x.ActiveUsers, d.MinUsers),
 		})
 	}
 	for _, c := range d.Matrix {
@@ -372,11 +435,11 @@ func (d *decisionData) view() decisionView {
 	for _, c := range d.Chargeback {
 		prov := ""
 		if c.ProviderCurrency != "" {
-			prov = fmtNum(c.ProviderCost) + " " + c.ProviderCurrency
+			prov = c.ProviderCost + " " + c.ProviderCurrency
 		}
 		fl := ""
-		if c.FluidsCurrency != "" || c.FluidsCost != 0 {
-			fl = fmtNum(c.FluidsCost) + " " + c.FluidsCurrency
+		if c.FluidsCurrency != "" || c.FluidsCostMinor != 0 {
+			fl = c.FluidsCost + " " + c.FluidsCurrency
 		}
 		v.Chargeback = append(v.Chargeback, chargebackView{c.From.UTC().Format("2006-01"), c.CostCenter, fmtNum(c.GPUHours), fmtNum(c.KWh), fl, prov})
 	}
@@ -449,12 +512,12 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 </table>{{end}}
 <h3>The guarantee held?</h3>
 <table>
-<tr><th>Requests</th><th>End-to-end latency</th></tr>
-<tr><td>Within the share</td><td>{{.LatIn}}</td></tr>
-<tr><td>Borrowing</td><td>{{.LatBorrow}}</td></tr>
+<tr><th>Requests</th><th>Admission wait (gateway queue)</th><th>End-to-end latency</th></tr>
+<tr><td>Within the share</td><td>{{.WaitIn}}</td><td>{{.LatIn}}</td></tr>
+<tr><td>Borrowing</td><td>{{.WaitBorrow}}</td><td>{{.LatBorrow}}</td></tr>
 </table>
 <h3>Adoption</h3>
-<p>{{.ActiveUsers}} active people over the period.</p>
+<p>{{.UsersS}} active people over the period.</p>
 </section>
 {{end}}
 <h2 id="d-lending">Lending matrix and balance</h2>
@@ -467,13 +530,13 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 {{range .Partners}}<tr><td>{{.Org}}</td><td class="n">{{.KWhS}}</td><td class="n">{{.KWhIdleS}}</td><td class="n">{{.CostS}}</td></tr>
 {{end}}</table>{{end}}
 <h2 id="d-adoption">Adoption</h2>
-{{if .Adoption}}<p>{{.AdoptionUsers}} active people over the period.</p>
+{{if .HasAdoption}}<p>{{.AdoptionUsers}} active people over the period. Figures over fewer than {{.MinUsers}} people are not shown.</p>
 <table><tr><th>Week of</th><th class="n">Active people</th><th class="n">Requests</th></tr>
-{{range .Adoption.Weekly}}<tr><td>{{.Day}}</td><td class="n">{{.ActiveUsers}}</td><td class="n">{{.Requests}}</td></tr>
+{{range .Weekly}}<tr><td>{{.Name}}</td><td class="n">{{.Users}}</td><td class="n">{{.Requests}}</td></tr>
 {{end}}</table>
 <h3>Models</h3>
 <table><tr><th>Model</th><th class="n">Active people</th><th class="n">Requests</th></tr>
-{{range .Adoption.Models}}<tr><td>{{.Model}}</td><td class="n">{{.Users}}</td><td class="n">{{.Requests}}</td></tr>
+{{range .Models}}<tr><td>{{.Name}}</td><td class="n">{{.Users}}</td><td class="n">{{.Requests}}</td></tr>
 {{end}}</table>{{else}}<p>No adoption figures.</p>{{end}}
 <h2 id="d-chargeback">Chargeback</h2>
 {{if .Chargeback}}<table><tr><th>Month</th><th>Cost centre</th><th class="n">GPU-hours</th><th class="n">kWh</th><th class="n">Fluids</th><th class="n">Provider spend</th></tr>
@@ -497,6 +560,82 @@ func writeDecisionPDF(w io.Writer, d *decisionData) error {
 		return err
 	}
 	return doc.Write(w)
+}
+
+// ---- bounds ----
+
+// Media types of the two documents.
+const (
+	decisionPDFType  = "application/pdf"
+	decisionXLSXType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+// Bounds on a decision report (#111). The layout engine's time and memory
+// grow with what it is given, and one partner's page is a page: the number of
+// partners, of table rows and of the bytes written are bounded, and a report
+// beyond them is refused with a clear error, never half-written.
+const (
+	MaxDecisionPartners   = 100
+	MaxDecisionMatrix     = 2000
+	MaxDecisionChargeback = 3000
+	MaxDecisionAdoption   = 400 // weekly and model rows together
+	// MaxDecisionBytes bounds a document: a PDF of the largest accepted report
+	// is a few MiB.
+	MaxDecisionBytes = 16 << 20
+	// decisionRenderTimeout bounds the typesetting.
+	decisionRenderTimeout = 2 * time.Minute
+)
+
+// checkBounds refuses a report too large to typeset.
+func (d *decisionData) checkBounds() error {
+	adopt := 0
+	if d.Adoption != nil {
+		adopt = len(d.Adoption.Weekly) + len(d.Adoption.Models)
+	}
+	switch {
+	case len(d.Partners) > MaxDecisionPartners:
+		return fmt.Errorf("the report has %d partners: at most %d", len(d.Partners), MaxDecisionPartners)
+	case len(d.Matrix) > MaxDecisionMatrix:
+		return fmt.Errorf("the lending matrix has %d cells: at most %d", len(d.Matrix), MaxDecisionMatrix)
+	case len(d.Chargeback) > MaxDecisionChargeback:
+		return fmt.Errorf("the chargeback has %d rows: at most %d; shorten the period", len(d.Chargeback), MaxDecisionChargeback)
+	case adopt > MaxDecisionAdoption:
+		return fmt.Errorf("the adoption tables have %d rows: at most %d", adopt, MaxDecisionAdoption)
+	}
+	return nil
+}
+
+// renderDecision writes a report in a format, bounded in time and size.
+func renderDecision(format string, d *decisionData) ([]byte, error) {
+	if err := d.checkBounds(); err != nil {
+		return nil, err
+	}
+	type result struct {
+		b   []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		var out bytes.Buffer
+		var err error
+		if format == DecisionXLSX {
+			err = writeDecisionXLSX(&out, d)
+		} else {
+			err = writeDecisionPDF(&out, d)
+		}
+		done <- result{out.Bytes(), err}
+	}()
+	select {
+	case r := <-done:
+		if r.err == nil && len(r.b) > MaxDecisionBytes {
+			return nil, fmt.Errorf("the %s is %d bytes: at most %d", format, len(r.b), MaxDecisionBytes)
+		}
+		return r.b, r.err
+	case <-time.After(decisionRenderTimeout):
+		// The layout engine cannot be interrupted: the goroutine ends with it,
+		// and the bounds above are what keep that short.
+		return nil, fmt.Errorf("typesetting the %s took longer than %s", format, decisionRenderTimeout)
+	}
 }
 
 // ---- the endpoint ----
@@ -526,13 +665,30 @@ func (s *Server) decisionReport(w http.ResponseWriter, r *http.Request, p *princ
 		apiError(w, http.StatusBadRequest, "invalid_request_error", "format: want pdf, xlsx or json")
 		return
 	}
+	release, ok := heavy(w)
+	if !ok {
+		return
+	}
+	defer release()
+	// The whole build is bounded, whatever the period.
+	ctx, cancel := context.WithTimeout(r.Context(), 2*ReportTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
 	d, err := s.buildDecision(r, p, from, to)
 	if errors.Is(err, store.ErrTooMany) || errors.Is(err, lending.ErrTooMany) {
 		apiError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "too many requests in the period; shorten it")
 		return
 	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		apiError(w, http.StatusServiceUnavailable, "service_unavailable", "the report took too long; shorten the period")
+		return
+	}
 	if err != nil {
 		storeError(w, err)
+		return
+	}
+	if err := d.checkBounds(); err != nil {
+		apiError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", err.Error())
 		return
 	}
 	var out bytes.Buffer
@@ -541,12 +697,14 @@ func (s *Server) decisionReport(w http.ResponseWriter, r *http.Request, p *princ
 	case FormatJSON:
 		ctype = "application/json"
 		err = json.NewEncoder(&out).Encode(d.json())
-	case DecisionXLSX:
-		ctype = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-		err = writeDecisionXLSX(&out, d)
 	default:
-		ctype = "application/pdf"
-		err = writeDecisionPDF(&out, d)
+		var body []byte
+		body, err = renderDecision(format, d)
+		out.Write(body)
+		ctype = decisionPDFType
+		if format == DecisionXLSX {
+			ctype = decisionXLSXType
+		}
 	}
 	if err != nil {
 		s.log.Error("decision report", "format", format, "err", err)

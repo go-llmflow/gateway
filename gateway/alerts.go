@@ -22,9 +22,8 @@ import (
 )
 
 // alerter sends soft-budget alerts to a webhook and/or by e-mail through an
-// SMTP relay (net/smtp SendMail: STARTTLS when the server offers it;
-// PlainAuth "will only send the credentials if the connection is using TLS
-// or is connected to localhost").
+// SMTP relay (smtpsend.go: STARTTLS required by default, implicit TLS on
+// request, a timeout; clear text only with tls = "none").
 type alerter struct {
 	cfg          config.Alerts
 	webhookToken string
@@ -43,20 +42,25 @@ type alerter struct {
 }
 
 func newAlerter(cfg config.Alerts, webhookToken, smtpPassword string, log func(string, ...any)) *alerter {
-	return &alerter{
+	a := &alerter{
 		cfg: cfg, webhookToken: webhookToken, smtpPassword: smtpPassword, log: log,
 		client: &http.Client{
 			Timeout:       10 * time.Second,
 			Transport:     &http.Transport{Proxy: nil},
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
-		sendMail: smtp.SendMail,
 		attempts: 6,
 		backoff:  exponentialBackoff(2*time.Second, 2*time.Minute),
 		sleep:    sleepCtx,
 		failed:   newCounterVec("llmflow_alert_failures_total", "Soft-budget alerts given up on after every retry, by channel.", "channel"),
 		retried:  newCounterVec("llmflow_alert_retries_total", "Soft-budget alert retries, by channel.", "channel"),
 	}
+	// A protected session or none (smtpsend.go); the auth argument is the
+	// legacy shape tests replace.
+	a.sendMail = func(_ string, _ smtp.Auth, from string, to []string, msg []byte) error {
+		return sendSMTP(a.cfg.SMTP, a.smtpPassword, from, to, msg)
+	}
+	return a
 }
 
 // exponentialBackoff doubles from base up to limit, with up to 25% jitter
