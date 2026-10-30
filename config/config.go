@@ -89,6 +89,10 @@ type Config struct {
 	// Fluids prices and attributes measured energy; nil without a fluids
 	// block (#97).
 	Fluids *Fluids
+	// AdoptionMinUsers is the small-cell threshold of the adoption figures: a
+	// day, a week or a model used by fewer distinct people is not shown
+	// (default 5, at least 2: one person is never a figure).
+	AdoptionMinUsers int
 	// Profiles are the workload profiles (profiles.go, #90).
 	Profiles Profiles
 	// SoftQuotas are the warnings before a window runs out (softquotas.go, #96).

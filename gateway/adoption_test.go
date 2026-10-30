@@ -14,7 +14,9 @@ import (
 // reader; an organisation reads its own, finance_viewer all.
 func TestAdoptionReport(t *testing.T) {
 	up := newFakeVLLM(t)
-	e := newEnv(t, testConfig(up.URL()))
+	cfg := testConfig(up.URL())
+	cfg.AdoptionMinUsers = 2 // the threshold has its own test; this one reads small cells
+	e := newEnv(t, cfg)
 	at := time.Date(2026, 10, 14, 10, 0, 0, 0, time.UTC)
 	rec := func(org, user string) store.Record {
 		return store.Record{Time: at, Org: org, Team: org, User: user, KeyID: "secret-key-id", Model: "llama", Pool: "b300", Status: 200}

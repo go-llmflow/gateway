@@ -13,6 +13,83 @@ import (
 // and per week, requests, and the models used, as counts. No name, key or
 // content leaves it. The proxy roles and finance_viewer read every
 // organisation, org_admin and org-level viewer their own.
+//
+// Small cells are not shown (adoption_min_users, default 5, at least 2): a day,
+// a week or a model used by 1 to k-1 distinct people is suppressed, and models
+// suppressed together (two or more) are merged into one "(other models)" row
+// with their requests only. A figure over one person is that person; a
+// service key's requests count as requests and as no one.
+
+// adoptionPoint is a day, a week or a model; Suppressed cells carry no count.
+type adoptionPoint struct {
+	Period      string `json:"period"`
+	ActiveUsers *int64 `json:"active_users"`
+	Requests    *int64 `json:"requests"`
+	Suppressed  bool   `json:"suppressed,omitempty"`
+}
+
+type adoptionModel struct {
+	Model       string `json:"model"`
+	ActiveUsers *int64 `json:"active_users"`
+	Requests    *int64 `json:"requests"`
+	Suppressed  bool   `json:"suppressed,omitempty"`
+}
+
+type adoptionView struct {
+	ActiveUsers   *int64          `json:"active_users"`
+	Daily, Weekly []adoptionPoint `json:"-"`
+	Models        []adoptionModel `json:"-"`
+}
+
+// OtherModels names the merged suppressed models.
+const OtherModels = "(other models)"
+
+func ptr(v int64) *int64 { return &v }
+
+// hidden reports whether a count of distinct people is a small cell: some, but
+// fewer than k.
+func hidden(users int64, k int) bool { return users > 0 && users < int64(k) }
+
+// suppressAdoption applies the small-cell rule.
+func suppressAdoption(a *store.Adoption, k int) adoptionView {
+	var v adoptionView
+	if !hidden(a.Users, k) {
+		v.ActiveUsers = ptr(a.Users)
+	}
+	pts := func(in []store.AdoptionPoint) []adoptionPoint {
+		out := make([]adoptionPoint, 0, len(in))
+		for _, x := range in {
+			if hidden(x.ActiveUsers, k) {
+				out = append(out, adoptionPoint{Period: x.Day, Suppressed: true})
+				continue
+			}
+			out = append(out, adoptionPoint{Period: x.Day, ActiveUsers: ptr(x.ActiveUsers), Requests: ptr(x.Requests)})
+		}
+		return out
+	}
+	v.Daily, v.Weekly = pts(a.Daily), pts(a.Weekly)
+	v.Models = []adoptionModel{}
+	var merged, mergedN int64
+	for _, m := range a.Models {
+		if hidden(m.Users, k) {
+			merged += m.Requests
+			mergedN++
+			continue
+		}
+		v.Models = append(v.Models, adoptionModel{Model: m.Model, ActiveUsers: ptr(m.Users), Requests: ptr(m.Requests)})
+	}
+	if mergedN >= 2 { // one suppressed model alone would show that person's requests
+		v.Models = append(v.Models, adoptionModel{Model: OtherModels, Requests: ptr(merged), Suppressed: true})
+	}
+	return v
+}
+
+func (s *Server) adoptionMin() int {
+	if s.cfg.AdoptionMinUsers >= 2 {
+		return s.cfg.AdoptionMinUsers
+	}
+	return 5
+}
 
 func (s *Server) adoptionReport(w http.ResponseWriter, r *http.Request, p *principal) {
 	if !p.anyOrgView() {
@@ -62,35 +139,34 @@ func (s *Server) adoptionReport(w http.ResponseWriter, r *http.Request, p *princ
 		storeError(w, err)
 		return
 	}
+	k := s.adoptionMin()
+	v := suppressAdoption(a, k)
 	if format == FormatCSV {
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		cw := csv.NewWriter(w)
 		_ = cw.Write([]string{"series", "period_or_model", "active_users", "requests"})
-		emit := func(series string, ps []store.AdoptionPoint) {
+		num := func(p *int64) string {
+			if p == nil {
+				return "suppressed"
+			}
+			return strconv.FormatInt(*p, 10)
+		}
+		emit := func(series string, ps []adoptionPoint) {
 			for _, x := range ps {
-				_ = cw.Write([]string{series, csvSafe(x.Day), strconv.FormatInt(x.ActiveUsers, 10), strconv.FormatInt(x.Requests, 10)})
+				_ = cw.Write([]string{series, csvSafe(x.Period), num(x.ActiveUsers), num(x.Requests)})
 			}
 		}
-		emit("day", a.Daily)
-		emit("week", a.Weekly)
-		for _, m := range a.Models {
-			_ = cw.Write([]string{"model", csvSafe(m.Model), strconv.FormatInt(m.Users, 10), strconv.FormatInt(m.Requests, 10)})
+		emit("day", v.Daily)
+		emit("week", v.Weekly)
+		for _, m := range v.Models {
+			_ = cw.Write([]string{"model", csvSafe(m.Model), num(m.ActiveUsers), num(m.Requests)})
 		}
 		cw.Flush()
 		return
 	}
-	nz := func(v []store.AdoptionPoint) []store.AdoptionPoint {
-		if v == nil {
-			return []store.AdoptionPoint{}
-		}
-		return v
-	}
-	models := a.Models
-	if models == nil {
-		models = []store.AdoptionModel{}
-	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"from": from.UTC(), "to": to.UTC(), "active_users": a.Users, "daily": nz(a.Daily), "weekly": nz(a.Weekly), "models": models,
+		"from": from.UTC(), "to": to.UTC(), "active_users": v.ActiveUsers, "daily": v.Daily, "weekly": v.Weekly, "models": v.Models,
+		"min_users": k, "note": "cells with fewer than min_users distinct people are suppressed",
 	})
 }

@@ -61,3 +61,27 @@ func FuzzCostCenter(f *testing.F) {
 		}
 	})
 }
+
+func TestAdoptionMinUsersAndDecimals(t *testing.T) {
+	c, err := parse(valid)
+	if err != nil || c.AdoptionMinUsers != 5 {
+		t.Fatalf("default: %v %v", c.AdoptionMinUsers, err)
+	}
+	if c, err = parse(valid + "\nadoption_min_users = 3\n"); err != nil || c.AdoptionMinUsers != 3 {
+		t.Fatalf("3: %v %v", c, err)
+	}
+	for _, bad := range []string{"1", "0", "-2", "5000"} {
+		if _, err := parse(valid + "\nadoption_min_users = " + bad + "\n"); err == nil || !strings.Contains(err.Error(), "Invalid adoption_min_users") {
+			t.Errorf("%s: %v", bad, err)
+		}
+	}
+	if c, err = parse(valid + "\nfluids {\n currency = \"JPY\"\n currency_decimals = 0\n}\n"); err != nil || c.Fluids.CurrencyDecimals != 0 {
+		t.Fatalf("JPY: %v", err)
+	}
+	if c, _ = parse(valid + "\nfluids {\n pue = 1.2\n}\n"); c.Fluids.CurrencyDecimals != 2 {
+		t.Fatal("default decimals")
+	}
+	if _, err := parse(valid + "\nfluids {\n currency_decimals = 9\n}\n"); err == nil {
+		t.Fatal("9 decimals accepted")
+	}
+}

@@ -38,6 +38,26 @@ type projectCCHCL struct {
 // character, and no leading sign (a spreadsheet would read it as a formula).
 var costCenterRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_./-]{0,31}$`)
 
+// Adoption privacy bounds (#97): the figures are aggregates, and an aggregate
+// of one person is that person.
+const (
+	DefaultAdoptionMinUsers = 5
+	MinAdoptionMinUsers     = 2
+)
+
+func (v *validator) adoptionPrivacy(raw *fileHCL, c *Config) {
+	c.AdoptionMinUsers = DefaultAdoptionMinUsers
+	if raw.AdoptionMinUsers == nil {
+		return
+	}
+	k := *raw.AdoptionMinUsers
+	if k < MinAdoptionMinUsers || k > 1000 {
+		v.errf(raw.AdoptionMinRange, "Invalid adoption_min_users", "adoption_min_users = %d: want %d..1000 (a figure over one person is that person)", k, MinAdoptionMinUsers)
+		return
+	}
+	c.AdoptionMinUsers = k
+}
+
 // ValidCostCenter reports whether s is an acceptable general-ledger code.
 func ValidCostCenter(s string) bool { return costCenterRE.MatchString(s) }
 

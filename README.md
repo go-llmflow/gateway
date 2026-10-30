@@ -998,7 +998,9 @@ model "llama" {
   `prefill tokens × w_prefill + decode tokens × w_decode` (prefill tokens are the
   prompt minus cached tokens). *Idle* energy (an interval with no work, or the
   `idle_watts` floor) is allocated over a month by the agreement: `by_share`
-  pro rata to the organisations' shares, `by_usage` to their energy; energy no
+  pro rata to the organisations' shares, `by_usage` to their energy over the **whole calendar month** (a report over part of
+  a month splits that part's idle energy as the month's report would, so the parts
+  add up to the month); energy no
   one can be charged for is `(unallocated)`, visible to the proxy roles only.
   An organisation's idle energy is spread over its rows pro rata to their active
   energy, so every grouping adds up to the measured total.
@@ -1234,7 +1236,12 @@ profile lookup and a handful of in-memory reads per request (`usageHeaders`).
   row per cost centre and calendar month of the period, with `gpu_hours`, `kwh`,
   `fluids_cost` and `fluids_currency` from the fluids block, and an external
   provider's spend in its own currency on a row of its own (`provider_cost`,
-  `provider_currency`). What has no code is the cost centre `UNMAPPED`, and
+  `provider_currency`). **Money is exact**: each row's cost is rounded once, half
+  to even, to the currency's minor unit (`fluids.currency_decimals`, default 2;
+  provider spend: 2) and written as a decimal string without floating point; the
+  JSON also carries the integer `*_cost_minor`. A file's total is the sum of its
+  rows, in integers. An interval belongs to the month its start falls in, the
+  same as in `/admin/fluids`, whatever time of day the period ends. What has no code is the cost centre `UNMAPPED`, and
   energy no organisation is charged for is `UNALLOCATED`: the file always adds
   up to the reports. This is a chargeback in FinOps' sense, the file a finance
   system books (finops.org, Invoicing and Chargeback). Estimate-against-actual
@@ -1243,7 +1250,11 @@ profile lookup and a handful of in-memory reads per request (`usageHeaders`).
 - **`GET /admin/adoption?from=&to=&format=json|csv`**: active people per day and
   per week (Monday), requests, and per model the active people and requests.
   Counts only: no name, key or content leaves it. A service key's request counts
-  as a request and as no one.
+  as a request and as no one. **Small cells are suppressed**: a day, a week or a
+  model used by 1 to k−1 distinct people is returned without counts
+  (`suppressed`), models suppressed together are merged into `(other models)`
+  with their requests, and the overall figure is hidden below k. k is
+  `adoption_min_users` (top level, default 5, at least 2).
 
 ### Cost units (since v0.12.0)
 

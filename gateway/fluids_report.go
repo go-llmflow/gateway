@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -95,6 +96,15 @@ func (c fluidsCell) dim(d string) string {
 // spreads it over their cells. The sum of ActiveMJ+IdleMJ over the result is
 // exactly the measured energy of the input.
 func allocateFluids(cells []store.EnergyCell, idle []store.EnergyIdle, f *config.Fluids, shares map[string]float64) ([]fluidsCell, error) {
+	return allocateFluidsBasis(cells, idle, f, shares, nil)
+}
+
+// allocateFluidsBasis is allocateFluids with the usage by_usage allocates on
+// given per month and organisation (millijoules of active energy over the
+// WHOLE month): a report over part of a month then splits that part's idle
+// energy as the month's report would, and the parts of a month add up to it.
+// A month absent from basis uses the cells given.
+func allocateFluidsBasis(cells []store.EnergyCell, idle []store.EnergyIdle, f *config.Fluids, shares map[string]float64, basis map[string]map[string]float64) ([]fluidsCell, error) {
 	var out []fluidsCell
 	byMonth := map[string][]int{} // month → indices into out
 	for _, c := range cells {
@@ -116,8 +126,12 @@ func allocateFluids(cells []store.EnergyCell, idle []store.EnergyIdle, f *config
 	sort.Strings(months)
 	for _, m := range months {
 		usage := map[string]float64{}
-		for _, i := range byMonth[m] {
-			usage[out[i].Org] += float64(out[i].ActiveMJ)
+		if b, ok := basis[m]; ok {
+			usage = b
+		} else {
+			for _, i := range byMonth[m] {
+				usage[out[i].Org] += float64(out[i].ActiveMJ)
+			}
 		}
 		alloc, err := energy.AllocateIdle(idleOf[m], f.IdleEnergy, shares, usage)
 		if err != nil {
@@ -263,6 +277,39 @@ func (s *Server) orgShares() map[string]float64 {
 	return m
 }
 
+// allocatedEnergy reads the energy of [from, to) and allocates its idle part.
+// With idle_energy = "by_usage" the weights are the organisations' energy over
+// the whole calendar months the period touches (the month is the unit of the
+// agreement), so that a part of a month is split as the month is and the parts
+// add up to it (#110).
+func (s *Server) allocatedEnergy(ctx context.Context, es store.EnergyStore, from, to time.Time) ([]fluidsCell, error) {
+	f := s.cfg.Fluids
+	cells, idle, err := es.EnergyBetween(ctx, from, to)
+	if err != nil {
+		return nil, err
+	}
+	var basis map[string]map[string]float64
+	if f.IdleEnergy == energy.IdleByUsage {
+		basis = map[string]map[string]float64{}
+		for ms := time.Date(from.UTC().Year(), from.UTC().Month(), 1, 0, 0, 0, 0, time.UTC); ms.Before(to); ms = ms.AddDate(0, 1, 0) {
+			me := ms.AddDate(0, 1, 0)
+			if !from.After(ms) && !to.Before(me) {
+				continue // the window holds the whole month: its own cells are the basis
+			}
+			mc, _, err := es.EnergyBetween(ctx, ms, me)
+			if err != nil {
+				return nil, err
+			}
+			u := map[string]float64{}
+			for _, c := range mc {
+				u[c.Org] += float64(c.MJ)
+			}
+			basis[ms.Format("2006-01")] = u
+		}
+	}
+	return allocateFluidsBasis(cells, idle, f, s.orgShares(), basis)
+}
+
 // fluidsData computes the visible rows of the fluids report, with GPU-hours
 // joined by dimension.
 func (s *Server) fluidsData(r *http.Request, p *principal, from, to time.Time, dims []string) ([]FluidsRow, error) {
@@ -271,11 +318,7 @@ func (s *Server) fluidsData(r *http.Request, p *principal, from, to time.Time, d
 		return nil, store.ErrNotFound
 	}
 	f := s.cfg.Fluids
-	cells, idle, err := es.EnergyBetween(r.Context(), from, to)
-	if err != nil {
-		return nil, err
-	}
-	all, err := allocateFluids(cells, idle, f, s.orgShares())
+	all, err := s.allocatedEnergy(r.Context(), es, from, to)
 	if err != nil {
 		return nil, err
 	}

@@ -1,8 +1,11 @@
 package gateway
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -35,15 +38,54 @@ const (
 
 // ChargebackRow is one line of the file.
 type ChargebackRow struct {
-	From             time.Time `json:"period_from"`
-	To               time.Time `json:"period_to"`
-	CostCenter       string    `json:"cost_center"`
-	GPUHours         float64   `json:"gpu_hours"`
-	KWh              float64   `json:"kwh"`
-	FluidsCost       float64   `json:"fluids_cost"`
-	FluidsCurrency   string    `json:"fluids_currency"`
-	ProviderCost     float64   `json:"provider_cost"`
-	ProviderCurrency string    `json:"provider_currency"`
+	From       time.Time `json:"period_from"`
+	To         time.Time `json:"period_to"`
+	CostCenter string    `json:"cost_center"`
+	GPUHours   float64   `json:"gpu_hours"`
+	KWh        float64   `json:"kwh"`
+	// Money is an integer count of the currency's minor unit (cents),
+	// rounded once per row, half to even; FluidsCost and ProviderCost are the
+	// same amounts as decimal strings. The rows of a file therefore add up to
+	// its total exactly, in integers (#110).
+	FluidsCostMinor   int64  `json:"fluids_cost_minor"`
+	FluidsCost        string `json:"fluids_cost"`
+	FluidsCurrency    string `json:"fluids_currency"`
+	ProviderCostMinor int64  `json:"provider_cost_minor"`
+	ProviderCost      string `json:"provider_cost"`
+	ProviderCurrency  string `json:"provider_currency"`
+
+	fluids, provider float64 // the amounts before rounding
+}
+
+// ProviderDecimals is the minor unit of an external provider's currency, in
+// decimal digits: provider costs are in USD or EUR, two digits.
+const ProviderDecimals = 2
+
+// minorUnits rounds an amount to the currency's minor unit, half to even.
+func minorUnits(v float64, decimals int) int64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
+	return int64(math.RoundToEven(v * math.Pow10(decimals)))
+}
+
+// formatMinor writes minor units as a decimal string with no float involved.
+func formatMinor(m int64, decimals int) string {
+	neg := m < 0
+	if neg {
+		m = -m
+	}
+	s := strconv.FormatInt(m, 10)
+	if decimals > 0 {
+		for len(s) <= decimals {
+			s = "0" + s
+		}
+		s = s[:len(s)-decimals] + "." + s[len(s)-decimals:]
+	}
+	if neg {
+		s = "-" + s
+	}
+	return s
 }
 
 // monthSpans splits [from, to) into calendar months (UTC), clipped to it.
@@ -81,14 +123,8 @@ func (s *Server) chargeback(r *http.Request, p *principal, from, to time.Time) (
 		agg[k] = a
 		return a
 	}
-	spanOf := func(day string) (int, bool) {
-		for i, sp := range spans {
-			if day >= sp[0].Format("2006-01-02") && day < sp[1].Format("2006-01-02") {
-				return i, true
-			}
-		}
-		return 0, false
-	}
+	ctx, cancel := context.WithTimeout(r.Context(), ReportTimeout)
+	defer cancel()
 	ccOf := func(org, lab, team, project string) string {
 		if org == Unallocated {
 			return CostCenterUnallocated
@@ -112,7 +148,7 @@ func (s *Server) chargeback(r *http.Request, p *principal, from, to time.Time) (
 			if x.Unit == "" {
 				a.GPUHours += x.Cost
 			} else {
-				a.ProviderCost += x.Cost
+				a.provider += x.Cost
 				a.ProviderCurrency = x.Unit
 			}
 		}
@@ -120,31 +156,34 @@ func (s *Server) chargeback(r *http.Request, p *principal, from, to time.Time) (
 	// Measured energy and its cost.
 	if f := s.cfg.Fluids; f != nil {
 		if es, ok := s.st.(store.EnergyStore); ok {
-			cells, idle, err := es.EnergyBetween(r.Context(), from, to)
-			if err != nil {
-				return nil, err
-			}
-			all, err := allocateFluids(cells, idle, f, s.orgShares())
-			if err != nil {
-				return nil, err
-			}
-			for _, c := range all {
-				if !p.reportView() && (c.Org == Unallocated || !visible(c.Org)) {
-					continue
+			// One read per span, on its instants: an interval belongs to the
+			// span its start falls in, exactly as in /admin/fluids, whatever
+			// time of day the period ends (#110).
+			for _, sp := range spans {
+				all, err := s.allocatedEnergy(ctx, es, sp[0], sp[1])
+				if err != nil {
+					return nil, err
 				}
-				i, ok := spanOf(c.Day)
-				if !ok {
-					continue
+				for _, c := range all {
+					if !p.reportView() && (c.Org == Unallocated || !visible(c.Org)) {
+						continue
+					}
+					a := row(sp, ccOf(c.Org, c.Lab, c.Team, c.Project), "")
+					a.KWh += energy.KWh(c.ActiveMJ + c.IdleMJ)
+					a.fluids += f.Params(sp[0].Format("2006-01")).Cost(c.ActiveMJ + c.IdleMJ)
+					a.FluidsCurrency = f.Currency
 				}
-				a := row(spans[i], ccOf(c.Org, c.Lab, c.Team, c.Project), "")
-				a.KWh += energy.KWh(c.ActiveMJ + c.IdleMJ)
-				a.FluidsCost += f.Params(c.month()).Cost(c.ActiveMJ + c.IdleMJ)
-				a.FluidsCurrency = f.Currency
 			}
 		}
 	}
+	dec := 2
+	if s.cfg.Fluids != nil {
+		dec = s.cfg.Fluids.CurrencyDecimals
+	}
 	out := make([]ChargebackRow, 0, len(agg))
 	for _, a := range agg {
+		a.FluidsCostMinor, a.ProviderCostMinor = minorUnits(a.fluids, dec), minorUnits(a.provider, ProviderDecimals)
+		a.FluidsCost, a.ProviderCost = formatMinor(a.FluidsCostMinor, dec), formatMinor(a.ProviderCostMinor, ProviderDecimals)
 		out = append(out, *a)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -164,8 +203,8 @@ var chargebackHeader = []string{"period_from", "period_to", "cost_center", "gpu_
 
 func (c ChargebackRow) record() []string {
 	f := func(v float64) string { return strconv.FormatFloat(v, 'f', 6, 64) }
-	return []string{c.From.UTC().Format("2006-01-02"), c.To.UTC().Format("2006-01-02"), csvSafe(c.CostCenter), f(c.GPUHours), f(c.KWh), f(c.FluidsCost),
-		c.FluidsCurrency, f(c.ProviderCost), c.ProviderCurrency}
+	return []string{c.From.UTC().Format("2006-01-02"), c.To.UTC().Format("2006-01-02"), csvSafe(c.CostCenter), f(c.GPUHours), f(c.KWh), c.FluidsCost,
+		c.FluidsCurrency, c.ProviderCost, c.ProviderCurrency}
 }
 
 // chargebackReport answers GET /admin/chargeback?from=&to=&format=csv|json.
@@ -193,7 +232,16 @@ func (s *Server) chargebackReport(w http.ResponseWriter, r *http.Request, p *pri
 		apiError(w, http.StatusBadRequest, "invalid_request_error", "format: want csv or json")
 		return
 	}
+	release, ok := heavy(w)
+	if !ok {
+		return
+	}
+	defer release()
 	rows, err := s.chargeback(r, p, from, to)
+	if errors.Is(err, context.DeadlineExceeded) {
+		apiError(w, http.StatusServiceUnavailable, "service_unavailable", "the report took too long; shorten the period")
+		return
+	}
 	if err != nil {
 		storeError(w, err)
 		return

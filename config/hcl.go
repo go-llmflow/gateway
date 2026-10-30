@@ -75,6 +75,8 @@ type fileHCL struct {
 	MCPServers           []mcpServerHCL  `hcl:"mcp_server,block"`
 	Budgets              *budgetsHCL     `hcl:"budgets,block"`
 	Fluids               *fluidsHCL      `hcl:"fluids,block"`
+	AdoptionMinUsers     *int            `hcl:"adoption_min_users,optional"`
+	AdoptionMinRange     hcl.Range       `hcl:"adoption_min_users,attr_value_range"`
 	Workday              *workdayHCL     `hcl:"workday,block"`
 	Profiles             []profileHCL    `hcl:"profile,block"`
 	DefaultProfile       *string         `hcl:"default_profile,optional"`
@@ -1518,6 +1520,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	v.external(raw, c)
 	v.budgets(raw, c)
 	v.fluids(raw, c)
+	v.adoptionPrivacy(raw, c)
 	v.profiles(raw, c)
 	v.softQuotas(raw, c)
 	// Every *_file attribute is a secret reference: a file, or a field of

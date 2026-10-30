@@ -41,7 +41,7 @@ func TestChargeback(t *testing.T) {
 	cfg.Orgs[0].LabCostCenter = map[string]string{"genomics": "GL-A-GEN"}
 	cfg.Orgs[0].ProjectCostCenter = map[[2]string]string{{"etabA", "p1"}: "GL-A-P1"}
 	// etabB has no code. Fluids: 1 EUR per IT kWh.
-	cfg.Fluids = &config.Fluids{PUE: 1, PricePerKWh: 1, Currency: "EUR", IdleEnergy: energy.IdleByShare, WPrefill: 1, WDecode: 1}
+	cfg.Fluids = &config.Fluids{PUE: 1, PricePerKWh: 1, Currency: "EUR", CurrencyDecimals: 2, IdleEnergy: energy.IdleByShare, WPrefill: 1, WDecode: 1}
 	e := newEnv(t, cfg)
 	ctx := context.Background()
 	oct, nov := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC), time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
