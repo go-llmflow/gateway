@@ -50,6 +50,9 @@ type WarnMark struct {
 	// Rolling: the window slides (session), the mark is armed again by
 	// RearmWarnings.
 	Rolling bool
+	// At is when the crossing is fired, for the event log of the reports (zero:
+	// now).
+	At time.Time
 }
 
 // Validate bounds a mark's fields.
@@ -163,6 +166,7 @@ func (m *Memory) MarkWarning(_ context.Context, w WarnMark, _ []WarnOutbox) (boo
 		return false, nil
 	}
 	m.warn.marks[k] = &memMark{instance: w.Instance.UTC(), rolling: w.Rolling}
+	m.recordWarnEventLocked(w)
 	return true, nil
 }
 
@@ -281,6 +285,15 @@ func (p *Postgres) MarkWarning(ctx context.Context, w WarnMark, out []WarnOutbox
 			return nil
 		}
 		fired = true
+		// The event log of the quota reports (quotareport.go): same transaction.
+		at := w.At
+		if at.IsZero() {
+			at = time.Now()
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO llmflow_warn_events (user_name, win, threshold, instance, fired_at)
+			VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`, w.User, w.Window, w.Threshold, w.Instance.UTC(), at.UTC()); err != nil {
+			return err
+		}
 		for _, o := range out {
 			if _, err := tx.Exec(ctx, `INSERT INTO llmflow_alert_outbox (key, channel, payload) VALUES ($1, $2, $3)
 				ON CONFLICT (key, channel) DO NOTHING`, o.Key, o.Channel, o.Payload); err != nil {

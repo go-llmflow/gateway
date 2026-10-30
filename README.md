@@ -1244,9 +1244,9 @@ profile lookup and a handful of in-memory reads per request (`usageHeaders`).
   same as in `/admin/fluids`, whatever time of day the period ends. What has no code is the cost centre `UNMAPPED`, and
   energy no organisation is charged for is `UNALLOCATED`: the file always adds
   up to the reports. This is a chargeback in FinOps' sense, the file a finance
-  system books (finops.org, Invoicing and Chargeback). Estimate-against-actual
-  variance needs actuals entered somewhere: not implemented. Organisation
-  admins and viewers get their own codes only.
+  system books (finops.org, Invoicing and Chargeback). Budget-against-actual
+  variance is in the decision report (below). Organisation admins and viewers
+  get their own codes only.
 - **`GET /admin/adoption?from=&to=&format=json|csv`**: active people per day and
   per week (Monday), requests, and per model the active people and requests.
   Counts only: no name, key or content leaves it. A service key's request counts
@@ -1305,7 +1305,61 @@ size, never the content).
 **Bounds.** The report is refused (413) beyond 100 partners, 2 000 matrix cells,
 3 000 chargeback rows, 400 adoption rows or 16 MiB, typesetting is limited to
 2 minutes, the build runs under a timeout, and at most 2 heavy reports run at
-once (429 with `Retry-After` otherwise).
+once (429 with `Retry-After` otherwise). The quota tables are refused beyond
+3 000 rows (soft, refusal and profile rows together) or 1 500 oversubscription
+days, the variance table beyond 3 000 rows; their store queries are bounded
+(100 000 events and assignments, 20 000 refusal cells, ErrTooMany past them).
+
+#### Quotas and profiles in the report
+
+Sections "Quotas and profiles" (PDF), sheets `Soft quotas`, `Refusals`,
+`Profiles`, `Oversubscription` (XLSX) and the `quotas` key (json), per partner,
+lab (team group) and profile, for the period:
+
+- **Soft-quota notifications** by threshold and window (5 h session, weekly):
+  events and distinct people. Every notification is now logged durably in
+  `llmflow_warn_events` (`WarnMark.At`; a backfill copies the latest mark of each
+  user, window and threshold that existed before the upgrade, so the log starts
+  from there, and says so in the report notes). The outbox is not the source: it
+  only holds mail and webhooks when they are configured, and is pruned.
+- **Hard refusals** (429): budget, profile session, profile week, profile
+  overflow, counted per day, organisation, team and profile in
+  `llmflow_refusals`. The counts are kept in memory and written every 30 s and
+  when the gateway stops (a crash loses at most 30 s of counts; at most 4 096
+  distinct cells are held, the rest are counted under their kind). Never a
+  person. `llmflow_denied_total` stays the live Prometheus view.
+- **Workload days assigned and used** per profile: assigned days are the
+  assignment history overlapping the period (days of the period times days per
+  week over 7), used days are the cost divided by the profile's workday.
+- **Oversubscription over time**: for up to 70 sampled days, the sum of the
+  assigned days per week against the capacity of that day (trailing 7 days of
+  pool load, the same `capacityOf` as `/admin/profiles`), not the point-in-time
+  ratio. The PDF shows peak, average and days above 1.0 per partner; the XLSX
+  and json carry every sampled day.
+- **Small cells**, as for adoption: a figure over fewer than
+  `adoption_min_users` people (or fewer refusals than that) is `suppressed`.
+  No row carries a person. `org_admin` sees their own partner only.
+
+#### Budget against actual (FinOps variance)
+
+A table per month, cost centre and unit (`Variance` sheet, `variance` key,
+"Budget against actual" section). Sources opened: FinOps Foundation,
+Budgeting (budget to actual, thresholds 20 % Crawl / 15 % Walk / 12 % Run) and
+Forecasting (percentage variance is the primary metric, the amount is also
+informative); FOCUS defines no budget or variance column, so it is not used.
+
+- **Budgeted**: the declared org and team budgets (no per-model budget), prorated
+  to the month by days (a team budget wins over the organisation's).
+- **Estimated**: the weekly profile allowances (`profile_week` budgets) of the
+  partner's people, prorated the same way.
+- **Actual**: the chargeback figure of the cost centre and month, in GPU-hours
+  (milli-GPU-hour minor unit) and in each provider currency (cents); units are
+  never added.
+- **Variance** is actual minus budgeted (positive: over budget), as a minor-unit
+  integer and as a percentage of the budgeted amount (one decimal, half to
+  even). Each amount is rounded once, half to even. A row beyond
+  `variance_threshold_pct` (top level, default 15, above 0 and at most 1000) is
+  flagged.
 
 #### Energy reconciliation: Slurm against DCGM
 

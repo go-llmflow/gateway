@@ -43,6 +43,27 @@ func fixedDecision() *decisionData {
 		HasRecon: true, ReconNote: "Slurm file: 12 jobs, jobs from 2026-09-30 12:00 to 2026-11-02 08:00 UTC; 11 used (2 only partly inside the period, prorated), 1 outside the period, 0 still running; 14 job steps, 0 without energy and 0 never started left out.",
 		EnergyRecon: reconcileEnergy(map[string]float64{"etabA": 3.6e6 * 36, "etabB": 3.6e6 * 20}, // Slurm: 36 and 20 kWh
 			map[string]float64{"etabA": 40, "etabB": 12}), // DCGM: 40 (+11.1 %) and 12 (-40 %)
+		VarianceLimit: 15,
+		Variance: buildVariance(varianceInputs{
+			Months:     octoberSpans(),
+			Budgets:    []varianceLine{{CostCenter: "GL-A", Amount: 80}, {CostCenter: "GL-A", Unit: "EUR", Amount: 20}},
+			Allowances: []varianceLine{{CostCenter: "GL-A", Amount: 14, PeriodDays: 7}},
+			Actual:     map[varianceKey]float64{{"2026-10", "GL-A", ""}: 120, {"2026-10", "GL-A", "EUR"}: 18.5, {"2026-10", CostCenterUnmapped, ""}: 30},
+			Threshold:  15,
+		}),
+		Quotas: &QuotaReport{
+			MinCell: 5,
+			Soft: []SoftRow{{Org: "etabA", Lab: "lab1", Window: "week", Threshold: 80, Events: i64(9), People: i64(7)},
+				{Org: "etabB", Window: "session", Threshold: 100, Suppressed: true}},
+			Refusals: []RefusalOut{{Org: "etabA", Lab: "lab1", Profile: "std", Kind: "budget", Refusals: i64(12)},
+				{Org: "etabB", Kind: "profile_week", Suppressed: true}},
+			Profiles: []ProfileRow{{Org: "etabA", Lab: "lab1", Profile: "std", People: i64(7), AssignedDays: f64(31), UsedDays: f64(22), Utilisation: f64(22.0 / 31)},
+				{Org: "etabB", Profile: "std", Suppressed: true}},
+			Oversub: []OversubRow{{Org: "etabA", Day: "2026-10-01", People: i64(7), AssignedDaysPerWeek: f64(35), CapacityDaysPerWeek: f64(28), Ratio: f64(1.25)},
+				{Org: "etabA", Day: "2026-10-02", People: i64(7), AssignedDaysPerWeek: f64(21), CapacityDaysPerWeek: f64(28), Ratio: f64(0.75)},
+				{Org: "etabB", Day: "2026-10-01", Suppressed: true}},
+			Notes: []string{"Cells over fewer than 5 people are not shown."},
+		},
 		Daily: []chartPoint{{"2026-10-01", 4}, {"2026-10-02", 6}, {"2026-10-03", 5}},
 		Pie:   []chartSlice{{"etabA", 120}, {"etabB", 30}},
 		Bars:  []chartBar{{"etabA", 120, 100}, {"etabB", 30, 0}},

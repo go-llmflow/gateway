@@ -29,6 +29,9 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 <li><a class="toc" href="#d-adoption">Adoption</a></li>
 <li><a class="toc" href="#d-recon">Energy reconciliation</a></li>
 <li><a class="toc" href="#d-chargeback">Chargeback</a></li>
+<li><a class="toc" href="#d-variance">Budget against actual</a></li>
+<li><a class="toc" href="#d-quotas">Quotas and profiles</a></li>
+
 <li><a class="toc" href="#d-charts">Charts</a></li>
 </ol>
 <p class="note">Units are never added: GPU-hours, kWh and each currency have their own columns. GPU-hours are the gateway's cost unit; the guaranteed capacity is the reserved slots of the partner's share of each pool times the hours of the period. Latency is end-to-end: the gateway does not record queue time.</p>
@@ -129,6 +132,35 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 <table><tr><th>Month</th><th>Cost centre</th><th class="n">GPU-hours</th><th class="n">kWh</th><th class="n">Fluids</th><th class="n">Provider spend</th></tr>
 <tr><td>2026-10</td><td>GL-A</td><td class="n">120</td><td class="n">40.00</td><td class="n">10.08 EUR</td><td class="n"></td></tr>
 <tr><td>2026-10</td><td>UNMAPPED</td><td class="n">30.00</td><td class="n">12.00</td><td class="n">3.02 EUR</td><td class="n"></td></tr>
+</table>
+<h2 id="d-variance">Budget against actual</h2>
+<p class="note">Variance is actual minus budgeted (positive: over budget) and as a percentage of the budgeted amount; Budgeted is the declared budgets prorated to the month (a team budget over the organisation&#39;s), Estimated the weekly profile allowances of the partner&#39;s people. Amounts are in minor units rounded once, half to even; units are never added. A row is flagged beyond 15 % (variance_threshold_pct; FinOps Foundation, Budgeting: 20 % Crawl, 15 % Walk, 12 % Run).</p>
+<table><tr><th>Month</th><th>Cost centre</th><th>Unit</th><th class="n">Budgeted</th><th class="n">Estimated</th><th class="n">Actual</th><th class="n">Against budget</th><th class="n">Against estimate</th><th>Flag</th></tr>
+<tr><td>2026-10</td><td>GL-A</td><td>EUR</td><td class="n">20.00</td><td class="n">no estimate</td><td class="n">18.50</td><td class="n">-1.50 (-7.5 %)</td><td class="n">n/a</td><td></td></tr>
+<tr><td>2026-10</td><td>GL-A</td><td>gpu_hours</td><td class="n">80.000</td><td class="n">62.000</td><td class="n">120.000</td><td class="n">40.000 (&#43;50.0 %)</td><td class="n">58.000 (&#43;93.5 %)</td><td>beyond 15 %</td></tr>
+<tr><td>2026-10</td><td>UNMAPPED</td><td>gpu_hours</td><td class="n">no budget</td><td class="n">no estimate</td><td class="n">30.000</td><td class="n">n/a</td><td class="n">n/a</td><td></td></tr>
+</table>
+<h2 id="d-quotas">Quotas and profiles</h2>
+<p class="note">Cells over fewer than 5 people are not shown. </p>
+<h3>Soft-quota notifications</h3>
+<table><tr><th>Partner</th><th>Lab</th><th>Window</th><th class="n">Threshold</th><th class="n">Events</th><th class="n">People</th></tr>
+<tr><td>etabA</td><td>lab1</td><td>week</td><td class="n">80 %</td><td class="n">9</td><td class="n">7</td></tr>
+<tr><td>etabB</td><td>-</td><td>session</td><td class="n">100 %</td><td class="n">suppressed</td><td class="n">suppressed</td></tr>
+</table>
+<h3>Hard refusals (429)</h3>
+<table><tr><th>Partner</th><th>Lab</th><th>Profile</th><th>Kind</th><th class="n">Refusals</th></tr>
+<tr><td>etabA</td><td>lab1</td><td>std</td><td>budget</td><td class="n">12</td></tr>
+<tr><td>etabB</td><td>-</td><td>-</td><td>profile_week</td><td class="n">suppressed</td></tr>
+</table>
+<h3>Workload days: assigned and used</h3>
+<table><tr><th>Partner</th><th>Lab</th><th>Profile</th><th class="n">People</th><th class="n">Assigned days</th><th class="n">Used days</th><th class="n">Used / assigned</th></tr>
+<tr><td>etabA</td><td>lab1</td><td>std</td><td class="n">7</td><td class="n">31.00</td><td class="n">22.00</td><td class="n">71.0 %</td></tr>
+<tr><td>etabB</td><td>-</td><td>std</td><td class="n">suppressed</td><td class="n">suppressed</td><td class="n">suppressed</td><td class="n">suppressed</td></tr>
+</table>
+<h3>Oversubscription over time</h3>
+<table><tr><th>Partner</th><th class="n">Days sampled</th><th class="n">Days above 1.0</th><th class="n">Peak ratio</th><th class="n">Average ratio</th></tr>
+<tr><td>etabA</td><td class="n">2</td><td class="n">1</td><td class="n">1.25</td><td class="n">1.00</td></tr>
+<tr><td>etabB</td><td class="n">1</td><td class="n">0</td><td class="n">suppressed</td><td class="n">suppressed</td></tr>
 </table>
 <h2 id="d-charts">Charts</h2>
 <div><svg xmlns="http://www.w3.org/2000/svg" width="620" height="240" viewBox="0 0 620 240" role="img"><title>GPU-hours by partner (GPU-hours)</title><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" x="0" y="0" width="240" height="240" viewBox="0 0 240 240">
