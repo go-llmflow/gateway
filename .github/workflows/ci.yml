@@ -36,7 +36,7 @@ jobs:
       CGO_ENABLED: '1'
       LLMFLOW_TEST_PG_DSN: postgres://postgres@127.0.0.1:5432/llmflow?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: stable
@@ -113,7 +113,7 @@ jobs:
           - { target: FuzzQuotaSubtraction, pkg: ./gateway }
           - { target: FuzzAdoptionSubtraction, pkg: ./gateway }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: stable
@@ -131,7 +131,7 @@ jobs:
           - { goos: linux, goarch: amd64 }
           - { goos: linux, goarch: arm64 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: stable
@@ -148,7 +148,7 @@ jobs:
   govulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: stable
