@@ -1337,8 +1337,33 @@ lab (team group) and profile, for the period:
   ratio. The PDF shows peak, average and days above 1.0 per partner; the XLSX
   and json carry every sampled day.
 - **Small cells**, as for adoption: a figure over fewer than
-  `adoption_min_users` people (or fewer refusals than that) is `suppressed`.
-  No row carries a person. `org_admin` sees their own partner only.
+  `adoption_min_users` **people** is `suppressed`. For refusals too: the store
+  keeps, per day and cell, the set of people refused as truncated SHA-256
+  hashes (`llmflow_refusal_users`, at most 1 000 per cell and day; a service
+  key is a refusal and no one), so one person refused five times is a cell of
+  one. No row carries a person. `org_admin` sees their own partner only.
+- **Secondary suppression.** The partner row and its lab rows are published
+  together, so a partner figure minus the shown labs could give a suppressed
+  lab back. Per partner and (window, threshold) / (profile, kind) / profile:
+  when exactly one lab is suppressed, the smallest shown lab is suppressed
+  too; when the partner's people outside the shown labs are 1 to k-1, the
+  partner row is suppressed. Fuzzed (`FuzzQuotaSubtraction`): no published
+  parent minus the published children is a value from fewer than k people.
+  Sources opened: the NCES/FCSM and Statistics Netherlands pages that a search
+  returned could only be read as search summaries (the CBS PDF and the NCES
+  page body did not extract); Hundepool et al., *Statistical Disclosure
+  Control* (2012) and the Eurostat handbook were not opened (the URLs tried
+  answered 404), so the rule above is the textbook mechanism as summarised
+  there, not a quoted algorithm.
+- **Adoption's "(other models)" row** carries its people and requests only if
+  the DISTINCT people over the merged models (a union measured by the store,
+  `UsersOfModels`) are k or more; otherwise no count. Two single-person
+  models of the same person no longer show that person's requests. Open:
+  daily and weekly totals minus the shown models still bound the merged
+  requests.
+- Refusal counts are written outside the request path's lock (the pending
+  map is swapped out, written, and merged back on failure) and are keyed by
+  their day, so a failed write never moves yesterday's refusals to today.
 
 #### Budget against actual (FinOps variance)
 

@@ -245,7 +245,7 @@ func (s *Server) buildDecision(r *http.Request, p *principal, from, to time.Time
 				orgs = append(orgs, o)
 			}
 		}
-		if d.Adoption, err = as.Adoption(r.Context(), from, to, orgs); err != nil {
+		if d.Adoption, err = s.adoptionOf(r.Context(), as, from, to, orgs); err != nil {
 			return nil, err
 		}
 		for o, x := range byOrg {

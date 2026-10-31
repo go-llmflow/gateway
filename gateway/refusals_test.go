@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,21 +62,40 @@ func TestRefusalsKeepTheirDayOnFailure(t *testing.T) {
 // slowRefusals is a store whose refusal write waits: the request path must not.
 type slowRefusals struct {
 	*store.Memory
+	once    sync.Once
 	entered chan struct{}
 	release chan struct{}
 }
 
 func (s *slowRefusals) AddRefusals(ctx context.Context, day time.Time, rows []store.RefusalRow) error {
-	close(s.entered)
+	s.once.Do(func() { close(s.entered) })
 	<-s.release
 	return s.Memory.AddRefusals(ctx, day, rows)
 }
 
 // A flush in a slow database does not hold up a refused request.
 func TestRefusalsDoNotBlockBehindTheDatabase(t *testing.T) {
-	e := refusalFixtureServer(t)
-	slow := &slowRefusals{Memory: e.st, entered: make(chan struct{}), release: make(chan struct{})}
-	e.srv.st = slow
+	// The server is built on the slow store from the start (swapping the store
+	// of a running server would race with its background loops).
+	cfg := testConfig(newFakeVLLM(t).URL())
+	mem := store.NewMemory()
+	slow := &slowRefusals{Memory: mem, entered: make(chan struct{}), release: make(chan struct{})}
+	srv, err := New(cfg, slow, Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg), CacheSaltKey: testSaltKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e := &env{t: t, srv: srv, st: mem, cfg: cfg}
+	t.Cleanup(func() {
+		select {
+		case <-slow.release:
+		default:
+			close(slow.release)
+		}
+		srv.Close(context.Background())
+	})
 	e.srv.noteRefusal(reqScope{org: "etabA", team: "t1", user: "bob"}, &admitError{status: 429, denyTag: "budget"})
 	done := make(chan struct{})
 	go func() { e.srv.flushRefusals(context.Background()); close(done) }()
@@ -92,7 +112,7 @@ func TestRefusalsDoNotBlockBehindTheDatabase(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("a refused request waits for the database")
 	}
-	close(slow.release)
+	close(slow.release) // released for good: later writes do not wait
 	<-done
 	e.srv.flushRefusals(context.Background())
 	today := e.srv.now().UTC().Truncate(24 * time.Hour)
@@ -104,5 +124,4 @@ func TestRefusalsDoNotBlockBehindTheDatabase(t *testing.T) {
 	if err != nil || n != 101 {
 		t.Fatalf("%d refusals written, want 101: %+v %v", n, rows, err)
 	}
-	e.srv.st = slow.Memory
 }

@@ -189,11 +189,30 @@ func TestAdoptionSmallCells(t *testing.T) {
 	if a.Min != 5 || a.Active == nil || *a.Active != 5 || len(a.Daily) != 2 || a.Daily[0].Users == nil || *a.Daily[0].Users != 5 || !a.Daily[1].Suppressed || a.Daily[1].Users != nil {
 		t.Fatalf("daily: %s", body)
 	}
-	// m1 (5 people) shown; m2 and m3 (1 each) merged, requests only.
-	if len(a.Models) != 2 || a.Models[0].Model != "m1" || a.Models[1].Model != OtherModels || !a.Models[1].Suppressed || a.Models[1].Users != nil || *a.Models[1].Requests != 2 {
+	// m1 (5 people) shown; m2 and m3 (1 each) are the SAME person (u1): their
+	// merged row is a cell of one person, so it carries no count at all.
+	if len(a.Models) != 2 || a.Models[0].Model != "m1" || a.Models[1].Model != OtherModels || !a.Models[1].Suppressed || a.Models[1].Users != nil || a.Models[1].Requests != nil {
 		t.Fatalf("models: %s", body)
 	}
 	if strings.Contains(body, `"m2"`) || strings.Contains(body, `"m3"`) {
 		t.Fatalf("a suppressed model is named: %s", body)
+	}
+	// The opposite case: five more single-person models of five DIFFERENT
+	// people join m2 and m3 in the merged row, whose union is 6 people: shown.
+	var more []store.Record
+	for i, u := range []string{"w1", "w2", "w3", "w4", "w5"} {
+		more = append(more, store.Record{Time: at.AddDate(0, 0, 2), Org: "etabA", Team: "etabA", User: u, KeyID: "k", Model: "solo" + strconv.Itoa(i), Pool: "b300", Status: 200})
+	}
+	if err := e.st.InsertRecords(context.Background(), more); err != nil {
+		t.Fatal(err)
+	}
+	body = readAll(t, e.do("GET", "/admin/adoption?from=2026-10-01&to=2026-11-01", master, ""))
+	a.Models = nil
+	if err := json.Unmarshal([]byte(body), &a); err != nil {
+		t.Fatal(err)
+	}
+	last := a.Models[len(a.Models)-1]
+	if last.Model != OtherModels || last.Suppressed || last.Users == nil || *last.Users != 6 || last.Requests == nil || *last.Requests != 7 {
+		t.Fatalf("merged row of 6 distinct people (u1, w1..w5), 7 requests: %s", body)
 	}
 }

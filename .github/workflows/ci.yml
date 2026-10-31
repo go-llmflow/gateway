@@ -110,6 +110,7 @@ jobs:
           - { target: FuzzRender, pkg: ./cmd/llmflow-status }
           - { target: FuzzBuildQuotas, pkg: ./gateway }
           - { target: FuzzBuildVariance, pkg: ./gateway }
+          - { target: FuzzQuotaSubtraction, pkg: ./gateway }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
