@@ -186,12 +186,16 @@ func TestAdoptionSmallCells(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &a); err != nil {
 		t.Fatal(err)
 	}
-	if a.Min != 5 || a.Active == nil || *a.Active != 5 || len(a.Daily) != 2 || a.Daily[0].Users == nil || *a.Daily[0].Users != 5 || !a.Daily[1].Suppressed || a.Daily[1].Users != nil {
+	// Day 1 (one person) is hidden. Showing day 0 (5 requests) next to the week
+	// (7 requests) would give day 1 by subtraction (7 - 5 = u1's 2 requests),
+	// so day 0 is hidden too (secondary suppression).
+	if a.Min != 5 || a.Active == nil || *a.Active != 5 || len(a.Daily) != 2 || !a.Daily[0].Suppressed || a.Daily[0].Users != nil || !a.Daily[1].Suppressed || a.Daily[1].Users != nil {
 		t.Fatalf("daily: %s", body)
 	}
-	// m1 (5 people) shown; m2 and m3 (1 each) are the SAME person (u1): their
-	// merged row is a cell of one person, so it carries no count at all.
-	if len(a.Models) != 2 || a.Models[0].Model != "m1" || a.Models[1].Model != OtherModels || !a.Models[1].Suppressed || a.Models[1].Users != nil || a.Models[1].Requests != nil {
+	// m2 and m3 (1 each) are the SAME person (u1): one person, so m1 (5 people)
+	// is hidden with them, or the period's 7 requests minus m1's 5 would be u1's.
+	// The merged row then stands for 5 distinct people.
+	if len(a.Models) != 1 || a.Models[0].Model != OtherModels || a.Models[0].Suppressed || a.Models[0].Users == nil || *a.Models[0].Users != 5 || *a.Models[0].Requests != 7 {
 		t.Fatalf("models: %s", body)
 	}
 	if strings.Contains(body, `"m2"`) || strings.Contains(body, `"m3"`) {

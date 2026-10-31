@@ -155,9 +155,14 @@ func TestExportBounds(t *testing.T) {
 			t.Errorf("accepted %v", bad)
 		}
 	}
+	// A report that only ends when its context does: the deadline must stop
+	// it. (With the fast memory store, a 1 ns timer could still be pending
+	// when the store checked the context, under load.)
+	exportStore = func(context.Context, *config.Config) (store.Store, error) { return untilDone{nopClose{mem}}, nil }
 	if _, err := run(t, append(byUser, "--timeout", "1ns")...); err == nil {
 		t.Error("a 1 ns deadline did not stop the report")
 	}
+	exportStore = func(context.Context, *config.Config) (store.Store, error) { return nopClose{mem}, nil }
 	es, _ := mem.AuditRange(context.Background(), 1, 100)
 	raised := 0
 	for _, e := range es {
@@ -182,3 +187,11 @@ func TestExportBounds(t *testing.T) {
 type nopClose struct{ store.Store }
 
 func (nopClose) Close() {}
+
+// untilDone is a store whose Report runs until its context ends.
+type untilDone struct{ nopClose }
+
+func (untilDone) Report(ctx context.Context, from, to time.Time, dims []string) ([]store.ReportRow, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
