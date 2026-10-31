@@ -108,6 +108,9 @@ jobs:
           - { target: FuzzParse, pkg: ./internal/warnat }
           - { target: FuzzSoftQuotas, pkg: ./config }
           - { target: FuzzRender, pkg: ./cmd/llmflow-status }
+          - { target: FuzzBedrockStream, pkg: ./gateway }
+          - { target: FuzzBedrockIngress, pkg: ./gateway }
+          - { target: FuzzBedrockModelID, pkg: ./config }
           - { target: FuzzBuildQuotas, pkg: ./gateway }
           - { target: FuzzBuildVariance, pkg: ./gateway }
           - { target: FuzzQuotaSubtraction, pkg: ./gateway }

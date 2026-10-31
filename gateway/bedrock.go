@@ -140,9 +140,9 @@ func newBedrockRuntime(model string, cfg *config.Bedrock, keys map[string]string
 			return nil, fmt.Errorf("gateway: model %q: no usable AWS credentials for organisation %q", model, o)
 		}
 		b.orgs[o] = c
-		id := c.AccessKeyID
-		if id == "" {
-			id = c.bearer
+		id := "akid:" + c.AccessKeyID
+		if c.bearer != "" {
+			id = "bearer:" + c.bearer
 		}
 		if prev, dup := owner[id]; dup && isolated {
 			return nil, fmt.Errorf("gateway: model %q: organisations %q and %q resolve to the same AWS credentials, so their prompt caches may be one: give each its own AWS account, or set cache_isolation = \"none\"", model, prev, o)
@@ -150,6 +150,44 @@ func newBedrockRuntime(model string, cfg *config.Bedrock, keys map[string]string
 		owner[id] = o
 	}
 	return b, nil
+}
+
+// CheckBedrockSecrets is check-config's look at the loaded credentials of
+// every Bedrock model: each organisation's set is usable, a bearer key is a
+// single printable token, and a trial signature succeeds. Errors name the
+// model and the organisation, never a value.
+func CheckBedrockSecrets(cfg *config.Config, keys map[string]string) error {
+	for _, g := range cfg.ModelGroups {
+		if g.External == nil || g.External.Bedrock == nil {
+			continue
+		}
+		bc := g.External.Bedrock
+		sets := map[string]config.AWSCredRefs{"(default)": bc.Default}
+		for o, r := range bc.Orgs {
+			sets[o] = r
+		}
+		for who, refs := range sets {
+			if refs.Empty() {
+				continue
+			}
+			c := loadCred(refs, keys)
+			if !c.usable() {
+				return fmt.Errorf("model %q, %s: the AWS credentials are empty", g.Name, who)
+			}
+			if c.bearer != "" {
+				if len(c.bearer) > 4096 || strings.ContainsFunc(c.bearer, func(r rune) bool { return r <= ' ' || r >= 0x7f }) {
+					return fmt.Errorf("model %q, %s: the Bedrock API key must be one printable token", g.Name, who)
+				}
+				continue
+			}
+			req, _ := http.NewRequest("POST", bc.Endpoint+"/model/x/invoke", nil)
+			s := sigv4.Signer{Credentials: c.Credentials, Region: bc.Region, Service: "bedrock"}
+			if err := s.Sign(req, nil, time.Unix(0, 0)); err != nil {
+				return fmt.Errorf("model %q, %s: the AWS access key id or secret is malformed (%v)", g.Name, who, err)
+			}
+		}
+	}
+	return nil
 }
 
 func (b *bedrockRuntime) cred(org string) awsCred {
@@ -276,9 +314,17 @@ func (b *bedrockRuntime) prepare(req *http.Request, body []byte, org string, now
 }
 
 // redact removes the organisation's secrets from a provider message.
-func (b *bedrockRuntime) redact(org, s string) string {
-	for _, sec := range b.cred(org).secrets() {
-		s = strings.ReplaceAll(s, sec, "[redacted]")
+func (b *bedrockRuntime) redact(_, s string) string {
+	// Every organisation's secrets, not only the caller's: a provider message
+	// must not carry one institution's credentials to another.
+	all := []awsCred{b.def}
+	for _, c := range b.orgs {
+		all = append(all, c)
+	}
+	for _, c := range all {
+		for _, sec := range c.secrets() {
+			s = strings.ReplaceAll(s, sec, "[redacted]")
+		}
 	}
 	return s
 }

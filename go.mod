@@ -7,6 +7,7 @@ require (
 	github.com/go-authn/rp v0.2.0
 	github.com/go-authn/scim v0.1.1
 	github.com/go-gitsafe/gitsafe v0.21.0
+	github.com/go-llmflow/aws v0.1.0
 	github.com/go-llmflow/pii v0.2.1
 	github.com/go-ooxml/ooxml v0.7.0
 	github.com/go-opentype/fonts v0.14.0
@@ -47,7 +48,6 @@ require (
 	github.com/go-images/jpeg v0.3.0 // indirect
 	github.com/go-images/jpeg2000 v0.13.8 // indirect
 	github.com/go-images/png v0.2.0 // indirect
-	github.com/go-llmflow/aws v0.1.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ndarray/ndarray v0.18.0 // indirect
