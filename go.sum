@@ -48,8 +48,8 @@ github.com/go-images/jpeg2000 v0.13.8 h1:B/k5sz9o/lgrvY3iGRDjzMWmQkX5zW2pvhDw6Nk
 github.com/go-images/jpeg2000 v0.13.8/go.mod h1:4/Pp3Jp2es5lA8/Ema8F7dFwl0vZprCj9MyznIz9Gdc=
 github.com/go-images/png v0.2.0 h1:RFPkHPuRYRvrDJol/Mmn9P1DSaLV8VPmEQ8BkZoCpL0=
 github.com/go-images/png v0.2.0/go.mod h1:g1qayDmWLClHo9R5KQ+RrcUNTBcaA4c1thaIfEoS3vg=
-github.com/go-llmflow/aws v0.1.0 h1:7zF+P0mPVtbQPireAw1DdCKSXlChoPincDISeYCF9LE=
-github.com/go-llmflow/aws v0.1.0/go.mod h1:19BBSFxS4qYRYVqHntaJ4/HBvFhTAiGpqv3NhKq6GdA=
+github.com/go-llmflow/aws v0.1.1 h1:MPvVFDsT82/2NJDcH6/G3Ms9dp+vaEeHZsHjMoprD2I=
+github.com/go-llmflow/aws v0.1.1/go.mod h1:19BBSFxS4qYRYVqHntaJ4/HBvFhTAiGpqv3NhKq6GdA=
 github.com/go-llmflow/pii v0.2.1 h1:fC2ZZqq6SYaeaHsnua0a5R0pq4OSKmClTcnkq0Ucgco=
 github.com/go-llmflow/pii v0.2.1/go.mod h1:NCkBTjSQCk6K1UH4rwq71xyBGzGMcGXNyn+rECBjY7U=
 github.com/go-logr/logr v1.2.2/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=
