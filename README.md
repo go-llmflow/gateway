@@ -1349,12 +1349,16 @@ lab (team group) and profile, for the period:
   too; when the partner's people outside the shown labs are 1 to k-1, the
   partner row is suppressed. Fuzzed (`FuzzQuotaSubtraction`): no published
   parent minus the published children is a value from fewer than k people.
-  Sources opened: the NCES/FCSM and Statistics Netherlands pages that a search
-  returned could only be read as search summaries (the CBS PDF and the NCES
-  page body did not extract); Hundepool et al., *Statistical Disclosure
-  Control* (2012) and the Eurostat handbook were not opened (the URLs tried
-  answered 404), so the rule above is the textbook mechanism as summarised
-  there, not a quoted algorithm.
+  Source opened: the *ESSnet Handbook on Statistical Disclosure Control*
+  (Hundepool et al., [PDF](https://research.cbs.nl/casc/SDC_Handbook.pdf)), §5.3
+  "Methods", p. 175: protecting the unsafe cells "is called primary
+  suppression, and to ensure these cannot be derived by subtractions from
+  published marginal totals, additional cells are selected for secondary
+  suppression"; the protection holds only if "the same cells in any linked
+  tables are also suppressed" (the adoption limit below is that case). The
+  handbook's optimal and network algorithms (§4.4) minimise the information
+  lost; the rule above is a simpler conservative one that suppresses at least
+  as much in this partner/lab hierarchy.
 - **Adoption's "(other models)" row** carries its people and requests only if
   the DISTINCT people over the merged models (a union measured by the store,
   `UsersOfModels`) are k or more; otherwise no count. Two single-person

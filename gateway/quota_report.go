@@ -148,14 +148,12 @@ func newCell() *sdcCell { return &sdcCell{people: map[string]bool{}} }
 // one table: a partner cell (lab "") and its lab cells are published together,
 // so the partner figure minus the shown labs would give the hidden labs' figure.
 //
-// Hundepool et al., Statistical Disclosure Control (Wiley 2012) §4 and the
-// FCSM/NCES and Statistics Netherlands (de Waal, Coutinho) material found by
-// search describe the same mechanism: a primary-suppressed cell that is the
-// only one missing from a total is recovered by subtraction, so a secondary
-// cell must be suppressed with it. (Only the search summary of the NCES and
-// CBS pages could be read; the book and the Eurostat handbook were not
-// opened.) The rules applied, per partner and (window, threshold) / (profile,
-// kind) / profile:
+// ESSnet Handbook on Statistical Disclosure Control (Hundepool et al.,
+// research.cbs.nl/casc/SDC_Handbook.pdf) §5.3, p. 175: primary suppression
+// hides the unsafe cells, and "to ensure these cannot be derived by
+// subtractions from published marginal totals, additional cells are selected
+// for secondary suppression". The rules applied, per partner and (window,
+// threshold) / (profile, kind) / profile:
 //
 //  1. a cell of fewer than k people is hidden (primary);
 //  2. if exactly one lab is hidden and the partner is shown, the smallest shown
