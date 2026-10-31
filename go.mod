@@ -7,6 +7,7 @@ require (
 	github.com/go-authn/rp v0.2.0
 	github.com/go-authn/scim v0.1.1
 	github.com/go-gitsafe/gitsafe v0.21.0
+	github.com/go-llmflow/aws v0.1.0
 	github.com/go-llmflow/pii v0.2.1
 	github.com/go-ooxml/ooxml v0.7.0
 	github.com/go-opentype/fonts v0.14.0

@@ -2127,6 +2127,133 @@ References opened on 2026-10-26:
 - platform.claude.com/docs: api/messages, api/versioning, api/beta-headers, api/errors, api/rate-limits, api/models/list, build-with-claude/streaming, build-with-claude/prompt-caching, about-claude/pricing, cli-sdks-libraries/libraries/openai-sdk, manage-claude/api-and-data-retention;
 - code.claude.com/docs: llm-gateway, llm-gateway-protocol.
 
+### Amazon Bedrock as an upstream (opt-in, #89)
+
+Claude models on Amazon Bedrock, in the same position as the Anthropic
+provider above and under the same hard-budget guarantee: a budget is never
+exceeded. The path is **InvokeModel / InvokeModelWithResponseStream with the
+Anthropic Messages body**, the closest to the Anthropic provider. **Converse**
+(the other vendors' models) is a later change; today only Claude model IDs are
+accepted.
+
+```hcl
+model "claude-sonnet-bedrock" {
+  provider = "bedrock"
+  region   = "eu-west-3"            # the endpoint is derived: https://bedrock-runtime.eu-west-3.amazonaws.com
+  # The exact model ID or inference profile ID: the price below is the price of THIS ID.
+  model_id       = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+  pool           = "bedrock"
+  allow_external = true             # required: prompts leave the site
+  orgs           = ["etabA", "etabB"]
+  anthropic_betas   = ["context-management-2025-06-27"]   # same allow-list as the Anthropic provider
+  context_window    = 200000        # bounds the input of a budgeted request
+  max_output_tokens = 64000
+  cost { unit = "USD", price_date = "2026-10-31", input_per_mtok = 3, output_per_mtok = 15,
+         cached_per_mtok = 0.3, cache_write_5m_per_mtok = 3.75, cache_write_1h_per_mtok = 6 }
+  # Secret references (a file or a Vault reference), never the environment or the command line.
+  org_credentials "etabA" {
+    access_key_id_file     = "vault:secret/llmflow/bedrock-etabA#access_key_id"
+    secret_access_key_file = "vault:secret/llmflow/bedrock-etabA#secret_access_key"
+    session_token_file     = "vault:secret/llmflow/bedrock-etabA#session_token"   # optional
+  }
+  org_credentials "etabB" { bearer_token_file = "/etc/llmflow/bedrock-etabB.apikey" }   # a Bedrock API key
+  # credentials { … }   # default for organisations without their own (see isolation below)
+}
+```
+
+A full example is `examples/bedrock.hcl`, parsed by the tests and by
+`check-config`, which also loads every credential, proves a key pair signs, and
+prints no value.
+
+**What was opened (2026-10-31).** The InvokeModel and
+InvokeModelWithResponseStream references (`POST /model/{modelId}/invoke` and
+`/invoke-with-response-stream`; the modelId forms; the `X-Amzn-Bedrock-*`
+headers), the Anthropic Messages parameters page (`anthropic_version` must be
+`bedrock-2023-05-31`, `anthropic_beta` is a list **in the body**, `max_tokens`
+is required, the response usage), `PayloadPart` (the stream's `chunk` carries
+`bytes`, base64, at most 1 000 000 characters), the prompt caching page, the API
+keys page and the data retention page, under
+`docs.aws.amazon.com/bedrock/latest/`.
+
+**Signing and credentials.**
+- SigV4 (signing name `bedrock`) comes from `github.com/go-llmflow/aws/sigv4` v0.1.0, checked against the aws-c-auth test suite; the signature covers the exact bytes sent, at the gateway's clock function, so tests are deterministic. A Bedrock **API key** is sent as `Authorization: Bearer …`. AWS recommends short-term keys (up to 12 hours) for production and long-term keys "only for exploration": prefer SigV4 with a session token that you rotate, or a short-term key refreshed through the secret reference.
+- The endpoint is derived from `region` and is always https. `endpoint_override` (a test's fake Bedrock) accepts https, or http to a loopback address only. A client cannot choose a host.
+- Credentials are secret references. They are never in a log, an error, a metric, a record or the audit chain: a provider message that echoes one is redacted (every organisation's), a 401 or 403 says only that the credentials were refused, and `sigv4.Credentials` print redacted. A test plants secrets and scans every output.
+
+**Hard budgets.** W is computed as for the Anthropic provider: the context window from `context_window`, `max_tokens` always set, the **highest** input price including cache writes, because Bedrock's implicit prompt caching "automatically attempts to reuse eligible prompt prefixes" and cross-region inference "may lead to increased cache writes". The seven ways a budget could overflow (#89):
+
+| # | Option | What the gateway does |
+|---|---|---|
+| 1 | `guardrailConfig`, `amazon-bedrock-guardrailConfig`, `X-Amzn-Bedrock-Guardrail*` | refused with 400 (guardrails are billed separately and not priced) |
+| 2 | `serviceTier`, `performanceConfig`, `X-Amzn-Bedrock-Service-Tier`, `-PerformanceConfig-Latency` | refused (the price depends on the tier; only the default tier is used) |
+| 3 | geographic or global inference profiles | allowed; the price is set per configured `model_id`, not per base model |
+| 4 | a prompt router ARN as `model_id` | refused by `check-config` (Bedrock picks the model, so the price) |
+| 5 | `additionalModelRequestFields`, and betas in the body or the header | `additionalModelRequestFields` refused; `anthropic_beta` in the body joins the header betas and goes through the same allow-list and the same `betaUnbounded` rules (a context beta wider than `context_window`, a compaction beta) |
+| 6 | Provisioned Throughput ARNs | refused by `check-config`: billed per hour, not per token, so there is no per-request cost to bound (out of scope) |
+| 7 | `promptVariables`, Prompt management ARNs | refused (the prompt is server-side, its size unknown) |
+
+Also refused as `model_id`: custom, imported, Marketplace and SageMaker resources
+(price and vendor unknown) and any non-Anthropic model. `X-Amzn-Bedrock-Trace`
+and `-Request-Metadata` are refused too: headers are built from scratch, nothing
+the client sent is forwarded.
+
+**Usage and settlement.** `input_tokens`, `output_tokens`,
+`cache_read_input_tokens` and `cache_creation_input_tokens` are read from the
+answer (non-stream) or from `message_start` and `message_delta` inside the decoded
+chunk events (stream), and priced as for Anthropic. **A stream that did not
+deliver its final usage is charged W**, the safe side: a cut at any byte, an
+exception event (`throttlingException`, `modelStreamErrorException`, …), a CRC
+failure, a missing `message_stop`, a `message_delta` without usage. So is a 200
+answer without usage or with a body cut. W applies when a budget holds one;
+without a budget the usual estimate is recorded.
+
+**Streaming.** The binary event stream is **untrusted input**:
+`eventstream.Limits` bound the message (1 MiB), the header block (4 KiB) and the
+header count (16); both CRCs are checked; a chunk's base64 is bounded. It is
+re-emitted as Anthropic SSE to `/v1/messages` clients (the error cases as an
+`event: error`, with a fixed text, never the provider's). `/v1/chat/completions`,
+like for the Anthropic provider, is not served for this model: a Bedrock model is
+reachable at `/v1/messages` only, and `/v1/messages/count_tokens` is not offered
+(it would send the prompt to a second operation the gateway does not meter).
+
+**Cross-institution isolation.** The prompt caching page does not say that caches
+are isolated per AWS account. Until a source says so, `check-config` requires an
+`org_credentials` of its own AWS account for every organisation that may use the
+model, when more than one may and `cache_isolation` is not `"none"`; two
+organisations naming the same credential reference are refused, and so are two
+whose files hold the same key at start-up.
+
+**Confidentiality.** `allow_external = true` stays mandatory, as do the pre-call
+`pii` and `hide_secrets` guardrails. Use an EU region and an EU inference profile
+(`eu.anthropic…`) to keep inference in the EU regions the profile lists; a
+geographic profile may route to another region of its geography, and with
+cross-region inference "retained inputs and outputs are stored in destination
+Regions". **Retention is not "none" by default.** The issue behind this feature
+quoted "Amazon Bedrock doesn't store any text, images, or documents that you
+provide as content"; that sentence is not on the data protection, data retention
+or prompt caching pages opened on 2026-10-31. What the data retention page says
+is that retention is a per-region, per-account mode (`none`, `default`,
+`aws_review`), that under `default` "data may be retained for abuse detection
+purposes", that models requiring `aws_review` keep prompts and completions "within
+the AWS boundary for up to 30 days", and that the content is "not shared with the
+model provider". Set `none` where the model allows it, and decide with your DPO.
+
+**Performance.** `BenchmarkBedrockPrepare` (body, URL and SigV4 signature of a
+4 KiB prompt), `BenchmarkBedrockSign` and `BenchmarkBedrockStream` (200 chunks to
+SSE) measure the overhead per request. They were written but **not run for this
+release**: the machine's 1-minute load was 51, and a measurement above a load of 4
+is not one. Run `go test ./gateway -run xxx -bench Bedrock -benchmem` on an idle
+machine.
+
+**Tests.** A fake Bedrock verifies every SigV4 signature with `go-llmflow/aws`
+(and refuses a body, path, date or key changed after signing); golden tests for
+the stream and the non-stream answer; a budget test where the fake maximises usage
+within `max_tokens` and the context window and the budget is never exceeded; one
+refusal test per item of the table; the chaos cases above, each charged W;
+`FuzzBedrockStream` (random frames: never a panic, always well-formed SSE, never
+charged less than a complete stream's usage nor less than W for an incomplete
+one), `FuzzBedrockIngress` and `FuzzBedrockModelID`.
+
 ### vLLM instances as Slurm jobs: elastic pools (#75)
 
 A model can take its upstreams from **Slurm**, instead of (or on top of) static `upstream` blocks. This is the `slurm` block *inside a `model` block*. The top-level `slurm` block is a different thing: the accounting input of the reconciliation reports. The vLLM instances run as long jobs of a service account, for example account `svc_llm` with QOS `service`. They can be stopped at night so that the GPUs can be lent to a borrowing QOS. The gateway **follows** the running jobs; it never starts or stops one. Slurm (scrontab) or the operator does that.

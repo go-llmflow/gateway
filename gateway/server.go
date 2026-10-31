@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -244,6 +245,17 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 			ext, err := newExtRuntime(g, secrets.UpstreamKeys, cfg.CacheIsolation != "none")
 			if err != nil {
 				return nil, err
+			}
+			if g.External.Bedrock != nil {
+				var reach []string
+				for _, o := range cfg.Orgs {
+					if slices.Contains(g.External.Orgs, o.Name) || slices.ContainsFunc(o.Teams, func(t string) bool { return slices.Contains(g.External.Teams, t) }) {
+						reach = append(reach, o.Name)
+					}
+				}
+				if ext.bedrock, err = newBedrockRuntime(g.Name, g.External.Bedrock, secrets.UpstreamKeys, reach, cfg.CacheIsolation != "none"); err != nil {
+					return nil, err
+				}
 			}
 			gr.ext = ext
 		}

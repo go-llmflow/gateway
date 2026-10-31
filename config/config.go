@@ -877,6 +877,16 @@ func (c *Config) KeyFiles() []string {
 			for _, o := range g.External.OrgKeyOrder {
 				add(g.External.OrgKeys[o])
 			}
+			if b := g.External.Bedrock; b != nil {
+				for _, r := range b.Default.Refs() {
+					add(r)
+				}
+				for _, o := range b.OrgOrder {
+					for _, r := range b.Orgs[o].Refs() {
+						add(r)
+					}
+				}
+			}
 		}
 		if g.Slurm != nil {
 			// The discovered instances' vLLM key, and slurmrestd's JWT.

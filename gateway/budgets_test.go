@@ -155,7 +155,10 @@ func TestModelAndScopeBudgets(t *testing.T) {
 func TestTemporaryIncrease(t *testing.T) {
 	up := newFakeVLLM(t)
 	var mu sync.Mutex
-	now := time.Now()
+	// A fixed mid-month instant: with time.Now(), the two hours added below
+	// crossed into the next month on the last evening of a month, and the
+	// monthly budget reset.
+	now := time.Date(time.Now().Year(), time.Now().Month(), 15, 10, 0, 0, 0, time.UTC)
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 	e := newEnv(t, testConfig(up.URL()), WithClock(clock))
 	key := e.createKey(`{"team":"etabA"}`)

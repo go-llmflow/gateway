@@ -177,6 +177,11 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 		}
 		s.UpstreamKeys[f] = k
 	}
+	// Amazon Bedrock credentials: a trial signature proves a key pair is well
+	// formed (the error names a model and an organisation, no value).
+	if err := gateway.CheckBedrockSecrets(c, s.UpstreamKeys); err != nil {
+		return s, err
+	}
 	return s, nil
 }
 
