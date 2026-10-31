@@ -1252,9 +1252,11 @@ profile lookup and a handful of in-memory reads per request (`usageHeaders`).
   Counts only: no name, key or content leaves it. A service key's request counts
   as a request and as no one. **Small cells are suppressed**: a day, a week or a
   model used by 1 to k−1 distinct people is returned without counts
-  (`suppressed`), models suppressed together are merged into `(other models)`
-  with their requests, and the overall figure is hidden below k. k is
-  `adoption_min_users` (top level, default 5, at least 2).
+  (`suppressed`), hidden models are merged into `(other models)`, cells that
+  subtraction would give away are hidden with them (secondary suppression, see
+  [Quotas and profiles in the report](#quotas-and-profiles-in-the-report)), and the overall figure
+  is hidden below k. k is `adoption_min_users` (top level, default 5, at
+  least 2).
 
 ### The monthly decision report (#97)
 
@@ -1359,12 +1361,20 @@ lab (team group) and profile, for the period:
   handbook's optimal and network algorithms (§4.4) minimise the information
   lost; the rule above is a simpler conservative one that suppresses at least
   as much in this partner/lab hierarchy.
-- **Adoption's "(other models)" row** carries its people and requests only if
-  the DISTINCT people over the merged models (a union measured by the store,
-  `UsersOfModels`) are k or more; otherwise no count. Two single-person
-  models of the same person no longer show that person's requests. Open:
-  daily and weekly totals minus the shown models still bound the merged
-  requests.
+- **Adoption: secondary suppression on its linked tables.** Requests add up:
+  the days, the weeks and the models each partition the period's requests,
+  and a week is the sum of its days, so a hidden day, week or model would be
+  the total (or its week) minus the shown ones. For each of these sums, while
+  its hidden cells stand for 1 to k−1 distinct people (a union counted by the
+  store, `UsersOf`, never a sum of cells), the smallest shown cell of that sum
+  is hidden too, until nothing changes. Hidden models, even a single one, are
+  merged into `(other models)`, which carries counts only when the distinct
+  people over them are k or more. A store that cannot count a union is
+  answered by the largest hidden cell, a lower bound, so it hides at least as
+  much. `FuzzAdoptionSubtraction` checks, against people counted from the
+  records, that no published sum minus its shown parts comes from 1 to k−1
+  people; `TestAdoptionResidualCheckSeesTheLeak` shows the check fails on the
+  view without this rule.
 - Refusal counts are written outside the request path's lock (the pending
   map is swapped out, written, and merged back on failure) and are keyed by
   their day, so a failed write never moves yesterday's refusals to today.

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"time"
 
@@ -33,21 +34,32 @@ type Adoption struct {
 	Models        []AdoptionModel
 	// Users is the distinct people over the whole period.
 	Users int64
-	// OtherUsers is the distinct people over the models the report merges
-	// into "(other models)" (the union, not a sum: two models of one person
-	// each are one person); OtherKnown says it was measured. Set by the caller
-	// through UsersOfModels, not by Adoption.
-	OtherUsers int64
-	OtherKnown bool
+	// Hide is the cells the caller's secondary suppression adds, by dimension
+	// (DimDay, DimWeek, DimModel); MergedUsers is the distinct people over the
+	// models it hides. Set by the caller, not by Adoption.
+	Hide        map[string]map[string]bool
+	MergedUsers int64
 }
 
-// AdoptionUnionStore counts the distinct people over a set of models.
+// The dimensions of an adoption report, for UsersOf.
+const (
+	DimDay   = "day"   // keys are YYYY-MM-DD (UTC)
+	DimWeek  = "week"  // keys are the Monday, YYYY-MM-DD (UTC)
+	DimModel = "model" // keys are model names
+)
+
+// AdoptionUnionStore counts the distinct people over a set of cells of one
+// dimension: the union, never a sum (one person on two days is one person).
 type AdoptionUnionStore interface {
-	UsersOfModels(ctx context.Context, from, to time.Time, orgs []string, models []string) (int64, error)
+	UsersOf(ctx context.Context, from, to time.Time, orgs []string, dim string, keys []string) (int64, error)
 }
 
-func (m *Memory) UsersOfModels(ctx context.Context, from, to time.Time, orgs []string, models []string) (int64, error) {
+func (m *Memory) UsersOf(ctx context.Context, from, to time.Time, orgs []string, dim string, keys []string) (int64, error) {
 	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	key, err := memAdoptionKey(dim)
+	if err != nil {
 		return 0, err
 	}
 	m.mu.RLock()
@@ -57,7 +69,7 @@ func (m *Memory) UsersOfModels(ctx context.Context, from, to time.Time, orgs []s
 	}
 	users := map[string]bool{}
 	for _, r := range m.records {
-		if r.Time.Before(from) || !r.Time.Before(to) || orgs != nil && !contains(orgs, r.Org) || r.User == "" || !contains(models, r.Model) {
+		if r.Time.Before(from) || !r.Time.Before(to) || orgs != nil && !contains(orgs, r.Org) || r.User == "" || !contains(keys, key(r)) {
 			continue
 		}
 		users[r.User] = true
@@ -65,10 +77,40 @@ func (m *Memory) UsersOfModels(ctx context.Context, from, to time.Time, orgs []s
 	return int64(len(users)), nil
 }
 
-func (p *Postgres) UsersOfModels(ctx context.Context, from, to time.Time, orgs []string, models []string) (int64, error) {
+func memAdoptionKey(dim string) (func(Record) string, error) {
+	switch dim {
+	case DimDay:
+		return func(r Record) string { return r.Time.UTC().Format("2006-01-02") }, nil
+	case DimWeek:
+		return func(r Record) string { return weekStart(r.Time) }, nil
+	case DimModel:
+		return func(r Record) string { return r.Model }, nil
+	}
+	return nil, fmt.Errorf("store: unknown adoption dimension %q", dim)
+}
+
+// pgAdoptionKey is the SQL expression of a dimension: chosen from a fixed
+// list, never built from the caller's text.
+func pgAdoptionKey(dim string) (string, error) {
+	switch dim {
+	case DimDay:
+		return `to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD')`, nil
+	case DimWeek:
+		return `to_char(date_trunc('week', ts AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`, nil
+	case DimModel:
+		return `model`, nil
+	}
+	return "", fmt.Errorf("store: unknown adoption dimension %q", dim)
+}
+
+func (p *Postgres) UsersOf(ctx context.Context, from, to time.Time, orgs []string, dim string, keys []string) (int64, error) {
+	expr, err := pgAdoptionKey(dim)
+	if err != nil {
+		return 0, err
+	}
 	var n int64
-	err := p.pool.QueryRow(ctx, `SELECT count(DISTINCT user_name) FILTER (WHERE user_name <> '') FROM llmflow_usage
-		WHERE ts >= $1 AND ts < $2 AND ($3::text[] IS NULL OR org = ANY($3)) AND model = ANY($4)`, from, to, orgs, models).Scan(&n)
+	err = p.pool.QueryRow(ctx, `SELECT count(DISTINCT user_name) FILTER (WHERE user_name <> '') FROM llmflow_usage
+		WHERE ts >= $1 AND ts < $2 AND ($3::text[] IS NULL OR org = ANY($3)) AND `+expr+` = ANY($4)`, from, to, orgs, keys).Scan(&n)
 	return n, err
 }
 
