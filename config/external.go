@@ -42,6 +42,8 @@ type External struct {
 	Betas []string
 	// RequireGuardrails is external_requires_guardrails for this model.
 	RequireGuardrails bool
+	// Bedrock is set for provider = "bedrock" (bedrock.go).
+	Bedrock *Bedrock
 }
 
 // AllowsBeta reports whether an anthropic-beta value is forwarded. An
@@ -136,9 +138,10 @@ func (v *validator) external(raw *fileHCL, c *Config) {
 		}
 		if m.Provider == nil {
 			for _, set := range []bool{m.AllowExternal != nil, len(m.Orgs) > 0, len(m.Teams) > 0, len(m.AnthropicVersions) > 0,
-				len(m.AnthropicBetas) > 0, len(m.OrgKeys) > 0} {
+				len(m.AnthropicBetas) > 0, len(m.OrgKeys) > 0, m.Region != nil, m.ModelID != nil, m.EndpointOverride != nil,
+				len(m.Credentials) > 0, len(m.OrgCredentials) > 0} {
 				if set {
-					v.errf(m.DefRange, "Unexpected external settings", "%s: allow_external, orgs, teams, anthropic_* and org_key belong to a model with a provider", where)
+					v.errf(m.DefRange, "Unexpected external settings", "%s: allow_external, orgs, teams, anthropic_*, org_key, region, model_id and credentials belong to a model with a provider", where)
 					break
 				}
 			}
@@ -147,9 +150,16 @@ func (v *validator) external(raw *fileHCL, c *Config) {
 		external[m.Name] = true
 		e := &External{Provider: *m.Provider, Orgs: m.Orgs, Teams: m.Teams, OrgKeys: map[string]string{}, RequireGuardrails: requireGuards}
 		g.External = e
-		if e.Provider != ProviderAnthropic {
-			v.errf(m.ProviderRange, "Unknown provider", "%s: provider = %q: want \"anthropic\"", where, e.Provider)
+		if e.Provider != ProviderAnthropic && e.Provider != ProviderBedrock {
+			v.errf(m.ProviderRange, "Unknown provider", "%s: provider = %q: want \"anthropic\" or \"bedrock\"", where, e.Provider)
 			continue
+		}
+		bedrock := e.Provider == ProviderBedrock
+		if !bedrock && (m.Region != nil || m.ModelID != nil || m.EndpointOverride != nil || len(m.Credentials) > 0 || len(m.OrgCredentials) > 0) {
+			v.errf(m.DefRange, "Unexpected setting", "%s: region, model_id, endpoint_override, credentials and org_credentials belong to provider = \"bedrock\"", where)
+		}
+		if bedrock {
+			v.bedrockSetup(m, g, e, where)
 		}
 		if m.AllowExternal == nil || !*m.AllowExternal {
 			v.errf(m.DefRange, "External model not allowed",
@@ -189,7 +199,7 @@ func (v *validator) external(raw *fileHCL, c *Config) {
 		if len(e.Versions) == 0 {
 			e.Versions = DefaultAnthropicVersions
 		}
-		for _, ver := range e.Versions {
+		for _, ver := range m.AnthropicVersions {
 			if !versionRe.MatchString(ver) {
 				v.errf(m.VersionsRange, "Invalid anthropic_versions", "%s: %q: want YYYY-MM-DD", where, ver)
 			}
@@ -215,6 +225,11 @@ func (v *validator) external(raw *fileHCL, c *Config) {
 				reach[o] = true
 			}
 		}
+		isolated := c.CacheIsolation != "none"
+		if bedrock {
+			v.bedrockKeys(m, e, reach, isolated, where)
+			m.OrgKeys = nil
+		}
 		seenFile := map[string]string{}
 		for _, ok := range m.OrgKeys {
 			switch {
@@ -238,9 +253,8 @@ func (v *validator) external(raw *fileHCL, c *Config) {
 		if len(g.Upstreams) > 0 {
 			defaultKey = g.Upstreams[0].KeyFile
 		}
-		isolated := c.CacheIsolation != "none"
 		for o := range reach {
-			if e.OrgKeys[o] != "" {
+			if e.OrgKeys[o] != "" || bedrock {
 				continue
 			}
 			if isolated && len(reach) > 1 {

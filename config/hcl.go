@@ -657,6 +657,15 @@ type modelHCL struct {
 	AnthropicBetas    []string    `hcl:"anthropic_betas,optional"`
 	BetasRange        hcl.Range   `hcl:"anthropic_betas,attr_value_range"`
 	OrgKeys           []orgKeyHCL `hcl:"org_key,block"`
+	// Amazon Bedrock (bedrock.go).
+	Region                *string       `hcl:"region,optional"`
+	RegionRange           hcl.Range     `hcl:"region,attr_value_range"`
+	ModelID               *string       `hcl:"model_id,optional"`
+	ModelIDRange          hcl.Range     `hcl:"model_id,attr_value_range"`
+	EndpointOverride      *string       `hcl:"endpoint_override,optional"`
+	EndpointOverrideRange hcl.Range     `hcl:"endpoint_override,attr_value_range"`
+	Credentials           []awsCredsHCL `hcl:"credentials,block"`
+	OrgCredentials        []orgCredsHCL `hcl:"org_credentials,block"`
 	// The bound of a request's usage (hard budgets, budgets.go).
 	MaxModelLen          *int64    `hcl:"max_model_len,optional"`
 	MaxModelLenRange     hcl.Range `hcl:"max_model_len,attr_value_range"`
@@ -1031,7 +1040,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			g.Slurm = v.slurmJobs(m.Slurm, m.Name, strOr(m.KeyFile, ""))
 			slurmPools[g.Pool] = true
 		}
-		if len(m.Upstreams) == 0 && m.Slurm == nil {
+		if len(m.Upstreams) == 0 && m.Slurm == nil && strOr(m.Provider, "") != ProviderBedrock { // Bedrock's endpoint is derived from region
 			v.errf(m.DefRange, "No upstream", "model %q needs at least one upstream block (or a slurm block)", m.Name)
 		}
 		names := map[string]bool{}

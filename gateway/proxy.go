@@ -172,6 +172,9 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			if g == nil || g.cfg.Class == config.Guard || !s.budget.modelAllowed(key.Team, m) || !externalVisible(g, key) {
 				return "", errUnknownModel
 			}
+			if g.ext != nil && g.ext.bedrock != nil && ep != openai.Messages {
+				return "", errBedrockEndpoint
+			}
 			if g.ext != nil && ep != openai.Messages && ep != openai.CountTokens {
 				return "", errExternalEndpoint
 			}
@@ -208,6 +211,16 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		// For an external provider: the organisation (its key) and the
 		// client's Anthropic headers, filtered when the request is built.
 		eg := clientEgress(r, key.Org)
+		eg.stream = req.Stream
+		if g.ext != nil && g.ext.bedrock != nil {
+			// Amazon Bedrock options that change a request's cost are refused;
+			// a beta in the body joins the header betas, so the allow-list and
+			// betaUnbounded see it (bedrock.go).
+			if out, eg.betas, err = bedrockIngress(r.Header, out, eg.betas); err != nil {
+				apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+				return
+			}
+		}
 		// Hard budgets (#87): the request's worst-case cost is held on
 		// every budget of its scope before anything else is spent on it.
 		// The record id, known from admission on: the request is tracked
@@ -352,6 +365,10 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			upstreamLabel string
 			respBody      []byte // kept only for a content log
 			respCut       bool
+			// billW: a Bedrock answer whose final usage was not read (a stream
+			// cut, an exception event, a CRC failure) is charged the worst case.
+			billW bool
+			bconv *bedrockSSE
 		)
 		defer func() {
 			if !haveUsage && worked {
@@ -371,6 +388,11 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 					// more than W (#87).
 					costNano = adm.hold.w
 					cost = float64(costNano) / nanoPerUnit
+				}
+				if billW && adm != nil && adm.hold != nil {
+					costNano = adm.hold.w
+					cost = float64(costNano) / nanoPerUnit
+					estimated = true
 				}
 				consumed = cost
 				if consumed == 0 {
@@ -558,7 +580,22 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		// vLLM computed only for a successful answer; an error status
 		// (validation, overload) is not charged.
 		worked = resp.StatusCode < 300
-		if req.Stream && strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		if g.ext != nil && g.ext.bedrock != nil {
+			if v := resp.Header.Get("X-Amzn-Requestid"); v != "" {
+				h.Set("Request-Id", v)
+			}
+		}
+		var events io.Reader = resp.Body
+		isEvents := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
+		if g.ext != nil && g.ext.bedrock != nil && req.Stream && resp.StatusCode < 300 && strings.HasPrefix(resp.Header.Get("Content-Type"), bedrockEventStream) {
+			// The provider's binary event stream, read as untrusted input and
+			// re-emitted as Anthropic SSE (bedrock.go).
+			bconv = newBedrockSSE(resp.Body)
+			events, isEvents = bconv, true
+			h.Set("Content-Type", "text/event-stream")
+			h.Set("Cache-Control", "no-cache")
+		}
+		if req.Stream && isEvents {
 			h.Set("X-Accel-Buffering", "no")
 			w.WriteHeader(resp.StatusCode)
 			rc := http.NewResponseController(w)
@@ -580,12 +617,16 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 					dst = sf
 				}
 			}
-			st, err = openai.CopySSEFor(ep, dst, func() { _ = rc.Flush() }, resp.Body, !req.ClientWantsUsage)
+			st, err = openai.CopySSEFor(ep, dst, func() { _ = rc.Flush() }, events, !req.ClientWantsUsage)
 			if sf != nil && err == nil {
 				err = sf.Close()
 				_ = rc.Flush()
 			}
 			tUpEnd = time.Now()
+			if bconv != nil && adm != nil && adm.hold != nil {
+				// A stream that did not deliver its final usage is charged W.
+				_, billW = settleBedrockStream(bconv.Complete(), st, g.prices, adm.hold.w)
+			}
 			if cw != nil {
 				respBody, respCut = cw.buf.Bytes(), cw.truncated
 			}
@@ -607,12 +648,23 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				return
 			}
 			status = http.StatusBadGateway
-			worked = false
+			if g.ext != nil && g.ext.bedrock != nil && resp.StatusCode < 300 {
+				billW = true // the provider ran the request: charge the worst case
+			} else {
+				worked = false
+			}
 			apiError(w, status, "upstream_error", "upstream response unreadable or too large")
 			return
 		}
+		if resp.StatusCode >= 300 && g.ext != nil && g.ext.bedrock != nil {
+			data = g.ext.bedrock.errorBody(key.Org, resp.StatusCode, data)
+			h.Set("Content-Type", "application/json")
+		}
 		if resp.StatusCode < 300 {
 			usage, haveUsage = openai.ParseUsageFor(ep, data)
+			if !haveUsage && g.ext != nil && g.ext.bedrock != nil {
+				billW = true // the final usage was not delivered
+			}
 			if rq != nil && ep.Guarded() && rq.hasStage("post") {
 				// The work is done and charged whatever the guards say.
 				guarded, gerr := s.post(r.Context(), rq, data)
@@ -673,7 +725,22 @@ func (s *Server) sendTyped(ctx context.Context, g *group, path string, body []by
 		if attempt > 0 {
 			s.met.retries.add(1, g.cfg.Name)
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.joinURL(path), bytes.NewReader(body))
+		target, sendBody := u.joinURL(path), body
+		var br *bedrockRuntime
+		if g.ext != nil {
+			br = g.ext.bedrock
+		}
+		if br != nil {
+			// The operation, in the path; the Anthropic body without model and
+			// stream, with the version and the allowed betas (bedrock.go).
+			target = br.target(u.base, eg.stream)
+			wb, werr := br.wireBody(body, g.ext.cfg, eg.betas)
+			if werr != nil {
+				return nil, nil, time.Now(), werr
+			}
+			sendBody = wb
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(sendBody))
 		if err != nil {
 			return nil, nil, time.Now(), err
 		}
@@ -685,7 +752,14 @@ func (s *Server) sendTyped(ctx context.Context, g *group, path string, body []by
 			// The provider gets its own headers only: the organisation's
 			// key, filtered Anthropic headers, no priority, request id or
 			// trace context (anthropic.go).
-			g.ext.headers(req.Header, eg, ctype, accept)
+			if br != nil {
+				req.Header.Set("Accept", "application/json")
+				if eg.stream {
+					req.Header.Set("Accept", bedrockEventStream)
+				}
+			} else {
+				g.ext.headers(req.Header, eg, ctype, accept)
+			}
 		} else {
 			req.Header.Set("Content-Type", ctype)
 			if accept == "text/event-stream" || accept == "application/json" {
@@ -698,7 +772,14 @@ func (s *Server) sendTyped(ctx context.Context, g *group, path string, body []by
 			// the gateway's tracer, never copied from the client.
 			s.trace.inject(ctx, req.Header)
 		}
-		req.ContentLength = int64(len(body))
+		req.ContentLength = int64(len(sendBody))
+		if br != nil {
+			// Signed over the exact bytes sent, at the server's clock. An error
+			// names no secret (sigv4 redacts its credentials).
+			if perr := br.prepare(req, sendBody, eg.org, s.now()); perr != nil {
+				return nil, nil, time.Now(), perr
+			}
+		}
 		u.inflight.Add(1)
 		t := time.Now()
 		if tFirst.IsZero() {

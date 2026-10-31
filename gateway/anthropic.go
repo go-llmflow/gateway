@@ -69,7 +69,8 @@ type extRuntime struct {
 	cfg        *config.External
 	keys       map[string]string // org → API key
 	defaultKey string
-	isolated   bool // cache_isolation is not "none"
+	isolated   bool            // cache_isolation is not "none"
+	bedrock    *bedrockRuntime // provider = "bedrock" (bedrock.go)
 
 	mu     sync.Mutex
 	until  map[string]time.Time // org → provider back-off end
@@ -152,6 +153,8 @@ type egress struct {
 	external bool
 	// count marks /v1/messages/count_tokens.
 	count bool
+	// stream: the client asked for a stream (Bedrock has an operation for it).
+	stream bool
 }
 
 type egressKey struct{}
