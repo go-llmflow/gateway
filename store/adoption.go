@@ -33,6 +33,43 @@ type Adoption struct {
 	Models        []AdoptionModel
 	// Users is the distinct people over the whole period.
 	Users int64
+	// OtherUsers is the distinct people over the models the report merges
+	// into "(other models)" (the union, not a sum: two models of one person
+	// each are one person); OtherKnown says it was measured. Set by the caller
+	// through UsersOfModels, not by Adoption.
+	OtherUsers int64
+	OtherKnown bool
+}
+
+// AdoptionUnionStore counts the distinct people over a set of models.
+type AdoptionUnionStore interface {
+	UsersOfModels(ctx context.Context, from, to time.Time, orgs []string, models []string) (int64, error)
+}
+
+func (m *Memory) UsersOfModels(ctx context.Context, from, to time.Time, orgs []string, models []string) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.Fail != nil {
+		return 0, m.Fail
+	}
+	users := map[string]bool{}
+	for _, r := range m.records {
+		if r.Time.Before(from) || !r.Time.Before(to) || orgs != nil && !contains(orgs, r.Org) || r.User == "" || !contains(models, r.Model) {
+			continue
+		}
+		users[r.User] = true
+	}
+	return int64(len(users)), nil
+}
+
+func (p *Postgres) UsersOfModels(ctx context.Context, from, to time.Time, orgs []string, models []string) (int64, error) {
+	var n int64
+	err := p.pool.QueryRow(ctx, `SELECT count(DISTINCT user_name) FILTER (WHERE user_name <> '') FROM llmflow_usage
+		WHERE ts >= $1 AND ts < $2 AND ($3::text[] IS NULL OR org = ANY($3)) AND model = ANY($4)`, from, to, orgs, models).Scan(&n)
+	return n, err
 }
 
 // AdoptionStore counts adoption. orgs restricts it to organisations (nil:

@@ -99,6 +99,8 @@ type Server struct {
 	capMu sync.Mutex
 	// capNotes remembers the C last written to the pool's history (#97).
 	capNotes capacityNotes
+	// refusals counts the hard refusals for the quota report (#97).
+	refusals refusalCounter
 	// decision is what the decision report's schedule remembers (#97).
 	decision decisionState
 	client   *http.Client
@@ -483,6 +485,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	s.startFluids(bctx)
 	s.startCapacityHistory(bctx)
+	s.startRefusals(bctx)
 	s.bg.Add(1)
 	go func() { defer s.bg.Done(); s.warnLoop(bctx) }()
 	s.startDecision(bctx)
@@ -524,6 +527,7 @@ func (s *Server) Close(ctx context.Context) {
 	}
 	s.alertCancel()
 	s.bg.Wait()
+	s.flushRefusals(ctx)
 	// After the client listener drained: the pools' owners hand over.
 	s.closeHA(ctx)
 	s.rec.close(ctx)

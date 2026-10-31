@@ -34,6 +34,7 @@ type Memory struct {
 	prof       memProfiles
 	en         memEnergy
 	warn       memWarn
+	quota      memQuota
 	MaxRecords int
 	// Fail, when set, is returned by every call (fault injection). Set it
 	// with SetFail.

@@ -84,9 +84,14 @@ type decisionData struct {
 	EnergyRecon []EnergyReconRow
 	ReconNote   string
 	HasRecon    bool
-	Daily       []chartPoint
-	Pie         []chartSlice
-	Bars        []chartBar
+	// Quotas: soft-quota events, hard refusals, workload days and
+	// oversubscription (#97); Variance: budget against actual per cost centre.
+	Quotas        *QuotaReport
+	Variance      []VarianceRow
+	VarianceLimit float64
+	Daily         []chartPoint
+	Pie           []chartSlice
+	Bars          []chartBar
 }
 
 // buildDecision gathers the figures from the reports p may read.
@@ -240,7 +245,7 @@ func (s *Server) buildDecision(r *http.Request, p *principal, from, to time.Time
 				orgs = append(orgs, o)
 			}
 		}
-		if d.Adoption, err = as.Adoption(r.Context(), from, to, orgs); err != nil {
+		if d.Adoption, err = s.adoptionOf(r.Context(), as, from, to, orgs); err != nil {
 			return nil, err
 		}
 		for o, x := range byOrg {
@@ -250,6 +255,13 @@ func (s *Server) buildDecision(r *http.Request, p *principal, from, to time.Time
 			}
 			x.ActiveUsers = a.Users
 		}
+	}
+	if d.Quotas, err = s.quotaSection(r.Context(), p, from, to); err != nil {
+		return nil, err
+	}
+	d.VarianceLimit = s.varianceThreshold()
+	if d.Variance, err = s.varianceReport(r.Context(), p, d.Chargeback, from, to); err != nil {
+		return nil, err
 	}
 	for _, x := range byOrg {
 		d.Partners = append(d.Partners, *x)
@@ -378,6 +390,9 @@ func writeDecisionXLSX(w io.Writer, d *decisionData) error {
 			}
 		}
 	}
+	if err := writeQuotaSheets(d, sheet); err != nil {
+		return err
+	}
 	data, err := wb.Write()
 	if err != nil {
 		return err
@@ -434,6 +449,10 @@ type decisionView struct {
 	ReconAssumption          string
 	Recon                    []reconView
 	Pie, Bars, Series        template.HTML
+	Quota                    quotaView
+	HasVariance              bool
+	Variance                 []varianceView
+	VarianceNote             string
 }
 
 type partnerView struct {
@@ -548,6 +567,8 @@ func (d *decisionData) view() decisionView {
 		v.Chargeback = append(v.Chargeback, chargebackView{c.From.UTC().Format("2006-01"), c.CostCenter, fmtNum(c.GPUHours), fmtNum(c.KWh), fl, prov})
 	}
 	v.HasRecon, v.ReconNote, v.Recon, v.ReconAssumption = d.HasRecon, d.ReconNote, d.reconViews(), reconAssumption
+	v.Quota = d.Quotas.view()
+	v.HasVariance, v.Variance, v.VarianceNote = true, d.varianceViews(), varianceNote(d.VarianceLimit)
 	pc := plotCharts{}
 	v.Pie = pc.Pie("GPU-hours by partner", "GPU-hours", d.Pie)
 	v.Bars = pc.Bars("GPU-hours by partner, against the previous period", "GPU-hours", d.Bars)
@@ -590,6 +611,9 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 {{end}}<li><a class="toc" href="#d-adoption">Adoption</a></li>
 {{if .HasRecon}}<li><a class="toc" href="#d-recon">Energy reconciliation</a></li>
 {{end}}<li><a class="toc" href="#d-chargeback">Chargeback</a></li>
+<li><a class="toc" href="#d-variance">Budget against actual</a></li>
+{{if .Quota.Has}}<li><a class="toc" href="#d-quotas">Quotas and profiles</a></li>
+{{end}}
 <li><a class="toc" href="#d-charts">Charts</a></li>
 </ol>
 <p class="note">Units are never added: GPU-hours, kWh and each currency have their own columns. GPU-hours are the gateway's cost unit; the guaranteed capacity is the reserved slots of the partner's share of each pool times the hours of the period. Latency is end-to-end: the gateway does not record queue time.</p>
@@ -655,6 +679,29 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 {{if .Chargeback}}<table><tr><th>Month</th><th>Cost centre</th><th class="n">GPU-hours</th><th class="n">kWh</th><th class="n">Fluids</th><th class="n">Provider spend</th></tr>
 {{range .Chargeback}}<tr><td>{{.Period}}</td><td>{{.CostCenter}}</td><td class="n">{{.GPUHours}}</td><td class="n">{{.KWh}}</td><td class="n">{{.Fluids}}</td><td class="n">{{.Provider}}</td></tr>
 {{end}}</table>{{else}}<p>No chargeback rows.</p>{{end}}
+<h2 id="d-variance">Budget against actual</h2>
+<p class="note">{{.VarianceNote}}</p>
+{{if .Variance}}<table><tr><th>Month</th><th>Cost centre</th><th>Unit</th><th class="n">Budgeted</th><th class="n">Estimated</th><th class="n">Actual</th><th class="n">Against budget</th><th class="n">Against estimate</th><th>Flag</th></tr>
+{{range .Variance}}<tr><td>{{.Month}}</td><td>{{.CostCenter}}</td><td>{{.Unit}}</td><td class="n">{{.Budgeted}}</td><td class="n">{{.Estimated}}</td><td class="n">{{.Actual}}</td><td class="n">{{.BudgetVar}}</td><td class="n">{{.EstimateVar}}</td><td>{{.Flag}}</td></tr>
+{{end}}</table>{{else}}<p>No budget, profile allowance or spend in this period.</p>{{end}}
+{{if .Quota.Has}}<h2 id="d-quotas">Quotas and profiles</h2>
+<p class="note">{{range .Quota.Notes}}{{.}} {{end}}</p>
+<h3>Soft-quota notifications</h3>
+{{if .Quota.Soft}}<table><tr><th>Partner</th><th>Lab</th><th>Window</th><th class="n">Threshold</th><th class="n">Events</th><th class="n">People</th></tr>
+{{range .Quota.Soft}}<tr><td>{{.A}}</td><td>{{.B}}</td><td>{{.C}}</td><td class="n">{{.D}}</td><td class="n">{{.E}}</td><td class="n">{{.F}}</td></tr>
+{{end}}</table>{{else}}<p>None.</p>{{end}}
+<h3>Hard refusals (429)</h3>
+{{if .Quota.Refusals}}<table><tr><th>Partner</th><th>Lab</th><th>Profile</th><th>Kind</th><th class="n">Refusals</th></tr>
+{{range .Quota.Refusals}}<tr><td>{{.A}}</td><td>{{.B}}</td><td>{{.C}}</td><td>{{.D}}</td><td class="n">{{.E}}</td></tr>
+{{end}}</table>{{else}}<p>None.</p>{{end}}
+<h3>Workload days: assigned and used</h3>
+{{if .Quota.Profiles}}<table><tr><th>Partner</th><th>Lab</th><th>Profile</th><th class="n">People</th><th class="n">Assigned days</th><th class="n">Used days</th><th class="n">Used / assigned</th></tr>
+{{range .Quota.Profiles}}<tr><td>{{.A}}</td><td>{{.B}}</td><td>{{.C}}</td><td class="n">{{.D}}</td><td class="n">{{.E}}</td><td class="n">{{.F}}</td><td class="n">{{.G}}</td></tr>
+{{end}}</table>{{else}}<p>None.</p>{{end}}
+<h3>Oversubscription over time</h3>
+{{if .Quota.Oversub}}<table><tr><th>Partner</th><th class="n">Days sampled</th><th class="n">Days above 1.0</th><th class="n">Peak ratio</th><th class="n">Average ratio</th></tr>
+{{range .Quota.Oversub}}<tr><td>{{.A}}</td><td class="n">{{.B}}</td><td class="n">{{.C}}</td><td class="n">{{.D}}</td><td class="n">{{.E}}</td></tr>
+{{end}}</table>{{else}}<p>None.</p>{{end}}{{end}}
 <h2 id="d-charts">Charts</h2>
 <div>{{.Pie}}</div>
 <div>{{.Bars}}</div>
@@ -691,7 +738,9 @@ const (
 	MaxDecisionPartners   = 100
 	MaxDecisionMatrix     = 2000
 	MaxDecisionChargeback = 3000
-	MaxDecisionAdoption   = 400 // weekly and model rows together
+	MaxDecisionAdoption   = 400  // weekly and model rows together
+	MaxDecisionQuotas     = 3000 // soft, refusal and profile rows together
+	MaxDecisionOversub    = 1500 // sampled days of all partners
 	// MaxDecisionBytes bounds a document: a PDF of the largest accepted report
 	// is a few MiB.
 	MaxDecisionBytes = 16 << 20
@@ -714,6 +763,16 @@ func (d *decisionData) checkBounds() error {
 		return fmt.Errorf("the chargeback has %d rows: at most %d; shorten the period", len(d.Chargeback), MaxDecisionChargeback)
 	case adopt > MaxDecisionAdoption:
 		return fmt.Errorf("the adoption tables have %d rows: at most %d", adopt, MaxDecisionAdoption)
+	case len(d.Variance) > MaxVarianceRows:
+		return fmt.Errorf("the variance table has %d rows: at most %d; shorten the period", len(d.Variance), MaxVarianceRows)
+	}
+	if q := d.Quotas; q != nil {
+		if n := len(q.Soft) + len(q.Refusals) + len(q.Profiles); n > MaxDecisionQuotas {
+			return fmt.Errorf("the quota tables have %d rows: at most %d; shorten the period", n, MaxDecisionQuotas)
+		}
+		if len(q.Oversub) > MaxDecisionOversub {
+			return fmt.Errorf("the oversubscription table has %d rows: at most %d", len(q.Oversub), MaxDecisionOversub)
+		}
 	}
 	return nil
 }
@@ -845,6 +904,7 @@ func (d *decisionData) json() map[string]any {
 		"from": d.From.UTC(), "to": d.To.UTC(), "generated": d.Generated, "partners": d.Partners, "matrix": d.Matrix,
 		"unattributed_gpu_hours": d.Unattributed, "chargeback": d.Chargeback, "currency": d.Currency,
 		"energy_reconciliation": d.EnergyRecon, "energy_reconciliation_note": d.ReconNote, "energy_reconciliation_assumption": reconAssumption,
+		"quotas": d.Quotas, "variance": d.Variance, "variance_threshold_pct": d.VarianceLimit,
 	}
 }
 

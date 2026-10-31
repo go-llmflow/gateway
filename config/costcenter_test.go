@@ -62,6 +62,21 @@ func FuzzCostCenter(f *testing.F) {
 	})
 }
 
+func TestVarianceThresholdPct(t *testing.T) {
+	c, err := parse(valid)
+	if err != nil || c.VarianceThresholdPct != 15 {
+		t.Fatalf("default: %v %v", c.VarianceThresholdPct, err)
+	}
+	if c, err = parse(valid + "\nvariance_threshold_pct = 12.5\n"); err != nil || c.VarianceThresholdPct != 12.5 {
+		t.Fatalf("12.5: %v %v", c.VarianceThresholdPct, err)
+	}
+	for _, bad := range []string{"0", "-3", "1000.5", "1e9"} {
+		if _, err := parse(valid + "\nvariance_threshold_pct = " + bad + "\n"); err == nil || !strings.Contains(err.Error(), "Invalid variance_threshold_pct") {
+			t.Errorf("%s: %v", bad, err)
+		}
+	}
+}
+
 func TestAdoptionMinUsersAndDecimals(t *testing.T) {
 	c, err := parse(valid)
 	if err != nil || c.AdoptionMinUsers != 5 {

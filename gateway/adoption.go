@@ -1,10 +1,12 @@
 package gateway
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-llmflow/gateway/store"
 )
@@ -78,10 +80,40 @@ func suppressAdoption(a *store.Adoption, k int) adoptionView {
 		}
 		v.Models = append(v.Models, adoptionModel{Model: m.Model, ActiveUsers: ptr(m.Users), Requests: ptr(m.Requests)})
 	}
-	if mergedN >= 2 { // one suppressed model alone would show that person's requests
-		v.Models = append(v.Models, adoptionModel{Model: OtherModels, Requests: ptr(merged), Suppressed: true})
+	// Two suppressed models can be the same person: the merged row carries its
+	// requests only if the DISTINCT people over the union (a.OtherUsers, a
+	// union, never a sum) are k or more; otherwise it carries no count at all.
+	if mergedN >= 2 {
+		row := adoptionModel{Model: OtherModels, Suppressed: true}
+		if a.OtherKnown && !hidden(a.OtherUsers, k) && a.OtherUsers > 0 {
+			row.Suppressed, row.ActiveUsers, row.Requests = false, ptr(a.OtherUsers), ptr(merged)
+		}
+		v.Models = append(v.Models, row)
 	}
 	return v
+}
+
+// adoptionOf reads the adoption of a period and measures the distinct people
+// over the models the small-cell rule will merge.
+func (s *Server) adoptionOf(ctx context.Context, as store.AdoptionStore, from, to time.Time, orgs []string) (*store.Adoption, error) {
+	a, err := as.Adoption(ctx, from, to, orgs)
+	if err != nil {
+		return nil, err
+	}
+	k := s.adoptionMin()
+	var hiddenModels []string
+	for _, m := range a.Models {
+		if hidden(m.Users, k) {
+			hiddenModels = append(hiddenModels, m.Model)
+		}
+	}
+	if us, ok := as.(store.AdoptionUnionStore); ok && len(hiddenModels) >= 2 {
+		if a.OtherUsers, err = us.UsersOfModels(ctx, from, to, orgs, hiddenModels); err != nil {
+			return nil, err
+		}
+		a.OtherKnown = true
+	}
+	return a, nil
 }
 
 func (s *Server) adoptionMin() int {
@@ -134,7 +166,7 @@ func (s *Server) adoptionReport(w http.ResponseWriter, r *http.Request, p *princ
 			}
 		}
 	}
-	a, err := as.Adoption(r.Context(), from, to, orgs)
+	a, err := s.adoptionOf(r.Context(), as, from, to, orgs)
 	if err != nil {
 		storeError(w, err)
 		return

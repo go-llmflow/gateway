@@ -93,6 +93,9 @@ type Config struct {
 	// day, a week or a model used by fewer distinct people is not shown
 	// (default 5, at least 2: one person is never a figure).
 	AdoptionMinUsers int
+	// VarianceThresholdPct is the budget-to-actual variance (percent of the
+	// budget) beyond which the decision report flags a cost centre; default 15.
+	VarianceThresholdPct float64
 	// DecisionReport schedules the monthly decision report into an export;
 	// nil: reports are only downloaded (#97).
 	DecisionReport *DecisionReport

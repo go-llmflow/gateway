@@ -77,14 +77,17 @@ type fileHCL struct {
 	Fluids               *fluidsHCL      `hcl:"fluids,block"`
 	AdoptionMinUsers     *int            `hcl:"adoption_min_users,optional"`
 	AdoptionMinRange     hcl.Range       `hcl:"adoption_min_users,attr_value_range"`
-	DecisionReport       *decisionHCL    `hcl:"decision_report,block"`
-	Workday              *workdayHCL     `hcl:"workday,block"`
-	Profiles             []profileHCL    `hcl:"profile,block"`
-	DefaultProfile       *string         `hcl:"default_profile,optional"`
-	DefaultProfileRange  hcl.Range       `hcl:"default_profile,attr_value_range"`
-	SessionWindow        *string         `hcl:"session_window,optional"`
-	SessionWindowRange   hcl.Range       `hcl:"session_window,attr_value_range"`
-	SoftQuotas           *softQuotasHCL  `hcl:"soft_quotas,block"`
+	// VarianceThresholdPct flags a budget-to-actual variance beyond it (#97).
+	VarianceThresholdPct *float64       `hcl:"variance_threshold_pct,optional"`
+	VarianceRange        hcl.Range      `hcl:"variance_threshold_pct,attr_value_range"`
+	DecisionReport       *decisionHCL   `hcl:"decision_report,block"`
+	Workday              *workdayHCL    `hcl:"workday,block"`
+	Profiles             []profileHCL   `hcl:"profile,block"`
+	DefaultProfile       *string        `hcl:"default_profile,optional"`
+	DefaultProfileRange  hcl.Range      `hcl:"default_profile,attr_value_range"`
+	SessionWindow        *string        `hcl:"session_window,optional"`
+	SessionWindowRange   hcl.Range      `hcl:"session_window,attr_value_range"`
+	SoftQuotas           *softQuotasHCL `hcl:"soft_quotas,block"`
 }
 
 type loggingHCL struct {

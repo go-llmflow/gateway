@@ -45,7 +45,27 @@ const (
 	MinAdoptionMinUsers     = 2
 )
 
+// Budget-to-actual variance threshold (FinOps: 20 % Crawl, 15 % Walk, 12 % Run).
+const (
+	DefaultVarianceThresholdPct = 15.0
+	MaxVarianceThresholdPct     = 1000.0
+)
+
+func (v *validator) variance(raw *fileHCL, c *Config) {
+	c.VarianceThresholdPct = DefaultVarianceThresholdPct
+	if raw.VarianceThresholdPct == nil {
+		return
+	}
+	p := *raw.VarianceThresholdPct
+	if !(p > 0) || p > MaxVarianceThresholdPct { // also rejects NaN
+		v.errf(raw.VarianceRange, "Invalid variance_threshold_pct", "variance_threshold_pct = %v: want a percentage above 0 and at most %v", p, MaxVarianceThresholdPct)
+		return
+	}
+	c.VarianceThresholdPct = p
+}
+
 func (v *validator) adoptionPrivacy(raw *fileHCL, c *Config) {
+	v.variance(raw, c)
 	c.AdoptionMinUsers = DefaultAdoptionMinUsers
 	if raw.AdoptionMinUsers == nil {
 		return
