@@ -40,8 +40,20 @@ func quotaFixture(visible func(string) bool) quotaInputs {
 		From: from, To: to, K: 5, Events: events,
 		Refusals: []store.RefusalRow{
 			{Org: "etabA", Team: "t1", Profile: "p1", Kind: store.RefusalProfileWeek, N: 7},
-			{Org: "etabA", Team: "t1", Profile: "p1", Kind: store.RefusalProfileSession, N: 3}, // under the threshold
-			{Org: "etabB", Team: "t2", Kind: store.RefusalBudget, N: 9},
+			{Org: "etabA", Team: "t1", Profile: "p1", Kind: store.RefusalProfileSession, N: 3},  // under the threshold
+			{Org: "etabB", Team: "t2", Kind: store.RefusalBudget, N: 9},                         // 9 refusals, 2 people
+			{Org: "etabA", Team: "t1", Profile: "p1", Kind: store.RefusalProfileOverflow, N: 5}, // planted: 5 refusals, one person
+		},
+		RefusalUsers: []store.RefusalUser{
+			{Org: "etabA", Team: "t1", Profile: "p1", Kind: store.RefusalProfileWeek, User: store.UserHash("u1")},
+			{Org: "etabA", Team: "t1", Profile: "p1", Kind: store.RefusalProfileWeek, User: store.UserHash("u2")},
+			{Org: "etabA", Team: "t1", Profile: "p1", Kind: store.RefusalProfileWeek, User: store.UserHash("u3")},
+			{Org: "etabA", Team: "t1", Profile: "p1", Kind: store.RefusalProfileWeek, User: store.UserHash("u4")},
+			{Org: "etabA", Team: "t1", Profile: "p1", Kind: store.RefusalProfileWeek, User: store.UserHash("u5")},
+			{Org: "etabA", Team: "t1", Profile: "p1", Kind: store.RefusalProfileSession, User: store.UserHash("u1")},
+			{Org: "etabA", Team: "t1", Profile: "p1", Kind: store.RefusalProfileOverflow, User: store.UserHash("u1")},
+			{Org: "etabB", Team: "t2", Kind: store.RefusalBudget, User: store.UserHash("v1")},
+			{Org: "etabB", Team: "t2", Kind: store.RefusalBudget, User: store.UserHash("v2")},
 		},
 		Assignments: assigns,
 		Used:        []store.ReportRow{{Org: "etabA", Lab: "genomics", Profile: "p1", Cost: 66}},
@@ -107,8 +119,13 @@ func TestQuotaReportGolden(t *testing.T) {
 	if r := got["etabA||profile_session"]; r == nil || !r.Suppressed || r.Refusals != nil {
 		t.Fatalf("a 3-refusal cell is shown: %+v", r)
 	}
-	if r := got["etabB||budget"]; r == nil || r.Suppressed || *r.Refusals != 9 {
-		t.Fatalf("%+v", r)
+	// 9 refusals by 2 people are a cell of 2: suppressed (the rule is on people).
+	if r := got["etabB||budget"]; r == nil || !r.Suppressed || r.Refusals != nil {
+		t.Fatalf("9 refusals by 2 people are shown: %+v", r)
+	}
+	// Planted: one person refused 5 times is a cell of 1, however large the count.
+	if r := got["etabA||profile_overflow"]; r == nil || !r.Suppressed || r.Refusals != nil {
+		t.Fatalf("one person refused 5 times is shown: %+v", r)
 	}
 
 	// Workload days. p1: 5 people for the 31 days (31 x 5/7 = 22.142857 each)
@@ -204,6 +221,10 @@ func FuzzBuildQuotas(f *testing.F) {
 			in.Events = append(in.Events, store.WarnEventRow{User: "x" + string(rune('a'+i%26)) + string(rune('a'+i/26)), Window: "week", Threshold: 75, N: n})
 		}
 		in.Refusals = []store.RefusalRow{{Org: "etabA", Team: "t1", Kind: store.RefusalBudget, N: n}}
+		in.RefusalUsers = nil
+		for i := 0; i < people; i++ {
+			in.RefusalUsers = append(in.RefusalUsers, store.RefusalUser{Org: "etabA", Team: "t1", Kind: store.RefusalBudget, User: store.UserHash("x" + string(rune('a'+i%26)) + string(rune('a'+i/26)))})
+		}
 		in.Home = func(u string) (string, string) { return "etabA", "genomics" }
 		q := buildQuotas(in)
 		for _, r := range q.Soft {
@@ -212,8 +233,8 @@ func FuzzBuildQuotas(f *testing.F) {
 			}
 		}
 		for _, r := range q.Refusals {
-			if !r.Suppressed && (r.Refusals == nil || *r.Refusals < int64(k)) || r.Suppressed && r.Refusals != nil {
-				t.Fatalf("refusal cell %+v at k=%d", r, k)
+			if !r.Suppressed && (r.Refusals == nil || people < k) || r.Suppressed && r.Refusals != nil {
+				t.Fatalf("refusal cell %+v at k=%d with %d people", r, k, people)
 			}
 		}
 		for _, r := range q.Profiles {

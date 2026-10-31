@@ -34,10 +34,11 @@ import (
 
 // Bounds on the queries behind a quota report (#111).
 const (
-	maxQuotaEvents      = 100_000
-	maxQuotaAssignments = 100_000
-	maxQuotaRefusals    = 20_000
-	maxQuotaSamples     = 70
+	maxQuotaEvents       = 100_000
+	maxQuotaAssignments  = 100_000
+	maxQuotaRefusals     = 20_000
+	maxQuotaRefusalUsers = 200_000
+	maxQuotaSamples      = 70
 )
 
 // SoftRow counts the soft-quota notifications of a cell.
@@ -95,6 +96,8 @@ type quotaInputs struct {
 	K        int
 	Events   []store.WarnEventRow
 	Refusals []store.RefusalRow
+	// RefusalUsers are the people (hashes) behind the refusal cells.
+	RefusalUsers []store.RefusalUser
 	// Assignments overlapping the period; Used is the GPU-hours report by org,
 	// lab and profile.
 	Assignments []store.Assignment
@@ -127,6 +130,88 @@ func windowKind(w string) string {
 
 type quotaCell struct{ org, lab, a, b string }
 
+// sdcCell is a published cell: the people behind it, and the figures. Primary
+// suppression hides a cell of fewer than k people; secondary suppression
+// (below) hides what the published cells would otherwise give away by
+// subtraction.
+type sdcCell struct {
+	people         map[string]bool
+	hidden         bool
+	events         int64 // events, or refusals
+	th             int
+	assigned, used float64
+}
+
+func newCell() *sdcCell { return &sdcCell{people: map[string]bool{}} }
+
+// suppressFamily applies primary then secondary suppression to the cells of
+// one table: a partner cell (lab "") and its lab cells are published together,
+// so the partner figure minus the shown labs would give the hidden labs' figure.
+//
+// Hundepool et al., Statistical Disclosure Control (Wiley 2012) §4 and the
+// FCSM/NCES and Statistics Netherlands (de Waal, Coutinho) material found by
+// search describe the same mechanism: a primary-suppressed cell that is the
+// only one missing from a total is recovered by subtraction, so a secondary
+// cell must be suppressed with it. (Only the search summary of the NCES and
+// CBS pages could be read; the book and the Eurostat handbook were not
+// opened.) The rules applied, per partner and (window, threshold) / (profile,
+// kind) / profile:
+//
+//  1. a cell of fewer than k people is hidden (primary);
+//  2. if exactly one lab is hidden and the partner is shown, the smallest shown
+//     lab is hidden too, so that the hidden figures are a sum over two labs;
+//  3. if the partner's people not in any shown lab are 1 to k-1, the partner
+//     is hidden: its figure minus the shown labs would be theirs.
+//
+// Rule 3 is checked on the people, not on a count: a person in the partner and
+// in no lab is a residual too.
+func suppressFamily(k int, cells map[quotaCell]*sdcCell) {
+	type group struct{ org, a, b string }
+	kids := map[group][]*sdcCell{}
+	parents := map[group]*sdcCell{}
+	for key, c := range cells {
+		c.hidden = len(c.people) < k
+		g := group{key.org, key.a, key.b}
+		if key.lab == "" {
+			parents[g] = c
+		} else {
+			kids[g] = append(kids[g], c)
+		}
+	}
+	for g, p := range parents {
+		ks := kids[g]
+		if p.hidden || len(ks) == 0 {
+			continue
+		}
+		nHidden := 0
+		var smallest *sdcCell
+		for _, c := range ks {
+			if c.hidden {
+				nHidden++
+			} else if smallest == nil || len(c.people) < len(smallest.people) {
+				smallest = c
+			}
+		}
+		if nHidden == 1 && smallest != nil {
+			smallest.hidden = true
+		}
+		residual := map[string]bool{}
+		for u := range p.people {
+			residual[u] = true
+		}
+		for _, c := range ks {
+			if !c.hidden {
+				for u := range c.people {
+					delete(residual, u)
+				}
+			}
+		}
+		if n := len(residual); n > 0 && n < k {
+			p.hidden = true
+		}
+	}
+}
+
 // buildQuotas computes the section.
 func buildQuotas(in quotaInputs) *QuotaReport {
 	q := &QuotaReport{MinCell: in.K}
@@ -139,20 +224,16 @@ func buildQuotas(in quotaInputs) *QuotaReport {
 	}
 
 	// Soft-quota notifications.
-	type softAgg struct {
-		events int64
-		users  map[string]bool
-		th     int
-	}
-	soft := map[quotaCell]*softAgg{}
+	soft := map[quotaCell]*sdcCell{}
 	add := func(key quotaCell, th int, user string, n int64) {
 		a := soft[key]
 		if a == nil {
-			a = &softAgg{users: map[string]bool{}, th: th}
+			a = newCell()
+			a.th = th
 			soft[key] = a
 		}
 		a.events += n
-		a.users[user] = true
+		a.people[user] = true
 	}
 	for _, e := range in.Events {
 		org, lab := in.Home(e.User)
@@ -166,12 +247,13 @@ func buildQuotas(in quotaInputs) *QuotaReport {
 			add(quotaCell{org, lab, wk, thKey}, e.Threshold, e.User, e.N)
 		}
 	}
+	suppressFamily(in.K, soft)
 	for key, a := range soft {
 		r := SoftRow{Org: label(key.org), Lab: key.lab, Window: key.a, Threshold: a.th}
-		if int64(len(a.users)) < k {
+		if a.hidden {
 			r.Suppressed = true
 		} else {
-			r.Events, r.People = i64(a.events), i64(int64(len(a.users)))
+			r.Events, r.People = i64(a.events), i64(int64(len(a.people)))
 		}
 		q.Soft = append(q.Soft, r)
 	}
@@ -190,23 +272,47 @@ func buildQuotas(in quotaInputs) *QuotaReport {
 	})
 
 	// Hard refusals.
-	ref := map[quotaCell]int64{}
+	// The small-cell rule is on people: a person refused five times is a cell
+	// of one (the store keeps the people of each cell as hashes).
+	ref := map[quotaCell]*sdcCell{}
+	refCell := func(key quotaCell) *sdcCell {
+		c := ref[key]
+		if c == nil {
+			c = newCell()
+			ref[key] = c
+		}
+		return c
+	}
 	for _, r := range in.Refusals {
 		if !in.Visible(r.Org) {
 			continue
 		}
 		lab := in.LabOfTeam(r.Team)
-		ref[quotaCell{r.Org, "", r.Profile, r.Kind}] += r.N
+		refCell(quotaCell{r.Org, "", r.Profile, r.Kind}).events += r.N
 		if lab != "" {
-			ref[quotaCell{r.Org, lab, r.Profile, r.Kind}] += r.N
+			refCell(quotaCell{r.Org, lab, r.Profile, r.Kind}).events += r.N
 		}
 	}
-	for key, n := range ref {
+	for _, u := range in.RefusalUsers {
+		if !in.Visible(u.Org) {
+			continue
+		}
+		if c := ref[quotaCell{u.Org, "", u.Profile, u.Kind}]; c != nil {
+			c.people[u.User] = true
+		}
+		if lab := in.LabOfTeam(u.Team); lab != "" {
+			if c := ref[quotaCell{u.Org, lab, u.Profile, u.Kind}]; c != nil {
+				c.people[u.User] = true
+			}
+		}
+	}
+	suppressFamily(in.K, ref)
+	for key, c := range ref {
 		r := RefusalOut{Org: label(key.org), Lab: key.lab, Profile: key.a, Kind: key.b}
-		if n < k {
+		if c.hidden {
 			r.Suppressed = true
 		} else {
-			r.Refusals = i64(n)
+			r.Refusals = i64(c.events)
 		}
 		q.Refusals = append(q.Refusals, r)
 	}
@@ -216,16 +322,11 @@ func buildQuotas(in quotaInputs) *QuotaReport {
 	})
 
 	// Workload days: assigned against used.
-	type dayAgg struct {
-		assigned float64
-		used     float64
-		people   map[string]bool
-	}
-	days := map[quotaCell]*dayAgg{}
-	cell := func(key quotaCell) *dayAgg {
+	days := map[quotaCell]*sdcCell{}
+	cell := func(key quotaCell) *sdcCell {
 		a := days[key]
 		if a == nil {
-			a = &dayAgg{people: map[string]bool{}}
+			a = newCell()
 			days[key] = a
 		}
 		return a
@@ -273,9 +374,10 @@ func buildQuotas(in quotaInputs) *QuotaReport {
 	} else {
 		q.Notes = append(q.Notes, "No GPU-hour workday is configured or calibrated: used workload days are not computed.")
 	}
+	suppressFamily(in.K, days)
 	for key, c := range days {
 		r := ProfileRow{Org: label(key.org), Lab: key.lab, Profile: key.a}
-		if int64(len(c.people)) < k {
+		if c.hidden {
 			r.Suppressed = true
 		} else {
 			r.People = i64(int64(len(c.people)))
@@ -364,6 +466,10 @@ func (s *Server) quotaSection(ctx context.Context, p *principal, from, to time.T
 	if err != nil {
 		return nil, err
 	}
+	refusalUsers, err := qs.RefusalUsersBetween(ctx, from, to, maxQuotaRefusalUsers)
+	if err != nil {
+		return nil, err
+	}
 	var assigns []store.Assignment
 	var used []store.ReportRow
 	var profiles config.Profiles
@@ -433,12 +539,13 @@ func (s *Server) quotaSection(ctx context.Context, p *principal, from, to time.T
 		return nil
 	}
 	q := buildQuotas(quotaInputs{
-		From: from, To: to, K: k, Events: events, Refusals: refusals, Assignments: assigns, Used: used,
+		From: from, To: to, K: k, Events: events, Refusals: refusals, RefusalUsers: refusalUsers, Assignments: assigns, Used: used,
 		Profiles: profiles, Workday: workday, Home: home, LabOfTeam: s.cfg.LabOf, Capacity: capacity,
 		Visible: func(org string) bool { return p.reportView() || org != "" && p.orgView(org) },
 	})
 	q.Notes = append(q.Notes,
-		"Cells with fewer than "+strconv.Itoa(k)+" people (refusals: "+strconv.Itoa(k)+" refusals) are suppressed; there is no row per person.",
+		"Cells over fewer than "+strconv.Itoa(k)+" people (for refusals too: the people refused, not the refusals) are suppressed; there is no row per person. "+
+			"Where a partner figure minus the shown labs would give a hidden lab's figure, a further cell is hidden (secondary suppression).",
 		"Soft-quota events are counted from the event log, complete from this release on; earlier crossings are the marks the state held.",
 		"Used workload days are the GPU-hours of the profile's people over the GPU-hour workday; assigned days are the days in force times days a week over 7.")
 	return q, nil

@@ -39,21 +39,33 @@ func checkQuotaReportStore(t *testing.T, st interface {
 	}
 
 	// Refusals add up per day, then over the period.
-	if err := st.AddRefusals(ctx, d(5, 3), []RefusalRow{{"etabA", "t1", "p1", RefusalProfileWeek, 2}, {"etabA", "t1", "", RefusalBudget, 1}}); err != nil {
+	al, bo, ca := UserHash("alice"), UserHash("bob"), UserHash("carol")
+	if err := st.AddRefusals(ctx, d(5, 3), []RefusalRow{{Org: "etabA", Team: "t1", Profile: "p1", Kind: RefusalProfileWeek, N: 2, Users: []string{al, bo}}, {Org: "etabA", Team: "t1", Kind: RefusalBudget, N: 1}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.AddRefusals(ctx, d(6, 3), []RefusalRow{{"etabA", "t1", "p1", RefusalProfileWeek, 3}}); err != nil {
+	if err := st.AddRefusals(ctx, d(6, 3), []RefusalRow{{Org: "etabA", Team: "t1", Profile: "p1", Kind: RefusalProfileWeek, N: 3, Users: []string{al}}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.AddRefusals(ctx, time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC), []RefusalRow{{"etabA", "t1", "p1", RefusalProfileWeek, 9}}); err != nil {
+	if err := st.AddRefusals(ctx, time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC), []RefusalRow{{Org: "etabA", Team: "t1", Profile: "p1", Kind: RefusalProfileWeek, N: 9, Users: []string{ca}}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.AddRefusals(ctx, d(5, 3), []RefusalRow{{"x", "y", "z", "nonsense", 1}}); err == nil {
+	if err := st.AddRefusals(ctx, d(5, 3), []RefusalRow{{Org: "x", Team: "y", Profile: "z", Kind: "nonsense", N: 1}}); err == nil {
 		t.Fatal("a bad kind accepted")
 	}
+	if err := st.AddRefusals(ctx, d(5, 3), []RefusalRow{{Org: "x", Kind: RefusalBudget, N: 1, Users: []string{"alice"}}}); err == nil {
+		t.Fatal("a name instead of a hash accepted")
+	}
 	rf, err := st.RefusalsBetween(ctx, d(1, 0), time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), 10)
-	if err != nil || len(rf) != 2 || rf[0] != (RefusalRow{"etabA", "t1", "", RefusalBudget, 1}) || rf[1] != (RefusalRow{"etabA", "t1", "p1", RefusalProfileWeek, 5}) {
+	if err != nil || len(rf) != 2 || rf[0].Kind != RefusalBudget || rf[0].N != 1 || rf[1].Kind != RefusalProfileWeek || rf[1].N != 5 || rf[1].Profile != "p1" {
 		t.Fatalf("%+v %v", rf, err)
+	}
+	// The people refused: distinct over the days, only those of the period.
+	ru, err := st.RefusalUsersBetween(ctx, d(1, 0), time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), 10)
+	if err != nil || len(ru) != 2 || ru[0].User == ru[1].User || ru[0].Kind != RefusalProfileWeek {
+		t.Fatalf("%+v %v", ru, err)
+	}
+	if _, err := st.RefusalUsersBetween(ctx, d(1, 0), time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), 1); err != ErrTooMany {
+		t.Fatalf("bound: %v", err)
 	}
 
 	// Assignments in force at some time in the period.

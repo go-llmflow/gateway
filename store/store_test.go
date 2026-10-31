@@ -592,7 +592,7 @@ func TestPostgresContract(t *testing.T) {
 func dropAll(t *testing.T, p *Postgres) {
 	t.Helper()
 	if _, err := p.pool.Exec(context.Background(),
-		`DROP TABLE IF EXISTS llmflow_refusals, llmflow_warn_events, llmflow_warn_marks, llmflow_warn_levels, llmflow_pool_capacity, llmflow_energy_active, llmflow_energy_intervals, llmflow_budget_buckets, llmflow_profile_assignments, llmflow_workdays, llmflow_budget_ledger, llmflow_budget_grants, llmflow_budget_holders, llmflow_budget_arming,llmflow_audit, llmflow_audit_checkpoints, llmflow_scim,llmflow_allowlists,llmflow_budgets_v2, llmflow_team_models, llmflow_team_tools,llmflow_bindings, llmflow_user_tokens, llmflow_users,
+		`DROP TABLE IF EXISTS llmflow_refusals, llmflow_refusal_users,llmflow_warn_events, llmflow_warn_marks, llmflow_warn_levels, llmflow_pool_capacity, llmflow_energy_active, llmflow_energy_intervals, llmflow_budget_buckets, llmflow_profile_assignments, llmflow_workdays, llmflow_budget_ledger, llmflow_budget_grants, llmflow_budget_holders, llmflow_budget_arming,llmflow_audit, llmflow_audit_checkpoints, llmflow_scim,llmflow_allowlists,llmflow_budgets_v2, llmflow_team_models, llmflow_team_tools,llmflow_bindings, llmflow_user_tokens, llmflow_users,
 		 llmflow_usage, llmflow_budgets, llmflow_keys, llmflow_projects, llmflow_teams, llmflow_orgs`); err != nil {
 		t.Fatal(err)
 	}

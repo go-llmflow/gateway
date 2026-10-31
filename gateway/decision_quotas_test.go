@@ -21,7 +21,7 @@ func TestDecisionQuotasAndVarianceEndToEnd(t *testing.T) {
 	e.setBudget(`{"kind":"team","name":"etabA","period":"month","max_cost":0.2}`)
 	expect(t, "first request", e.chatWith(key, chat), 200)
 	e.waitRecords(1)
-	for i := 0; i < 5; i++ { // five refusals: a cell of five is shown (default small-cell threshold)
+	for i := 0; i < 5; i++ { // five refusals of a service key
 		expect(t, "refused", e.chatWith(key, chat), 429)
 	}
 	e.srv.flushRefusals(context.Background())
@@ -42,14 +42,19 @@ func TestDecisionQuotasAndVarianceEndToEnd(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
-	var n int64
+	// Five refusals of a service key are refusals of no one: a cell of zero
+	// people, suppressed, whatever its count.
+	seen := false
 	for _, r := range got.Quotas.Refusals {
-		if r.Org == "etabA" && r.Kind == "budget" && r.Refusals != nil {
-			n += *r.Refusals
+		if r.Org == "etabA" && r.Kind == "budget" {
+			seen = true
+			if !r.Suppressed || r.Refusals != nil {
+				t.Errorf("5 refusals by no person are shown: %+v", r)
+			}
 		}
 	}
-	if n != 5 {
-		t.Errorf("budget refusals shown for etabA: %d, want 5: %+v", n, got.Quotas.Refusals)
+	if !seen {
+		t.Errorf("the refusal cell is missing: %+v", got.Quotas.Refusals)
 	}
 	if len(got.Quotas.Notes) == 0 {
 		t.Error("the quota section carries no notes")
@@ -80,6 +85,45 @@ func TestDecisionQuotasAndVarianceEndToEnd(t *testing.T) {
 		if strings.Contains(out, who) {
 			t.Errorf("a person's name in the JSON: %s", who)
 		}
+	}
+}
+
+// Refusals of two people are a cell of two: shown at k = 2, suppressed at the
+// default; one person refused twice is a cell of one at any k.
+func TestDecisionRefusalPeople(t *testing.T) {
+	up := newFakeVLLM(t)
+	cfg := testConfig(up.URL())
+	cfg.AdoptionMinUsers = 2
+	e := newEnv(t, cfg)
+	alice := e.ownKey(e.adminToken("alice", `{"role":"member","team":"etabA"}`))
+	bob := e.ownKey(e.adminToken("bob", `{"role":"member","team":"etabA"}`))
+	e.setBudget(`{"kind":"team","name":"etabA","period":"month","max_cost":0.2}`)
+	expect(t, "alice's request", e.chatWith(alice, chat), 200)
+	e.waitRecords(1)
+	expect(t, "alice refused", e.chatWith(alice, chat), 429)
+	expect(t, "alice refused again", e.chatWith(alice, chat), 429)
+	expect(t, "bob refused", e.chatWith(bob, chat), 429)
+	e.srv.flushRefusals(context.Background())
+	fin := e.adminToken("fin", `{"role":"finance_viewer"}`)
+	now := time.Now().UTC()
+	from := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	q := "?from=" + from.Format("2006-01-02") + "&to=" + from.AddDate(0, 1, 0).Format("2006-01-02") + "&format=json"
+	read := func() []RefusalOut {
+		var got struct {
+			Quotas struct{ Refusals []RefusalOut }
+		}
+		if err := json.Unmarshal([]byte(readAll(t, e.do("GET", "/admin/decision"+q, fin, ""))), &got); err != nil {
+			t.Fatal(err)
+		}
+		return got.Quotas.Refusals
+	}
+	rs := read()
+	if len(rs) != 1 || rs[0].Suppressed || *rs[0].Refusals != 3 {
+		t.Fatalf("2 people, 3 refusals at k = 2: %+v", rs)
+	}
+	e.srv.cfg.AdoptionMinUsers = 3
+	if rs = read(); len(rs) != 1 || !rs[0].Suppressed || rs[0].Refusals != nil {
+		t.Fatalf("2 people at k = 3: %+v", rs)
 	}
 }
 

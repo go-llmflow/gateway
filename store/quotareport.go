@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -43,6 +45,28 @@ const (
 type RefusalRow struct {
 	Org, Team, Profile, Kind string
 	N                        int64
+	// Users are the hashes of the distinct people refused in the cell (a
+	// truncated SHA-256 of the user name, see UserHash): the report applies its
+	// small-cell rule to people, not to refusals. At most MaxRefusalUsers per
+	// cell and day are kept.
+	Users []string
+}
+
+// RefusalUser is one distinct person (by hash) refused in a cell over a period.
+type RefusalUser struct {
+	Org, Team, Profile, Kind, User string
+}
+
+// MaxRefusalUsers bounds the people kept per cell and day. Past it the count
+// of people only undercounts, which can only suppress more, never less.
+const MaxRefusalUsers = 1000
+
+// UserHash is the stored form of a person in a refusal cell: 16 hex digits of
+// SHA-256. It is a set key, not a secret: it keeps the stored rows free of
+// names, and the report never prints it.
+func UserHash(user string) string {
+	h := sha256.Sum256([]byte(user))
+	return hex.EncodeToString(h[:8])
 }
 
 // QuotaReportStore is the store's part of the quota figures.
@@ -55,6 +79,9 @@ type QuotaReportStore interface {
 	// RefusalsBetween sums the refusals of the days in [from, to) per
 	// (org, team, profile, kind); ErrTooMany beyond max rows.
 	RefusalsBetween(ctx context.Context, from, to time.Time, max int) ([]RefusalRow, error)
+	// RefusalUsersBetween lists the distinct people (hashes) refused in each
+	// cell over [from, to); ErrTooMany beyond max pairs.
+	RefusalUsersBetween(ctx context.Context, from, to time.Time, max int) ([]RefusalUser, error)
 	// AssignmentsBetween lists the assignments in force at any time in
 	// [from, to); ErrTooMany beyond max.
 	AssignmentsBetween(ctx context.Context, from, to time.Time, max int) ([]Assignment, error)
@@ -74,8 +101,13 @@ func validRefusalRow(r RefusalRow) error {
 			return fmt.Errorf("refusal: bad name %q", s)
 		}
 	}
-	if !validRefusalKind(r.Kind) || r.N < 0 {
-		return fmt.Errorf("refusal: kind %q count %d", r.Kind, r.N)
+	if !validRefusalKind(r.Kind) || r.N < 0 || len(r.Users) > MaxRefusalUsers {
+		return fmt.Errorf("refusal: kind %q count %d users %d", r.Kind, r.N, len(r.Users))
+	}
+	for _, u := range r.Users {
+		if len(u) != 16 {
+			return fmt.Errorf("refusal: user hash %q", u)
+		}
 	}
 	return nil
 }
@@ -91,6 +123,7 @@ type memEvent struct {
 type memQuota struct {
 	events   []memEvent
 	refusals map[string]map[[4]string]int64 // day → (org, team, profile, kind) → n
+	users    map[string]map[[5]string]bool  // day → (org, team, profile, kind, user hash)
 }
 
 func (m *Memory) recordWarnEventLocked(w WarnMark) {
@@ -160,10 +193,52 @@ func (m *Memory) AddRefusals(_ context.Context, day time.Time, rows []RefusalRow
 	if m.quota.refusals[d] == nil {
 		m.quota.refusals[d] = map[[4]string]int64{}
 	}
+	if m.quota.users == nil {
+		m.quota.users = map[string]map[[5]string]bool{}
+	}
+	if m.quota.users[d] == nil {
+		m.quota.users[d] = map[[5]string]bool{}
+	}
 	for _, r := range rows {
 		m.quota.refusals[d][[4]string{r.Org, r.Team, r.Profile, r.Kind}] += r.N
+		for _, u := range r.Users {
+			m.quota.users[d][[5]string{r.Org, r.Team, r.Profile, r.Kind, u}] = true
+		}
 	}
 	return nil
+}
+
+func (m *Memory) RefusalUsersBetween(ctx context.Context, from, to time.Time, max int) ([]RefusalUser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.Fail != nil {
+		return nil, m.Fail
+	}
+	f, t := from.UTC().Format("2006-01-02"), to.UTC().Format("2006-01-02")
+	set := map[[5]string]bool{}
+	for d, us := range m.quota.users {
+		if d < f || d >= t {
+			continue
+		}
+		for k := range us {
+			set[k] = true
+		}
+	}
+	if len(set) > max {
+		return nil, ErrTooMany
+	}
+	out := make([]RefusalUser, 0, len(set))
+	for k := range set {
+		out = append(out, RefusalUser{k[0], k[1], k[2], k[3], k[4]})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		return a.Org+"\x00"+a.Team+"\x00"+a.Profile+"\x00"+a.Kind+"\x00"+a.User < b.Org+"\x00"+b.Team+"\x00"+b.Profile+"\x00"+b.Kind+"\x00"+b.User
+	})
+	return out, nil
 }
 
 func (m *Memory) RefusalsBetween(ctx context.Context, from, to time.Time, max int) ([]RefusalRow, error) {
@@ -190,7 +265,7 @@ func (m *Memory) RefusalsBetween(ctx context.Context, from, to time.Time, max in
 	}
 	out := make([]RefusalRow, 0, len(agg))
 	for k, n := range agg {
-		out = append(out, RefusalRow{k[0], k[1], k[2], k[3], n})
+		out = append(out, RefusalRow{Org: k[0], Team: k[1], Profile: k[2], Kind: k[3], N: n})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		a, b := out[i], out[j]
@@ -244,6 +319,15 @@ CREATE TABLE IF NOT EXISTS llmflow_refusals (
 	n       bigint NOT NULL,
 	PRIMARY KEY (day, org, team, profile, kind)
 );
+CREATE TABLE IF NOT EXISTS llmflow_refusal_users (
+	day     date NOT NULL,
+	org     text NOT NULL,
+	team    text NOT NULL,
+	profile text NOT NULL,
+	kind    text NOT NULL,
+	uhash   text NOT NULL,
+	PRIMARY KEY (day, org, team, profile, kind, uhash)
+);
 `
 
 func (p *Postgres) WarnEventsBetween(ctx context.Context, from, to time.Time, max int) ([]WarnEventRow, error) {
@@ -276,9 +360,33 @@ func (p *Postgres) AddRefusals(ctx context.Context, day time.Time, rows []Refusa
 				day.UTC().Format("2006-01-02"), r.Org, r.Team, r.Profile, r.Kind, r.N); err != nil {
 				return err
 			}
+			for _, u := range r.Users {
+				if _, err := tx.Exec(ctx, `INSERT INTO llmflow_refusal_users (day, org, team, profile, kind, uhash) VALUES ($1, $2, $3, $4, $5, $6)
+					ON CONFLICT DO NOTHING`, day.UTC().Format("2006-01-02"), r.Org, r.Team, r.Profile, r.Kind, u); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	})
+}
+
+func (p *Postgres) RefusalUsersBetween(ctx context.Context, from, to time.Time, max int) ([]RefusalUser, error) {
+	rows, err := p.pool.Query(ctx, `SELECT DISTINCT org, team, profile, kind, uhash FROM llmflow_refusal_users
+		WHERE day >= $1::date AND day < $2::date ORDER BY org, team, profile, kind, uhash LIMIT $3`,
+		from.UTC().Format("2006-01-02"), to.UTC().Format("2006-01-02"), max+1)
+	if err != nil {
+		return nil, err
+	}
+	out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (RefusalUser, error) {
+		var x RefusalUser
+		err := r.Scan(&x.Org, &x.Team, &x.Profile, &x.Kind, &x.User)
+		return x, err
+	})
+	if err == nil && len(out) > max {
+		return nil, ErrTooMany
+	}
+	return out, err
 }
 
 func (p *Postgres) RefusalsBetween(ctx context.Context, from, to time.Time, max int) ([]RefusalRow, error) {
