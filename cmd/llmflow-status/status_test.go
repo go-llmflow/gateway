@@ -117,6 +117,22 @@ func TestGoldenOutputs(t *testing.T) {
 	}
 }
 
+// The contract with the gateway: testdata/me_usage.contract.json holds the
+// fields this command reads, and the gateway's TestMeUsageContract checks
+// that its real /v1/me/usage carries each of them with the same JSON type.
+// Here the same file must render, so a fake cannot drift from the server.
+func TestContractFixtureRenders(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("testdata", "me_usage.contract.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := newGateway(t, string(body))
+	out, errs, code := runCmd(t, testEnv(vars(g)), "{}", "--cache-dir", t.TempDir(), "--ttl", "0", "--no-color")
+	if want := "session 85% · 15:45 │ week 40% · Mon 00:00"; code != 0 || errs != "" || strings.TrimRight(out, "\n") != want {
+		t.Fatalf("%q (stderr %q, exit %d), want %q", out, errs, code, want)
+	}
+}
+
 func TestNothingWithoutWindows(t *testing.T) {
 	g := newGateway(t, `{"user":"alice","profile":null,"warn_at":[75,95],"session":null,"week":null}`)
 	out, errs, code := runCmd(t, testEnv(vars(g)), "{}", "--cache-dir", t.TempDir())

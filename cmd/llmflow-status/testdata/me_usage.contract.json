@@ -1,0 +1,5 @@
+{
+  "warn_at": [75, 95],
+  "session": {"used_pct": 85.4, "resets_at": "2026-10-29T15:45:00Z"},
+  "week": {"used_pct": 40, "resets_at": "2026-11-02T00:00:00Z"}
+}
