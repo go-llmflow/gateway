@@ -62,7 +62,7 @@ var errNoOwner = errors.New("the replica that decides this pool's fair share can
 
 // buildHA makes the pools shared: every pool is decided by its owner
 // among the replicas (package ha).
-func (s *Server) buildHA(shares map[string]float64) error {
+func (s *Server) buildHA() error {
 	h := s.cfg.HA
 	hs, ok := s.st.(store.HAStore)
 	if !ok {
@@ -80,7 +80,8 @@ func (s *Server) buildHA(shares map[string]float64) error {
 	inst := id + "-" + hex.EncodeToString(b[:])
 	specs := make([]ha.PoolSpec, 0, len(s.cfg.Pools))
 	for _, p := range s.cfg.Pools {
-		specs = append(specs, ha.PoolSpec{Name: p.Name, Capacity: p.Capacity, Shares: shares, HalfLife: s.cfg.FairShare.HalfLife})
+		specs = append(specs, ha.PoolSpec{Name: p.Name, Capacity: p.Capacity, Shares: s.cfg.PoolShares(p.Name),
+			OwnShares: s.cfg.HasPoolShares(p.Name), HalfLife: s.cfg.FairShare.HalfLife})
 	}
 	var clientTLS *tls.Config
 	if s.secrets.HATLSCert != "" || s.secrets.HATLSKey != "" || s.secrets.HATLSCA != "" {

@@ -592,7 +592,14 @@ type poolHCL struct {
 	NameRange     hcl.Range `hcl:"name,label_range"`
 	Capacity      int       `hcl:"capacity"`
 	CapacityRange hcl.Range `hcl:"capacity,attr_value_range"`
-	DefRange      hcl.Range `hcl:",def_range"`
+	// Shares are this pool's own apportionment (poolshares.go); absent: the
+	// organisations' shares.
+	Shares      map[string]float64 `hcl:"shares,optional"`
+	SharesRange hcl.Range          `hcl:"shares,attr_value_range"`
+	// Borrow says who may use the capacity the shareholders leave idle.
+	Borrow      *string   `hcl:"borrow,optional"`
+	BorrowRange hcl.Range `hcl:"borrow,attr_value_range"`
+	DefRange    hcl.Range `hcl:",def_range"`
 }
 
 type costHCL struct {
@@ -975,7 +982,9 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		if p.Capacity < 0 || p.Capacity > 1<<20 {
 			v.errf(p.CapacityRange, "Invalid capacity", "pool %q capacity = %d: want 1..1048576", p.Name, p.Capacity)
 		}
-		c.Pools = append(c.Pools, Pool{Name: p.Name, Capacity: p.Capacity})
+		pool := Pool{Name: p.Name, Capacity: p.Capacity}
+		v.poolShares(p, &pool, orgs)
+		c.Pools = append(c.Pools, pool)
 	}
 
 	// models

@@ -41,6 +41,7 @@ import (
 	"net/http"
 	"net/netip"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,7 +55,65 @@ type PoolSpec struct {
 	Name     string
 	Capacity int
 	Shares   map[string]float64
-	HalfLife time.Duration
+	// OwnShares: Shares are this pool's own apportionment (pool { shares }),
+	// not the organisations'. Only a replica that knows per-pool shares can
+	// decide such a pool, so the owner's published reservations carry a marker
+	// (see shareMarkers) and a replica refuses an owner that does not.
+	OwnShares bool
+	HalfLife  time.Duration
+}
+
+// The reservations an owner publishes with its lease are a JSON object
+// organisation -> integer. Two extra integer entries, whose names cannot be an
+// organisation's (config.ValidName: [A-Za-z0-9_.-]), say where the shares come
+// from: "@own" is 1 when the pool has shares of its own, and "@fp" is a
+// fingerprint of the shares the reservations were computed from. A replica
+// from before per-pool shares publishes neither: a replica whose pool has its
+// own shares then knows the owner decides with the organisations' shares, and
+// refuses to follow it (ErrSharesMismatch) instead of serving the pool with
+// the wrong apportionment. An older replica reading the object sees two more
+// "organisations" it never asks about.
+const (
+	markerOwn = "@own"
+	markerFP  = "@fp"
+)
+
+// ErrSharesMismatch: the pool has shares of its own here, and its owner
+// published reservations that are not computed from the same shares (an older
+// replica, or a replica with another configuration).
+var ErrSharesMismatch = errors.New("ha: this pool's owner does not use the pool's own shares (an older replica, or another configuration): update every replica to the same version and configuration")
+
+// SharesFingerprint is a stable 52-bit fingerprint of an apportionment.
+func SharesFingerprint(shares map[string]float64) int64 {
+	names := make([]string, 0, len(shares))
+	for k := range shares {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	h := uint64(14695981039346656037)
+	mix := func(b []byte) {
+		for _, c := range b {
+			h ^= uint64(c)
+			h *= 1099511628211
+		}
+	}
+	for _, k := range names {
+		mix([]byte(k))
+		mix([]byte{0})
+		mix([]byte(strconv.FormatFloat(shares[k], 'g', -1, 64)))
+		mix([]byte{1})
+	}
+	return int64(h >> 12)
+}
+
+// ownerSharesOK reports whether the reservations an owner published (JSON)
+// were computed from the shares fp describes.
+func ownerSharesOK(published string, fp int64) bool {
+	var m map[string]int64
+	if json.Unmarshal([]byte(published), &m) != nil {
+		return false
+	}
+	return m[markerOwn] == 1 && m[markerFP] == fp
 }
 
 // Config configures a Node.
@@ -173,6 +232,9 @@ type poolState struct {
 	// lease (-1: none).
 	pubCapacity int
 	pubReserved string
+	// mismatch: the live owner's published reservations were not computed
+	// from this replica's own shares for the pool (ErrSharesMismatch).
+	mismatch bool
 	// the lease as last read
 	leaseOwner, leaseAddr string
 	leaseEpoch            int64
@@ -281,6 +343,15 @@ func (n *Node) Acquire(pool, org string, class fairshare.Class, tokens int64, ne
 	}
 	addr, known := ps.leaseAddr, ps.known
 	remote := ps.leaseLive && ps.leaseOwner != n.cfg.Instance && addr != ""
+	if remote && ps.mismatch {
+		// The owner decides with other shares than this pool's: never serve
+		// the pool by it (and never silently by the wrong apportionment).
+		ps.mu.Unlock()
+		if needRoom {
+			return nil, false, nil
+		}
+		return nil, false, ErrSharesMismatch
+	}
 	ps.mu.Unlock()
 	if remote {
 		var resp acquireResp
@@ -467,6 +538,14 @@ func (n *Node) claim(ctx context.Context, ps *poolState) {
 	ps.pubCapacity, ps.pubReserved = l.Capacity, l.Reserved
 	if !l.Live {
 		ps.pubCapacity, ps.pubReserved = -1, ""
+	}
+	// A pool with shares of its own is only decided by an owner that computed
+	// its reservations from them (shareMarkers).
+	wasMismatch := ps.mismatch
+	ps.mismatch = ps.spec.OwnShares && l.Live && l.Owner != n.cfg.Instance && !ownerSharesOK(l.Reserved, SharesFingerprint(ps.spec.Shares))
+	if ps.mismatch && !wasMismatch {
+		n.cfg.Log.Error("ha: the owner of a pool with shares of its own does not use them; the pool is refused here until every replica runs the same version and configuration",
+			"pool", ps.spec.Name, "owner", l.Owner)
 	}
 	mine := l.Owner == n.cfg.Instance && l.Live
 	switch {
@@ -656,7 +735,14 @@ func (ps *poolState) reservedJSON() string {
 		names = append(names, k)
 	}
 	sort.Strings(names)
-	b, _ := json.Marshal(fairshare.Apportion(ps.capacity, names, ps.spec.Shares))
+	res := map[string]int64{}
+	for k, v := range fairshare.Apportion(ps.capacity, names, ps.spec.Shares) {
+		res[k] = int64(v)
+	}
+	if ps.spec.OwnShares {
+		res[markerOwn], res[markerFP] = 1, SharesFingerprint(ps.spec.Shares)
+	}
+	b, _ := json.Marshal(res)
 	return string(b)
 }
 
@@ -716,6 +802,8 @@ func (n *Node) Reserved(pool string) map[string]int {
 	}
 	var out map[string]int
 	_ = json.Unmarshal([]byte(src), &out)
+	delete(out, markerOwn)
+	delete(out, markerFP)
 	return out
 }
 
