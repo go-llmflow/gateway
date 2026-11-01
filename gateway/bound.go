@@ -158,16 +158,17 @@ func (p groupPrices) costNano(u openai.Usage) int64 {
 	if p.hasLong && u.PromptTokens > p.longAbove {
 		t = p.long
 	}
-	prompt, cached, w5, w1h := nonNeg(u.PromptTokens), nonNeg(u.Cached()), uint64(0), uint64(0)
+	prompt, cached, w5, w1h, wu := nonNeg(u.PromptTokens), nonNeg(u.Cached()), uint64(0), uint64(0), uint64(0)
 	if t.writes {
-		w5, w1h = nonNeg(u.CacheWrite5m), nonNeg(u.CacheWrite1h)
+		w5, w1h, wu = nonNeg(u.CacheWrite5m), nonNeg(u.CacheWrite1h), nonNeg(u.CacheWriteUnknown)
 	}
 	uncached := uint64(0)
-	if s := cached + w5 + w1h; prompt > s {
+	if s := cached + w5 + w1h + wu; prompt > s {
 		uncached = prompt - s
 	}
+	// Writes of unknown lifetime cost the higher write price.
 	sum := mul128(uncached, t.in).add(mul128(cached, t.cached)).add(mul128(w5, t.w5)).add(mul128(w1h, t.w1h)).
-		add(mul128(nonNeg(u.CompletionTokens), t.out))
+		add(mul128(wu, max(t.w5, t.w1h))).add(mul128(nonNeg(u.CompletionTokens), t.out))
 	n := sum.perMillion()
 	if p.audioPerHour > 0 && u.AudioSeconds > 0 {
 		a := math.Ceil(u.AudioSeconds / 3600 * p.audioPerHour * nanoPerUnit)

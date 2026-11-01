@@ -2418,8 +2418,11 @@ cacheReadInputTokens + cacheWriteInputTokens".
   highest input price, cache writes included. **Usage** is read from the Converse
   fields (the OpenAI usage object has no room for cache writes, which are priced
   apart): the prompt is `inputTokens` + the cache reads + the cache writes, and
-  the writes are split by lifetime from `cacheDetails` (all 5-minute when the
-  split is absent or does not add up). **A stream cut, an exception event, a CRC
+  the writes are split by lifetime from `cacheDetails`; when the split is absent
+  or does not add up the writes are of **unknown lifetime and are charged at the
+  higher of the 5-minute and 1-hour write prices** (the same rule now applies to
+  the InvokeModel path and to the Anthropic provider, whose `cache_creation` split
+  may be missing), so a settled cost is never below what AWS bills. **A stream cut, an exception event, a CRC
   failure, a missing `messageStop` or `metadata` usage, a 200 answer without
   usage or with a body cut is charged W.** The client sees such a stream end
   without `[DONE]`, which OpenAI clients read as a failed stream.

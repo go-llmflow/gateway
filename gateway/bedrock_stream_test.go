@@ -210,7 +210,7 @@ func FuzzBedrockStream(f *testing.F) {
 			oracle := bdrkPrices.costNano(openai.Usage{PromptTokens: prompt, CompletionTokens: u.Out, TotalTokens: prompt + u.Out,
 				PromptTokensDetails: &struct {
 					CachedTokens int64 `json:"cached_tokens"`
-				}{u.Read}, CacheWrite5m: u.Write})
+				}{u.Read}, CacheWriteUnknown: u.Write})
 			if cost != oracle {
 				t.Fatalf("complete stream of %+v charged %d, oracle %d", u, cost, oracle)
 			}

@@ -88,6 +88,11 @@ func (f *fakeBedrock) serveConverse(w http.ResponseWriter, r *http.Request, raw 
 	mt, _ := inf["maxTokens"].(float64)
 	u := usage(int64(mt))
 	if !stream {
+		if mode == "no-split" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"output":{"message":{"role":"assistant","content":[{"text":"hello"}]}},"stopReason":"end_turn","usage":{"inputTokens":%d,"outputTokens":%d,"cacheReadInputTokens":%d,"cacheWriteInputTokens":%d}}`, u.In, u.Out, u.Read, u.Write)
+			return
+		}
 		if mode == "no-usage" {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"output":{"message":{"role":"assistant","content":[{"text":"hello"}]}},"stopReason":"end_turn"}`)
@@ -126,6 +131,11 @@ func (f *fakeBedrock) serveConverse(w http.ResponseWriter, r *http.Request, raw 
 		for i := 2; i < len(evs); i++ {
 			w.Write(frame(i))
 		}
+	case "no-split": // usage without cacheDetails
+		for i := 0; i < len(evs)-1; i++ {
+			w.Write(frame(i))
+		}
+		w.Write(converseFrame("metadata", fmt.Sprintf(`{"usage":{"inputTokens":%d,"outputTokens":%d,"cacheReadInputTokens":%d,"cacheWriteInputTokens":%d}}`, u.In, u.Out, u.Read, u.Write)))
 	case "no-usage": // a metadata event without usage
 		for i := 0; i < len(evs)-1; i++ {
 			w.Write(frame(i))
@@ -358,7 +368,7 @@ func TestConverseStreamGoldenEndToEnd(t *testing.T) {
 
 // The byte-exact conversion of the events.
 func TestConverseStreamGolden(t *testing.T) {
-	c := newConverseSSE(bytes.NewReader(converseStreamBytes(bedrockUsage{10, 5, 100, 50})), "mistral", "x", time.Unix(1700000000, 0))
+	c := newConverseSSE(bytes.NewReader(converseStreamBytes(bedrockUsage{10, 5, 100, 50})), "mistral", "x", time.Unix(1700000000, 0), true)
 	got := readAllSSE(t, c)
 	chunk := func(delta, finish string) string {
 		return `data: {"choices":[{"delta":` + delta + `,"finish_reason":` + finish + `,"index":0}],"created":1700000000,"id":"chatcmpl-x","model":"mistral","object":"chat.completion.chunk"}` + "\n\n"
@@ -406,7 +416,7 @@ func TestConverseUsageMapping(t *testing.T) {
 		if !ok {
 			continue
 		}
-		if u.PromptTokens != c.prompt || u.CompletionTokens != c.completion || u.Cached() != c.cached || u.CacheWrite5m != c.write5m || u.CacheWrite1h != c.write1h {
+		if u.PromptTokens != c.prompt || u.CompletionTokens != c.completion || u.Cached() != c.cached || u.CacheWrite5m+u.CacheWriteUnknown != c.write5m || u.CacheWrite1h != c.write1h {
 			t.Errorf("%s: %+v", c.name, u)
 		}
 		var o struct {
@@ -865,7 +875,7 @@ func FuzzConverseStream(f *testing.F) {
 		case 4:
 			src = converseStreamBytes(u)
 		}
-		c := newConverseSSE(bytes.NewReader(src), "m", "x", time.Unix(1, 0))
+		c := newConverseSSE(bytes.NewReader(src), "m", "x", time.Unix(1, 0), true)
 		sse, err := io.ReadAll(c)
 		if err != nil {
 			t.Fatalf("the converter fails with %v instead of ending", err)

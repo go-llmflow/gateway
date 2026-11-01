@@ -344,7 +344,9 @@ func (u converseUsage) usage() (openai.Usage, bool) {
 		PromptTokensDetails: &struct {
 			CachedTokens int64 `json:"cached_tokens"`
 		}{u.CacheRead}}
-	out.CacheWrite5m = u.CacheWrite
+	// Until the split is known the writes are of UNKNOWN lifetime, priced at the
+	// higher write price (openai.Usage.CacheWriteUnknown).
+	out.CacheWriteUnknown = u.CacheWrite
 	var w5, w1h int64
 	for _, d := range u.CacheDetails {
 		if d.InputTokens < 0 {
@@ -358,7 +360,7 @@ func (u converseUsage) usage() (openai.Usage, bool) {
 		}
 	}
 	if len(u.CacheDetails) > 0 && w5 >= 0 && w5+w1h == u.CacheWrite {
-		out.CacheWrite5m, out.CacheWrite1h = w5, w1h
+		out.CacheWrite5m, out.CacheWrite1h, out.CacheWriteUnknown = w5, w1h, 0
 	}
 	return out, out.Valid()
 }
@@ -446,10 +448,15 @@ type converseSSE struct {
 	start, stop bool
 	haveUsage   bool
 	usage       openai.Usage
+	sendUsage   bool
 }
 
-func newConverseSSE(r io.Reader, model, id string, now time.Time) *converseSSE {
-	c := &converseSSE{eventReader: newEventReader(r), model: model, id: "chatcmpl-" + id, created: now.Unix()}
+// newConverseSSE: sendUsage says whether the usage chunk (empty choices, the
+// usage) is written, as OpenAI does only when the request had
+// stream_options.include_usage; the gateway's accounting reads Usage() either
+// way. A chunk with "choices": [] crashes clients that index choices[0].
+func newConverseSSE(r io.Reader, model, id string, now time.Time, sendUsage bool) *converseSSE {
+	c := &converseSSE{eventReader: newEventReader(r), model: model, id: "chatcmpl-" + id, created: now.Unix(), sendUsage: sendUsage}
 	c.event = c.handle
 	c.errEvent = func(why string) string {
 		msg, _ := json.Marshal(map[string]any{"error": map[string]any{"message": why, "type": "api_error"}})
@@ -531,7 +538,9 @@ func (c *converseSSE) handle(typ string, payload []byte) {
 		}
 		if c.start && c.stop {
 			c.usage, c.haveUsage = u, true
-			c.chunk(nil, nil, chatUsageOf(u))
+			if c.sendUsage {
+				c.chunk(nil, nil, chatUsageOf(u))
+			}
 		}
 	}
 }

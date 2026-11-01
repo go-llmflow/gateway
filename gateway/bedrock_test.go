@@ -61,8 +61,10 @@ const (
 	tokAlpha   = "FwoGZXIvYXdzEBYaDsessionTokenALPHAxxxxxxxxxxxxxxxxxxxx"
 	bearerBeta = "bedrock-api-key-BETA-secret-value-0123456789"
 	bedrockOne = `{"input_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":50,"output_tokens":5}`
-	// one answer: (10×2 + 100×0.1 + 50×2.5 + 5×10) / 1e6 USD.
-	fakeBdrkCost = 205e-6
+	// one answer: the 50 cache writes carry no split, so they are of unknown
+	// lifetime and cost the higher write price (1 hour, 4):
+	// (10×2 + 100×0.1 + 50×4 + 5×10) / 1e6 USD.
+	fakeBdrkCost = 280e-6
 	bedrockModel = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
 )
 

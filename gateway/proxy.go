@@ -91,13 +91,15 @@ func (g *group) cost(u openai.Usage) float64 {
 		lc.AudioPerHour = c.AudioPerHour
 		c = lc
 	}
-	var w5, w1h int64
+	var w5, w1h, wu int64
 	if c.CacheWrite5mPerMTok > 0 || c.CacheWrite1hPerMTok > 0 {
-		w5, w1h = u.CacheWrite5m, u.CacheWrite1h
+		w5, w1h, wu = u.CacheWrite5m, u.CacheWrite1h, u.CacheWriteUnknown
 	}
-	uncached := u.PromptTokens - u.Cached() - w5 - w1h
+	uncached := u.PromptTokens - u.Cached() - w5 - w1h - wu
+	// Writes of unknown lifetime cost the higher write price.
 	return (float64(uncached)*c.InputPerMTok+float64(u.Cached())*c.CachedPerMTok+
 		float64(w5)*c.CacheWrite5mPerMTok+float64(w1h)*c.CacheWrite1hPerMTok+
+		float64(wu)*max(c.CacheWrite5mPerMTok, c.CacheWrite1hPerMTok)+
 		float64(u.CompletionTokens)*c.OutputPerMTok)/1e6 + u.AudioSeconds/3600*c.AudioPerHour
 }
 
@@ -618,7 +620,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			// The provider's binary event stream, read as untrusted input and
 			// re-emitted as Anthropic SSE (bedrock.go).
 			if g.ext.bedrock.converse() {
-				cconv = newConverseSSE(resp.Body, g.cfg.Name, rid, s.now())
+				cconv = newConverseSSE(resp.Body, g.cfg.Name, rid, s.now(), req.ClientWantsUsage)
 				bconv, events = cconv, cconv
 			} else {
 				bsse := newBedrockSSE(resp.Body)
