@@ -11,7 +11,7 @@ require (
 	github.com/go-llmflow/pii v0.2.1
 	github.com/go-ooxml/ooxml v0.7.0
 	github.com/go-opentype/fonts v0.14.0
-	github.com/go-pdfkit/html2pdf v0.3.0
+	github.com/go-pdfkit/html2pdf v0.4.0
 	github.com/go-pdfkit/pdfkit v0.20.0
 	github.com/go-plot/plot v0.3.0
 	github.com/go-volumes/s3 v0.2.2
@@ -56,7 +56,7 @@ require (
 	github.com/go-simd/highway v0.0.14 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.4+incompatible // indirect
 	github.com/go-tex/math v0.50.0 // indirect
-	github.com/go-webengine/engine v0.18.0 // indirect
+	github.com/go-webengine/engine v0.18.1 // indirect
 	github.com/go-webengine/esbuildsandbox v0.1.0 // indirect
 	github.com/go-widgets/painter v0.16.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect

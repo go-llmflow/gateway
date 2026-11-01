@@ -31,11 +31,26 @@ func TestDecisionPDFFetchesNothing(t *testing.T) {
 	// fetches a stylesheet that is real markup. Without it, "no request"
 	// could only mean the engine never fetches, and the test would prove
 	// nothing about the names.
+	// The control uses the gateway's options with the one field that makes
+	// them safe, Fetch, removed: the default fetcher does fetch.
 	raw := `<html><head><link rel="stylesheet" href="` + u + `/control.css"></head><body><p>x</p></body></html>`
-	if _, err := html2pdf.Export(raw, html2pdf.Options{Title: "control"}); err != nil {
+	insecure := decisionPDFOptions(fixedDecision())
+	insecure.Fetch = nil
+	if _, err := html2pdf.Export(raw, insecure); err != nil {
 		t.Fatal(err)
 	}
 	control := hits.Load()
+
+	// The gateway's own options, handed a raw <link> (not a name: markup the
+	// template would never emit), make no request. This is the barrier that
+	// does not depend on escaping.
+	hits.Store(0)
+	if _, err := html2pdf.Export(raw, decisionPDFOptions(fixedDecision())); err != nil {
+		t.Fatal(err)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("the gateway's html2pdf options made %d request(s) for a raw <link>: Offline is not passed", n)
+	}
 
 	hostile := []string{
 		`<link rel="stylesheet" href="` + u + `/a.css">`,
@@ -64,6 +79,43 @@ func TestDecisionPDFFetchesNothing(t *testing.T) {
 	if control == 0 {
 		// The engine fetched nothing even for real markup. Then the zero
 		// above is not evidence; say so rather than pass silently.
-		t.Fatalf("control: html2pdf fetched no stylesheet with the gateway's options, so this test cannot see a fetch; adapt the control")
+		t.Fatalf("control: html2pdf fetched no stylesheet with the default fetcher, so this test cannot see a fetch; adapt the control")
+	}
+}
+
+// The report is typeset with html2pdf.Offline, and writeDecisionPDF uses the
+// options decisionPDFOptions returns: a raw <link> in the template's output
+// (here, a template that does not escape) reaches no server.
+func TestDecisionPDFOptionsAreOffline(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/css")
+		_, _ = w.Write([]byte(`body{color:#000}`))
+	}))
+	defer srv.Close()
+
+	opts := decisionPDFOptions(fixedDecision())
+	if opts.Fetch == nil {
+		t.Fatal("decisionPDFOptions leaves Fetch nil: the default fetcher would be used")
+	}
+	var refused atomic.Int64
+	opts.OnRefused = func(string) { refused.Add(1) }
+	raw := `<html><head><link rel="stylesheet" href="` + srv.URL + `/a.css"></head><body><img src="` + srv.URL + `/b.png"><p>x</p></body></html>`
+	if _, err := html2pdf.Export(raw, opts); err != nil {
+		t.Fatal(err)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("%d request(s) with the gateway's options", n)
+	}
+	if refused.Load() != 2 {
+		t.Errorf("refusals counted: %d, want 2 (the sheet and the image)", refused.Load())
+	}
+	// control: the default options reach the server
+	if _, err := html2pdf.Export(raw, html2pdf.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if hits.Load() == 0 {
+		t.Fatal("control: the default options made no request; the test cannot see a fetch")
 	}
 }
