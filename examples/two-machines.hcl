@@ -2,11 +2,16 @@
 #
 #   - the B300 servers (the Hi! PARIS partners): 256 slots, apportioned by the
 #     organisations' own shares (no `shares` on the pool);
-#   - a machine with 8 RTX 6000 GPUs bought by three institutions in the
-#     proportions of what each paid: 50 / 30 / 20 %. Each is guaranteed its
-#     slots of THIS machine (largest remainder over C = 64: 32 / 19 / 13) and
-#     may borrow the GPUs that are free. The fourth organisation did not
-#     contribute and, with borrow = "shareholders", may not use the machine.
+#   - a machine with 8 RTX PRO 6000 Blackwell GPUs bought by three
+#     institutions (etabA, etabC, etabD) in the proportions of what each paid:
+#     50 / 30 / 20 %. Each is guaranteed its slots of THIS machine (largest
+#     remainder over C = 64: 32 / 19 / 13) and may borrow the slots the others
+#     leave free. etabB did not contribute to it and, with
+#     borrow = "shareholders", may not use it (403); with the default
+#     borrow = "all" it could borrow idle slots too.
+#
+# etabD holds no share of the B300 (share = 0): it is served there only as a
+# borrower, while it holds 20 % of the RTX machine.
 #
 # Parsed by the test suite (config/poolshares_test.go) and by check-config.
 master_key_file     = "/etc/llmflow/master.key"
