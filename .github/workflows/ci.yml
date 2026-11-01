@@ -24,7 +24,7 @@ jobs:
       # A throw-away database with trust authentication: no password
       # exists, so none can leak from the workflow.
       postgres:
-        image: postgres:17
+        image: postgres:18
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: llmflow
