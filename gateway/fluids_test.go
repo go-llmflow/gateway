@@ -294,7 +294,7 @@ func TestAttributeIntervalSums(t *testing.T) {
 		for k := int64(0); k < n%5; k++ {
 			work = append(work, energy.Work{Consumer: energy.Consumer{Org: fmt.Sprint(k)}, Prefill: n*3 + k, Decode: n + 1})
 		}
-		ei, att := attributeInterval("n", iv, work, f)
+		ei, att := attributeInterval("n", "p", iv, work, f)
 		sum := ei.IdleMJ
 		for _, a := range att {
 			sum += a.MJ

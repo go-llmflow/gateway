@@ -91,6 +91,52 @@ func (c *Config) PoolsWithShares() []string {
 	return out
 }
 
+// dcgmPools refuses a DCGM exporter shared by models of pools with different
+// apportionments: the idle energy of a node is allocated by the shares of the
+// pool the node belongs to, and a node serving two pools has no such pool.
+func (v *validator) dcgmPools(raw *fileHCL, c *Config) {
+	pool := map[string]string{} // dcgm_url → pool of its first model
+	for i, g := range c.ModelGroups {
+		if i >= len(raw.Models) {
+			break
+		}
+		for j, u := range g.Upstreams {
+			if u.DcgmURL == "" {
+				continue
+			}
+			first, seen := pool[u.DcgmURL]
+			if !seen {
+				pool[u.DcgmURL] = g.Pool
+				continue
+			}
+			if first != g.Pool && (c.HasPoolShares(first) || c.HasPoolShares(g.Pool)) {
+				r := raw.Models[i].DefRange
+				if j < len(raw.Models[i].Upstreams) {
+					r = raw.Models[i].Upstreams[j].DcgmURLRange
+				}
+				v.errf(r, "dcgm_url shared by two pools", "the DCGM exporter %s serves models of pools %q and %q, one of which has shares of its own: the idle energy of a node is allocated by the shares of its pool, so a node belongs to one pool",
+					redactDCGM(u.DcgmURL), first, g.Pool)
+			}
+		}
+	}
+}
+
+func redactDCGM(raw string) string {
+	if i := indexByte(raw, '?'); i >= 0 {
+		raw = raw[:i]
+	}
+	return raw
+}
+
+func indexByte(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
 // poolShares validates the shares and borrow of a pool. The checks are those
 // of the organisations' shares (each in 0..1, a sum of at most 1), plus: every
 // named organisation exists.

@@ -1571,6 +1571,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	v.external(raw, c)
 	v.budgets(raw, c)
 	v.fluids(raw, c)
+	v.dcgmPools(raw, c)
 	v.adoptionPrivacy(raw, c)
 	v.decisionReport(raw, c)
 	v.profiles(raw, c)
