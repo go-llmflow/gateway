@@ -224,6 +224,18 @@ func (b *bedrockRuntime) target(base string, stream bool) string {
 	return base + "/model/" + awsEscape(b.cfg.ModelID) + op
 }
 
+// bedrockObject decodes a request body that must be a JSON object. The JSON
+// literal null decodes into a nil map without error, and writing to that map
+// panicked in wireBody (found by FuzzBedrockIngress on main, 2026-11-01), so
+// it is refused like any non-object.
+func bedrockObject(body []byte) (map[string]json.RawMessage, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil || m == nil {
+		return nil, errors.New("the request body is not a JSON object")
+	}
+	return m, nil
+}
+
 // checkBedrockBody refuses what the gateway cannot bound.
 func checkBedrockBody(m map[string]json.RawMessage) error {
 	for _, f := range bedrockRefusedFields {
@@ -245,9 +257,9 @@ func bedrockIngress(h http.Header, body []byte, betas []string) ([]byte, []strin
 			return nil, nil, errors.New("X-Amzn-Bedrock-* headers (guardrails, service tier, performance config, trace, request metadata) are not forwarded: they change what a request costs")
 		}
 	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(body, &m); err != nil {
-		return nil, nil, errors.New("the request body is not a JSON object")
+	m, err := bedrockObject(body)
+	if err != nil {
+		return nil, nil, err
 	}
 	if err := checkBedrockBody(m); err != nil {
 		return nil, nil, err
@@ -277,9 +289,9 @@ func bedrockIngress(h http.Header, body []byte, betas []string) ([]byte, []strin
 // "stream" (the path says both), the fixed anthropic_version, and the betas
 // the allow-list lets through, in the body.
 func (b *bedrockRuntime) wireBody(body []byte, ext *config.External, betas []string) ([]byte, error) {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(body, &m); err != nil {
-		return nil, errors.New("the request body is not a JSON object")
+	m, err := bedrockObject(body)
+	if err != nil {
+		return nil, err
 	}
 	if err := checkBedrockBody(m); err != nil {
 		return nil, err
