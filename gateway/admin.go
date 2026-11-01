@@ -161,14 +161,23 @@ func (s *Server) listOrgs(w http.ResponseWriter, r *http.Request, p *principal) 
 	}
 	type org struct {
 		store.Org
-		// Share is the configured share of every pool (0 for an
-		// organisation created through the API: it only borrows).
-		Share float64 `json:"share"`
+		// Share is the configured share of every pool that has no shares of
+		// its own (0 for an organisation created through the API: it only
+		// borrows); PoolShares is the share of each pool that has.
+		Share      float64            `json:"share"`
+		PoolShares map[string]float64 `json:"pool_shares,omitempty"`
 	}
 	out := []org{}
 	for _, o := range os {
 		if p.orgView(o.Name) {
-			out = append(out, org{o, s.cfg.OrgShare(o.Name)})
+			x := org{Org: o, Share: s.cfg.OrgShare(o.Name)}
+			for _, pn := range s.cfg.PoolsWithShares() {
+				if x.PoolShares == nil {
+					x.PoolShares = map[string]float64{}
+				}
+				x.PoolShares[pn] = s.cfg.PoolShare(pn, o.Name)
+			}
+			out = append(out, x)
 		}
 	}
 	writeJSON(w, http.StatusOK, out)

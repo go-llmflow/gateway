@@ -25,6 +25,11 @@ type EnergyInterval struct {
 	TotalMJ, IdleMJ int64
 	GPUs, Resets    int
 	Gap             bool
+	// Pool is the pool the node's GPUs belong to: the idle energy of the
+	// interval is allocated by THAT pool's shares. Empty for an interval
+	// stored before per-pool shares or from a node serving several pools: the
+	// organisations' shares apply.
+	Pool string
 }
 
 // EnergyCell is the active energy of a consumer on a UTC day.
@@ -34,10 +39,12 @@ type EnergyCell struct {
 	MJ int64
 }
 
-// EnergyIdle is the unattributed energy of a UTC day.
+// EnergyIdle is the unattributed energy of a UTC day on a pool's nodes
+// (Pool "": see EnergyInterval).
 type EnergyIdle struct {
-	Day string
-	MJ  int64
+	Day  string
+	Pool string
+	MJ   int64
 }
 
 // EnergyStore keeps measured energy. Memory and Postgres implement it.
@@ -177,12 +184,12 @@ func (m *Memory) EnergyBetween(ctx context.Context, from, to time.Time) ([]Energ
 		}
 		cells[ck{day(c.start), c.Consumer}] += c.MJ
 	}
-	idle := map[string]int64{}
+	idle := map[[2]string]int64{}
 	for _, iv := range m.en.ivs {
 		if iv.Start.Before(from) || !iv.Start.Before(to) {
 			continue
 		}
-		idle[day(iv.Start)] += iv.IdleMJ
+		idle[[2]string{day(iv.Start), iv.Pool}] += iv.IdleMJ
 	}
 	var oc []EnergyCell
 	for k, v := range cells {
@@ -198,12 +205,17 @@ func (m *Memory) EnergyBetween(ctx context.Context, from, to time.Time) ([]Energ
 	return oc, sortIdle(idle), nil
 }
 
-func sortIdle(m map[string]int64) []EnergyIdle {
+func sortIdle(m map[[2]string]int64) []EnergyIdle {
 	out := make([]EnergyIdle, 0, len(m))
-	for d, v := range m {
-		out = append(out, EnergyIdle{d, v})
+	for k, v := range m {
+		out = append(out, EnergyIdle{k[0], k[1], v})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Day < out[j].Day })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Day != out[j].Day {
+			return out[i].Day < out[j].Day
+		}
+		return out[i].Pool < out[j].Pool
+	})
 	return out
 }
 
@@ -242,6 +254,7 @@ CREATE TABLE IF NOT EXISTS llmflow_energy_active (
 	FOREIGN KEY (upstream, ts_start) REFERENCES llmflow_energy_intervals (upstream, ts_start) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS llmflow_energy_active_ts ON llmflow_energy_active (ts_start);
+ALTER TABLE llmflow_energy_intervals ADD COLUMN IF NOT EXISTS pool text NOT NULL DEFAULT '';
 `
 
 func (p *Postgres) WorkBetween(ctx context.Context, upstreams []string, from, to time.Time) ([]energy.Work, error) {
@@ -276,8 +289,8 @@ func (p *Postgres) SaveEnergy(ctx context.Context, iv EnergyInterval, active []e
 		if clash {
 			return ErrConflict
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO llmflow_energy_intervals (upstream, ts_start, ts_end, total_mj, idle_mj, gpus, resets, gap) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-			iv.Upstream, iv.Start.UTC(), iv.End.UTC(), iv.TotalMJ, iv.IdleMJ, iv.GPUs, iv.Resets, iv.Gap); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO llmflow_energy_intervals (upstream, ts_start, ts_end, total_mj, idle_mj, gpus, resets, gap, pool) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+			iv.Upstream, iv.Start.UTC(), iv.End.UTC(), iv.TotalMJ, iv.IdleMJ, iv.GPUs, iv.Resets, iv.Gap, iv.Pool); err != nil {
 			return err
 		}
 		for _, a := range active {
@@ -309,14 +322,14 @@ func (p *Postgres) EnergyBetween(ctx context.Context, from, to time.Time) ([]Ene
 		return nil, nil, err
 	}
 	rows, err = p.pool.Query(ctx, `
-		SELECT to_char(ts_start AT TIME ZONE 'UTC', 'YYYY-MM-DD'), sum(idle_mj)::bigint
-		FROM llmflow_energy_intervals WHERE ts_start >= $1 AND ts_start < $2 GROUP BY 1 ORDER BY 1`, from, to)
+		SELECT to_char(ts_start AT TIME ZONE 'UTC', 'YYYY-MM-DD'), pool, sum(idle_mj)::bigint
+		FROM llmflow_energy_intervals WHERE ts_start >= $1 AND ts_start < $2 GROUP BY 1, pool ORDER BY 1, pool`, from, to)
 	if err != nil {
 		return nil, nil, err
 	}
 	idle, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (EnergyIdle, error) {
 		var i EnergyIdle
-		err := r.Scan(&i.Day, &i.MJ)
+		err := r.Scan(&i.Day, &i.Pool, &i.MJ)
 		return i, err
 	})
 	return cells, idle, err

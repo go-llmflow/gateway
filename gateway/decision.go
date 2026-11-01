@@ -64,6 +64,18 @@ type partner struct {
 	KWh, KWhIdle, FluidsCost float64
 	// ActiveUsers of the period.
 	ActiveUsers int64
+	// Pools is the guarantee and the lending pool by pool, when there are
+	// several: each pool has its own apportionment (pool { shares }), so the
+	// partner's Share above is then the capacity-weighted mean of its shares
+	// of the pools, and Guaranteed the sum of the pools' guarantees.
+	Pools []partnerPool
+}
+
+// partnerPool is one partner's figures in one pool.
+type partnerPool struct {
+	Pool                                                                                      string
+	Share                                                                                     float64
+	Guaranteed, UsedInShare, Borrowed, BorrowedFromOthers, SelfServed, Lent, Net, Utilisation float64
 }
 
 // decisionData is a report's data.
@@ -160,6 +172,38 @@ func (s *Server) buildDecision(r *http.Request, p *principal, from, to time.Time
 			x.WaitInShare, x.WaitBorrowing = o.WaitInShare, o.WaitBorrow
 			if o.GuaranteedHours > 0 {
 				x.Utilisation = o.UsedInShare / o.GuaranteedHours
+			}
+		}
+		// Pool by pool, each against ITS apportionment. The partner's Share is
+		// then the capacity-weighted mean of its pool shares, when a pool has
+		// shares of its own (else the organisation's share, as before).
+		for _, pr := range res.Pools {
+			for _, o := range pr.Orgs {
+				if !visible(o.Org) {
+					continue
+				}
+				pp := partnerPool{Pool: pr.Pool, Share: s.cfg.PoolShare(pr.Pool, o.Org), Guaranteed: o.GuaranteedHours, UsedInShare: o.UsedInShare,
+					Borrowed: o.Borrowed, BorrowedFromOthers: o.BorrowedFromOthers, SelfServed: o.SelfServed, Lent: o.Lent, Net: o.Net}
+				if o.GuaranteedHours > 0 {
+					pp.Utilisation = o.UsedInShare / o.GuaranteedHours
+				}
+				x := get(o.Org)
+				x.Pools = append(x.Pools, pp)
+			}
+		}
+		if len(s.cfg.PoolsWithShares()) > 0 {
+			var capSum float64
+			for _, pl := range s.cfg.Pools {
+				capSum += float64(pl.Capacity)
+			}
+			if capSum > 0 {
+				for _, x := range byOrg {
+					w := 0.0
+					for _, pl := range s.cfg.Pools {
+						w += s.cfg.PoolShare(pl.Name, x.Org) * float64(pl.Capacity)
+					}
+					x.Share = w / capSum
+				}
 			}
 		}
 		if p.reportView() {
@@ -305,6 +349,27 @@ func writeDecisionXLSX(w io.Writer, d *decisionData) error {
 			num(x.WaitInShare.P50), num(x.WaitInShare.P95), num(x.WaitBorrowing.P50), num(x.WaitBorrowing.P95),
 			num(x.InShare.P50), num(x.InShare.P95), num(x.Borrowing.P50), num(x.Borrowing.P95), usersCell(x.ActiveUsers, d.MinUsers)); err != nil {
 			return err
+		}
+	}
+	// Pool by pool, when there are several: one row per (partner, pool), the
+	// Partners sheet holding the totals.
+	hasPools := false
+	for _, x := range d.Partners {
+		hasPools = hasPools || len(x.Pools) > 0
+	}
+	if hasPools {
+		ps, err := sheet("Pools", []float64{24, 18}, "Partner", "Pool", "Share of the pool", "Guaranteed (GPU-hours)", "Used in share (GPU-hours)",
+			"Borrowed (GPU-hours)", "Borrowed from others (GPU-hours)", "Lent (GPU-hours)", "Net lent (GPU-hours)", "Guarantee used")
+		if err != nil {
+			return err
+		}
+		for _, x := range d.Partners {
+			for _, pp := range x.Pools {
+				if err := ps.AppendRow(xlsx.String(x.Org), xlsx.String(pp.Pool), xlsx.Number(pp.Share).Format(xlsx.Percent(1)), num(pp.Guaranteed), num(pp.UsedInShare),
+					num(pp.Borrowed), num(pp.BorrowedFromOthers), num(pp.Lent), num(pp.Net), xlsx.Number(pp.Utilisation).Format(xlsx.Percent(1))); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	mx, err := sheet("Lending matrix", []float64{24, 24}, "Lender", "Borrower", "GPU-hours")
@@ -461,7 +526,12 @@ type partnerView struct {
 	ShareS, GuaranteedS, UsedS, BorrowedS, FromOthersS, SelfS, LentS, NetS string
 	UtilS, GPUS, PrevS, ChangeS, KWhS, KWhIdleS, CostS                     string
 	LatIn, LatBorrow, WaitIn, WaitBorrow, UsersS                           string
+	// PoolRows: the guarantee pool by pool, when there are several.
+	PoolRows []poolRowView
 }
+
+// poolRowView is one pool of a partner's page, as text.
+type poolRowView struct{ Pool, Share, Guaranteed, Used, Borrowed, Lent, Net, Util string }
 
 // adoptionRowView is a week or a model, counts as text ("suppressed" for a
 // small cell).
@@ -548,6 +618,11 @@ func (d *decisionData) view() decisionView {
 			KWhS: fmtNum(x.KWh), KWhIdleS: fmtNum(x.KWhIdle), CostS: cost, LatIn: latS(x.InShare), LatBorrow: latS(x.Borrowing),
 			WaitIn: latS(x.WaitInShare), WaitBorrow: latS(x.WaitBorrowing), UsersS: usersLabel(x.ActiveUsers, d.MinUsers),
 		})
+		pv := &v.Partners[len(v.Partners)-1]
+		for _, pp := range x.Pools {
+			pv.PoolRows = append(pv.PoolRows, poolRowView{pp.Pool, pctS(pp.Share), fmtNum(pp.Guaranteed), fmtNum(pp.UsedInShare), fmtNum(pp.Borrowed),
+				fmtNum(pp.Lent), fmtNum(pp.Net), pctS(pp.Utilisation)})
+		}
 	}
 	for _, c := range d.Matrix {
 		v.Matrix = append(v.Matrix, matrixView{c.Lender, c.Borrower, fmtNum(c.GPUHours)})
@@ -633,7 +708,12 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 <tr><td>Inference GPU-hours</td><td class="n">{{.GPUS}} ({{.ChangeS}})</td></tr>
 <tr><td>Requests</td><td class="n">{{.Requests}}</td></tr>
 </table>
-{{if $.HasFluids}}<h3>Fluids, on measured energy</h3>
+{{if .PoolRows}}<h3>Guarantee, pool by pool</h3>
+<p class="note">Each pool is apportioned by its own shares (the contribution to that machine): the guaranteed capacity of a pool is the partner's share of it times its C times the hours. The figures above are the totals over the pools.</p>
+<table><tr><th>Pool</th><th class="n">Share</th><th class="n">Guaranteed</th><th class="n">Used in share</th><th class="n">Borrowed</th><th class="n">Lent</th><th class="n">Net</th><th class="n">Guarantee used</th></tr>
+{{range .PoolRows}}<tr><td>{{.Pool}}</td><td class="n">{{.Share}}</td><td class="n">{{.Guaranteed}}</td><td class="n">{{.Used}}</td><td class="n">{{.Borrowed}}</td><td class="n">{{.Lent}}</td><td class="n">{{.Net}}</td><td class="n">{{.Util}}</td></tr>
+{{end}}</table>
+{{end}}{{if $.HasFluids}}<h3>Fluids, on measured energy</h3>
 <table>
 <tr><th>Item</th><th class="n">Value</th></tr>
 <tr><td>Energy (IT)</td><td class="n">{{.KWhS}} kWh</td></tr>

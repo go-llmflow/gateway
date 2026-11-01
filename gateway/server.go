@@ -217,19 +217,16 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 	if loc, err := time.LoadLocation(cfg.SoftQuotas.Timezone); err == nil {
 		s.softLoc = loc
 	}
-	shares := map[string]float64{}
 	// Shares, reservations and borrowing are per organisation: the
 	// institutions own the GPUs. The teams of an organisation draw on its
-	// reservation together.
-	for _, o := range cfg.Orgs {
-		shares[o.Name] = o.Share
-	}
+	// reservation together. A pool has the shares of its own (pool { shares })
+	// or, without, the organisations' (config.PoolShares).
 	for _, p := range cfg.Pools {
-		s.pools[p.Name] = localPool{fairshare.NewPool(p.Name, p.Capacity, shares, cfg.FairShare.HalfLife, s.now)}
+		s.pools[p.Name] = localPool{fairshare.NewPool(p.Name, p.Capacity, cfg.PoolShares(p.Name), cfg.FairShare.HalfLife, s.now)}
 		s.porder = append(s.porder, p.Name)
 	}
 	if cfg.HA != nil {
-		if err := s.buildHA(shares); err != nil {
+		if err := s.buildHA(); err != nil {
 			return nil, err
 		}
 	}

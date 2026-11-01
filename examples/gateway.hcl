@@ -75,9 +75,11 @@ health {
   path     = "/health"
 }
 
-# Organisations (institutions) hold the shares of every pool, like the top
-# accounts of a Slurm account tree. Teams (labs) sit under them; more teams
-# and their projects can be created through the admin API.
+# Organisations (institutions) hold the shares of every pool that has no
+# shares of its own (see examples/two-machines.hcl for a pool apportioned
+# differently), like the top accounts of a Slurm account tree. Teams (labs)
+# sit under them; more teams and their projects can be created through the
+# admin API.
 org "etabA" {
   share = 0.8125 # 26 of 32 GPUs
   team "lab-nlp" {}

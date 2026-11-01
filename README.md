@@ -93,6 +93,9 @@ apportioning C over the shares with the largest-remainder (Hamilton) method:
 largest fractional parts. Reservations never sum to more than C (C = 256 gives
 A 208 and B 48; C = 10 gives 8 and 2).
 
+A pool may have shares of its own ([Per-pool shares](#per-pool-shares)); the
+reservations of a pool are always computed from ITS shares.
+
 For every request:
 
 | situation | priority sent to vLLM |
@@ -107,6 +110,87 @@ The test counts within-share requests in flight, not all requests: a team whose
 clients keep more requests in flight than its reservation would otherwise never
 drop below it again, and everything it sends would borrow (the simulator showed
 B getting 4 % instead of 18.75 % with that rule).
+
+### Per-pool shares
+
+Two machines bought by different institutions are not apportioned alike: the
+four B300 servers of the partners and, say, a machine with 8 RTX 6000 GPUs paid
+for by three institutions in the proportions of their contributions.
+
+```hcl
+org "etabA" { share = 0.5  team "lab-nlp" {} }     # the B300 split
+org "etabB" { share = 0.25 team "lab-chem" {} }
+org "etabC" { share = 0.25 team "lab-vision" {} }
+org "etabD" { share = 0    team "lab-bio" {} }
+
+pool "b300" { capacity = 256 }                     # no shares: the organisations' shares above
+pool "rtx6000" {
+  capacity = 64
+  shares   = { etabA = 0.5, etabC = 0.3, etabD = 0.2 }   # what each paid for THIS machine
+  borrow   = "shareholders"                              # or "all" (default)
+}
+```
+
+- A pool without `shares` keeps the organisations' shares: a configuration
+  written before this feature means what it meant. With `shares`, the check is
+  the one of the organisations' shares: every name is a declared organisation,
+  each share is in 0..1, the sum is at most 1 (a machine not fully allocated is
+  allowed). An organisation absent from a pool's `shares` has a reservation of 0
+  there. `examples/two-machines.hcl` is parsed by the tests and `check-config`.
+- The reservations of the example, C = 64: quotas 32 / 19.2 / 12.8, the floors
+  give 32 + 19 + 12 and the last slot goes to the largest remainder: A 32, C 19,
+  D 13, B 0. The B300 keeps A 128, B 64, C 64.
+- **`borrow = "all"` (default)** lends idle capacity to anyone, at borrowing
+  priority behind every shareholder's within-share request: today's behaviour,
+  and the one the use case asks for ("may borrow GPUs that are free"); an
+  organisation that holds no share is a pure borrower, preempted first.
+  **`borrow = "shareholders"`** lends only to the pool's contributors (a share
+  above 0); the others get **403** `permission_error` before anything is held or
+  spent, and a model of that pool is skipped as a fallback target for them. It is
+  403 and not 429 because retrying cannot help: the organisation is not entitled
+  to the machine, whatever its load.
+- Everything that read "the organisation's share" now reads the pool's: the
+  integer reservations and the Fair-Tree order of borrowers (package `fairshare`
+  already takes its shares per pool), the owner's reservations under `ha`, the
+  lending report and the decision report (a row per partner and pool, the
+  partner's line being the totals; the partner's `Share` is the capacity-weighted
+  mean of its pool shares when a pool has shares of its own), fluids, chargeback
+  (through the fluids allocation) and the profiles' oversubscription capacity.
+  The soft-quota and workday calibration use no organisation share.
+- **Fluids.** The idle energy of an interval is stored with the pool the DCGM
+  node belongs to (`llmflow_energy_intervals.pool`, added in place) and is
+  allocated by THAT pool's shares (by usage: by what the organisations used in
+  that pool), spread over the organisation's cells of the pool. The idle energy
+  of pools without shares of their own, and of intervals stored before this
+  release, is allocated as it was: by the organisations' shares or total usage.
+  A DCGM exporter serving models of two pools, one of which has its own shares,
+  is refused by `check-config` (a node belongs to one pool).
+- **Mixed versions under `ha`.** The pool's owner decides the apportionment, so
+  a replica from before this feature that owns a pool with shares of its own
+  would silently use the organisations' shares. The owner's published
+  reservations now carry `@own` and `@fp` (a fingerprint of the shares they were
+  computed from) when the pool has shares of its own; a replica whose pool has
+  them refuses to follow an owner that publishes neither, or another
+  fingerprint: requests to that pool answer 503 naming the cause until every
+  replica runs the same version and configuration, and the replica logs an
+  error. Upgrade the replicas before adding `shares` to a pool.
+- Reports with several pools: `GET /admin/lending` has a `pools` array (a
+  `LendingRow` list and matrix per pool, each guarantee against the pool's own
+  apportionment; `orgs` stays the total per organisation), the CSV a last column
+  `pool` (`*` for the total, then one row per pool), and the decision report a
+  "Guarantee, pool by pool" table per partner and a `Pools` sheet. With one pool
+  the outputs are unchanged. The quota tables do not split by pool, so the
+  small-cell and secondary suppression are those of the quota section.
+- Slurm's own model, as far as the pages opened on 2026-11-01 say: a share
+  ("Raw Shares: The raw shares assigned to the user or account") belongs to an
+  association; `sshare` reports "Partitions and accumulated currently running
+  TRES-minutes for each association", `-m` prints the names of "association
+  based partitions" and `-M` selects the cluster
+  (`slurm.schedmd.com/sshare.html`). Fair Tree ranks the siblings of one
+  association tree and says nothing of partitions (`fair_tree.html`). The
+  gateway's pool plays the partition's role, and each pool has its tree: its own
+  shares. The pages do not describe how Slurm combines partition-specific
+  associations, so none of that is copied.
 
 ### Ordering borrowers: Slurm Fair Tree
 
@@ -324,8 +408,8 @@ model "llama-3.3-70b" {
 
 | block / attribute | meaning |
 |---|---|
-| `org "<name>" { share, team "<name>" {} … }` | an organisation (institution) with the fraction of every pool reserved for it (sum ≤ 1) and the teams (labs) declared under it; team names are global |
-| `pool "<name>" { capacity }` | C, sustainable concurrency of the pool (1..1048576) |
+| `org "<name>" { share, team "<name>" {} … }` | an organisation (institution) with the fraction of every pool that has no `shares` of its own reserved for it (sum ≤ 1) and the teams (labs) declared under it; team names are global |
+| `pool "<name>" { capacity, shares, borrow }` | C, sustainable concurrency of the pool (1..1048576). `shares = { org = fraction, … }` apportions THIS pool among the organisations (see [Per-pool shares](#per-pool-shares)); without it the organisations' `share` applies |
 | `model "<name>" { … }` | client model name → `upstream_model`, `pool`, `class` (`interactive` / `batch`), `key_file`, `cost { input_per_mtok, output_per_mtok, cached_per_mtok, unit, price_date }` per million tokens, in GPU-hours unless `unit` names a currency (see [Cost units](#cost-units-since-v0120)), and `upstream "<name>" { base_url, key_file }` blocks |
 | `store { … }` | `kind` (`memory` / `postgres`), `dsn_file`, `spool_dir` (required with postgres, see [Durable accounting](#durable-accounting)), `spool_max_bytes` (default 256 MiB), `fail_closed` (default true), `queue_size`, `batch_size` |
 | `fairshare { half_life }` | usage decay half-life (default `"168h"`) |

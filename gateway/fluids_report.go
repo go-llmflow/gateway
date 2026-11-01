@@ -96,15 +96,24 @@ func (c fluidsCell) dim(d string) string {
 // spreads it over their cells. The sum of ActiveMJ+IdleMJ over the result is
 // exactly the measured energy of the input.
 func allocateFluids(cells []store.EnergyCell, idle []store.EnergyIdle, f *config.Fluids, shares map[string]float64) ([]fluidsCell, error) {
-	return allocateFluidsBasis(cells, idle, f, shares, nil)
+	return allocateFluidsPools(cells, idle, f, func(string) map[string]float64 { return shares }, func(string) bool { return false }, nil)
 }
 
-// allocateFluidsBasis is allocateFluids with the usage by_usage allocates on
-// given per month and organisation (millijoules of active energy over the
-// WHOLE month): a report over part of a month then splits that part's idle
-// energy as the month's report would, and the parts of a month add up to it.
-// A month absent from basis uses the cells given.
-func allocateFluidsBasis(cells []store.EnergyCell, idle []store.EnergyIdle, f *config.Fluids, shares map[string]float64, basis map[string]map[string]float64) ([]fluidsCell, error) {
+// allocateFluidsPools is allocateFluids with the shares of each pool: the idle
+// energy of a pool's nodes goes by THAT pool's shares (sharesOf(pool)), and,
+// with idle_energy = "by_usage", by what the organisations used in that pool.
+// Idle energy of no known pool (pool "": an interval stored before per-pool
+// shares, or from a node serving several pools) goes by sharesOf("") and the
+// usage of all the pools. The idle energy of a pool is spread over the
+// organisations' cells of THAT pool (their cells of the month, if they have
+// none there), so the pool dimension of the report carries it.
+//
+// basis gives, per month, pool and organisation, the usage by_usage allocates
+// on (millijoules of active energy over the WHOLE month; the pool key "" is
+// the usage over all the pools): a report over part of a month then splits
+// that part's idle energy as the month's report would, and the parts of a
+// month add up to it. A month absent from basis uses the cells given.
+func allocateFluidsPools(cells []store.EnergyCell, idle []store.EnergyIdle, f *config.Fluids, sharesOf func(pool string) map[string]float64, own func(pool string) bool, basis map[string]map[string]map[string]float64) ([]fluidsCell, error) {
 	var out []fluidsCell
 	byMonth := map[string][]int{} // month → indices into out
 	for _, c := range cells {
@@ -113,27 +122,36 @@ func allocateFluidsBasis(cells []store.EnergyCell, idle []store.EnergyIdle, f *c
 			byMonth[c.Day[:7]] = append(byMonth[c.Day[:7]], len(out)-1)
 		}
 	}
-	idleOf := map[string]int64{}
+	type mp struct{ month, pool string }
+	idleOf := map[mp]int64{}
 	for _, i := range idle {
 		if len(i.Day) >= 7 {
-			idleOf[i.Day[:7]] += i.MJ
+			idleOf[mp{i.Day[:7], i.Pool}] += i.MJ
 		}
 	}
-	months := make([]string, 0, len(idleOf))
-	for m := range idleOf {
-		months = append(months, m)
+	keys := make([]mp, 0, len(idleOf))
+	for k := range idleOf {
+		keys = append(keys, k)
 	}
-	sort.Strings(months)
-	for _, m := range months {
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].month != keys[j].month {
+			return keys[i].month < keys[j].month
+		}
+		return keys[i].pool < keys[j].pool
+	})
+	for _, k := range keys {
+		m, pool := k.month, k.pool
 		usage := map[string]float64{}
-		if b, ok := basis[m]; ok {
+		if b, ok := basis[m][pool]; ok {
 			usage = b
 		} else {
 			for _, i := range byMonth[m] {
-				usage[out[i].Org] += float64(out[i].ActiveMJ)
+				if pool == "" || out[i].Pool == pool {
+					usage[out[i].Org] += float64(out[i].ActiveMJ)
+				}
 			}
 		}
-		alloc, err := energy.AllocateIdle(idleOf[m], f.IdleEnergy, shares, usage)
+		alloc, err := energy.AllocateIdle(idleOf[k], f.IdleEnergy, sharesOf(pool), usage)
 		if err != nil {
 			return nil, err
 		}
@@ -145,10 +163,23 @@ func allocateFluidsBasis(cells []store.EnergyCell, idle []store.EnergyIdle, f *c
 		for _, o := range orgs {
 			var idx []int
 			var ws []float64
-			for _, i := range byMonth[m] {
-				if out[i].Org == o {
+			// The organisation's cells of this pool; for the idle energy of no
+			// pool of its own, its cells in the pools that have no shares of
+			// their own; else its cells of the month.
+			for _, narrow := range []bool{true, false} {
+				for _, i := range byMonth[m] {
+					c := out[i]
+					if c.Org != o {
+						continue
+					}
+					if narrow && (pool != "" && c.Pool != pool || pool == "" && own(c.Pool)) {
+						continue
+					}
 					idx = append(idx, i)
-					ws = append(ws, float64(out[i].ActiveMJ))
+					ws = append(ws, float64(c.ActiveMJ))
+				}
+				if len(idx) > 0 {
+					break
 				}
 			}
 			parts := energy.Apportion(alloc[o], ws)
@@ -157,11 +188,11 @@ func allocateFluidsBasis(cells []store.EnergyCell, idle []store.EnergyIdle, f *c
 				if o == "" {
 					name = Unallocated
 				}
-				out = append(out, fluidsCell{Day: m + "-01", Consumer: energy.Consumer{Org: name}, IdleMJ: alloc[o]})
+				out = append(out, fluidsCell{Day: m + "-01", Consumer: energy.Consumer{Org: name, Pool: pool}, IdleMJ: alloc[o]})
 				continue
 			}
-			for k, i := range idx {
-				out[i].IdleMJ += parts[k]
+			for j, i := range idx {
+				out[i].IdleMJ += parts[j]
 			}
 		}
 	}
@@ -269,13 +300,12 @@ func (p *principal) anyOrgView() bool {
 	return false
 }
 
-func (s *Server) orgShares() map[string]float64 {
-	m := map[string]float64{}
-	for _, o := range s.cfg.Orgs {
-		m[o.Name] = o.Share
-	}
-	return m
-}
+// orgShares are the organisations' own shares (a pool without shares of its
+// own, idle energy of no known pool).
+func (s *Server) orgShares() map[string]float64 { return s.cfg.PoolShares("") }
+
+// poolShares are the shares of a pool: its own, else the organisations'.
+func (s *Server) poolShares(pool string) map[string]float64 { return s.cfg.PoolShares(pool) }
 
 // allocatedEnergy reads the energy of [from, to) and allocates its idle part.
 // With idle_energy = "by_usage" the weights are the organisations' energy over
@@ -288,9 +318,9 @@ func (s *Server) allocatedEnergy(ctx context.Context, es store.EnergyStore, from
 	if err != nil {
 		return nil, err
 	}
-	var basis map[string]map[string]float64
+	var basis map[string]map[string]map[string]float64
 	if f.IdleEnergy == energy.IdleByUsage {
-		basis = map[string]map[string]float64{}
+		basis = map[string]map[string]map[string]float64{}
 		for ms := time.Date(from.UTC().Year(), from.UTC().Month(), 1, 0, 0, 0, 0, time.UTC); ms.Before(to); ms = ms.AddDate(0, 1, 0) {
 			me := ms.AddDate(0, 1, 0)
 			if !from.After(ms) && !to.Before(me) {
@@ -300,14 +330,26 @@ func (s *Server) allocatedEnergy(ctx context.Context, es store.EnergyStore, from
 			if err != nil {
 				return nil, err
 			}
-			u := map[string]float64{}
+			u := map[string]map[string]float64{"": {}}
 			for _, c := range mc {
-				u[c.Org] += float64(c.MJ)
+				u[""][c.Org] += float64(c.MJ)
+				if u[c.Pool] == nil {
+					u[c.Pool] = map[string]float64{}
+				}
+				u[c.Pool][c.Org] += float64(c.MJ)
 			}
 			basis[ms.Format("2006-01")] = u
 		}
 	}
-	return allocateFluidsBasis(cells, idle, f, s.orgShares(), basis)
+	// Only a pool with shares of its own is allocated apart: the idle energy of
+	// the others is allocated together, by the organisations' shares and what
+	// they used in all of them, as before per-pool shares.
+	for i := range idle {
+		if !s.cfg.HasPoolShares(idle[i].Pool) {
+			idle[i].Pool = ""
+		}
+	}
+	return allocateFluidsPools(cells, idle, f, s.poolShares, s.cfg.HasPoolShares, basis)
 }
 
 // fluidsData computes the visible rows of the fluids report, with GPU-hours

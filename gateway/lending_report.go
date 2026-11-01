@@ -52,12 +52,47 @@ type LendingCell struct {
 	GPUHours float64 `json:"gpu_hours"`
 }
 
+// LendingPool is one pool of the lending report, when there are several: the
+// same rows and matrix as the totals, for this pool alone, whose guarantee is
+// the pool's own apportionment.
+type LendingPool struct {
+	Pool   string        `json:"pool"`
+	Orgs   []LendingRow  `json:"orgs"`
+	Matrix []LendingCell `json:"matrix"`
+}
+
+// lendingPoolRows turns the per-pool results into rows; the matrix only for
+// the readers of the whole platform.
+func lendingPoolRows(res *lending.Result, visible func(string) bool, matrix bool) []LendingPool {
+	var out []LendingPool
+	for _, pr := range res.Pools {
+		lp := LendingPool{Pool: pr.Pool, Orgs: lendingRows(&lending.Result{Orgs: pr.Orgs}, visible), Matrix: []LendingCell{}}
+		if lp.Orgs == nil {
+			lp.Orgs = []LendingRow{}
+		}
+		if matrix {
+			for l, m := range pr.Matrix {
+				for b, v := range m {
+					lp.Matrix = append(lp.Matrix, LendingCell{l, b, v})
+				}
+			}
+			sort.Slice(lp.Matrix, func(i, j int) bool {
+				if lp.Matrix[i].Lender != lp.Matrix[j].Lender {
+					return lp.Matrix[i].Lender < lp.Matrix[j].Lender
+				}
+				return lp.Matrix[i].Borrower < lp.Matrix[j].Borrower
+			})
+		}
+		out = append(out, lp)
+	}
+	return out
+}
+
 // lendingPools describes the pools as they were over [from, to): the shares
 // of the organisations and the history of each pool's C. A pool fed by Slurm
 // jobs is configured with capacity 0 and a C that follows its instances;
 // reading the configuration alone would give it no guarantee at all (#108).
 func (s *Server) lendingPools(ctx context.Context, from, to time.Time) ([]lending.Pool, error) {
-	shares := s.orgShares()
 	hist := map[string][]lending.CapPoint{}
 	if cs, ok := s.st.(store.CapacityStore); ok {
 		pts, err := cs.CapacityBetween(ctx, from, to)
@@ -70,7 +105,9 @@ func (s *Server) lendingPools(ctx context.Context, from, to time.Time) ([]lendin
 	}
 	var ps []lending.Pool
 	for _, p := range s.cfg.Pools {
-		ps = append(ps, lending.Pool{Name: p.Name, Capacity: p.Capacity, Timeline: hist[p.Name], Shares: shares})
+		// Each pool's guarantee is computed from ITS shares (its own, else the
+		// organisations').
+		ps = append(ps, lending.Pool{Name: p.Name, Capacity: p.Capacity, Timeline: hist[p.Name], Shares: s.cfg.PoolShares(p.Name)})
 	}
 	return ps, nil
 }
@@ -157,15 +194,35 @@ func (s *Server) lendingReport(w http.ResponseWriter, r *http.Request, p *princi
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		cw := csv.NewWriter(w)
 		f := func(v float64) string { return strconv.FormatFloat(v, 'f', 6, 64) }
-		_ = cw.Write([]string{"from", "to", "org", "guaranteed_gpu_hours", "used_in_share_gpu_hours", "borrowed_gpu_hours", "borrowed_from_others_gpu_hours",
+		header := []string{"from", "to", "org", "guaranteed_gpu_hours", "used_in_share_gpu_hours", "borrowed_gpu_hours", "borrowed_from_others_gpu_hours",
 			"borrowed_self_served_gpu_hours", "lent_gpu_hours", "net_lent_gpu_hours", "guarantee_utilisation",
 			"p50_wait_in_share_ms", "p95_wait_in_share_ms", "p50_wait_borrowing_ms", "p95_wait_borrowing_ms",
-			"p50_latency_in_share_ms", "p95_latency_in_share_ms", "p50_latency_borrowing_ms", "p95_latency_borrowing_ms"})
-		for _, x := range rows {
-			_ = cw.Write([]string{from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339), csvSafe(x.Org), f(x.GuaranteedHours), f(x.UsedInShare), f(x.Borrowed),
+			"p50_latency_in_share_ms", "p95_latency_in_share_ms", "p50_latency_borrowing_ms", "p95_latency_borrowing_ms"}
+		// With several pools, a last column names the pool: "*" for the total of
+		// an organisation, then one row per organisation and pool. With one pool
+		// the file is what it was before per-pool shares.
+		pools := lendingPoolRows(res, visible, false)
+		if len(pools) > 0 {
+			header = append(header, "pool")
+		}
+		_ = cw.Write(header)
+		row := func(x LendingRow, pool string) {
+			rec := []string{from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339), csvSafe(x.Org), f(x.GuaranteedHours), f(x.UsedInShare), f(x.Borrowed),
 				f(x.BorrowedFromOthers), f(x.SelfServed), f(x.Lent), f(x.Net), f(x.Utilisation),
 				f(x.WaitInShare.P50), f(x.WaitInShare.P95), f(x.WaitBorrowing.P50), f(x.WaitBorrowing.P95),
-				f(x.InShare.P50), f(x.InShare.P95), f(x.Borrowing.P50), f(x.Borrowing.P95)})
+				f(x.InShare.P50), f(x.InShare.P95), f(x.Borrowing.P50), f(x.Borrowing.P95)}
+			if len(pools) > 0 {
+				rec = append(rec, csvSafe(pool))
+			}
+			_ = cw.Write(rec)
+		}
+		for _, x := range rows {
+			row(x, "*")
+		}
+		for _, lp := range pools {
+			for _, x := range lp.Orgs {
+				row(x, lp.Pool)
+			}
 		}
 		cw.Flush()
 		return
@@ -180,6 +237,11 @@ func (s *Server) lendingReport(w http.ResponseWriter, r *http.Request, p *princi
 		"wait_note": "wait is the admission wait in the gateway's fair-share queue (arrival to grant); latency is arrival to end. The time a granted request spends in vLLM's own queue is not recorded."}
 	if p.reportView() {
 		out["unattributed_gpu_hours"] = res.Unattributed
+	}
+	// With several pools: the rows pool by pool (each pool's guarantee is its
+	// own apportionment); "orgs" stays the total per organisation.
+	if pr := lendingPoolRows(res, visible, p.reportView()); len(pr) > 0 {
+		out["pools"] = pr
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)

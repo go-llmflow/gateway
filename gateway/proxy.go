@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/fairshare"
+	"github.com/go-llmflow/gateway/ha"
 	"github.com/go-llmflow/gateway/openai"
 	"github.com/go-llmflow/gateway/store"
 	"go.opentelemetry.io/otel/attribute"
@@ -41,7 +42,7 @@ func (s *Server) nextFallback(ctx context.Context, ep openai.Endpoint, primary *
 		name := primary.cfg.Fallbacks[*idx]
 		*idx++
 		g := s.groups[name]
-		if g == nil || g.cfg.Class == config.Guard || !s.budget.modelAllowed(key.Team, name) {
+		if g == nil || g.cfg.Class == config.Guard || !s.budget.modelAllowed(key.Team, name) || !s.cfg.PoolAllows(g.cfg.Pool, key.Org) {
 			continue
 		}
 		target := g.cfg.UpstreamModel
@@ -193,6 +194,15 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
+		if !s.cfg.PoolAllows(g.cfg.Pool, key.Org) {
+			// The pool lends its idle capacity only to its shareholders
+			// (borrow = "shareholders"): refused before anything is held or
+			// spent on the request.
+			s.met.denied.add(1, key.Team, "pool_shareholders")
+			apiError(w, http.StatusForbidden, "permission_error",
+				"the GPU pool of this model lends its capacity only to the organisations that hold a share of it; organisation "+key.Org+" holds none")
+			return
+		}
 		if len(req.Stripped) > 0 {
 			s.log.Info("client fields stripped", "key", key.ID, "team", key.Team, "fields", strings.Join(req.Stripped, ","))
 		}
@@ -307,10 +317,15 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		promptEst := int64(len(out) / 4)
 		grant, aerr := g.pool.acquire(key.Org, g.class, promptEst+req.MaxTokens)
 		if aerr != nil {
-			// ha, on_owner_unreachable = "reject".
+			// ha, on_owner_unreachable = "reject"; or the owner decides with
+			// other shares than this pool's.
 			s.limiter.release(key.ID, 0)
 			s.met.denied.add(1, key.Team, "fairshare_owner")
-			apiError(w, http.StatusServiceUnavailable, "service_unavailable", errNoOwner.Error())
+			msg := errNoOwner.Error()
+			if errors.Is(aerr, ha.ErrSharesMismatch) {
+				msg = aerr.Error()
+			}
+			apiError(w, http.StatusServiceUnavailable, "service_unavailable", msg)
 			return
 		}
 		// The grant: the request holds its slot from here (the lending report

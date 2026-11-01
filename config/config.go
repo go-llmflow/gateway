@@ -582,6 +582,13 @@ func (c *Config) LabOf(team string) string {
 type Pool struct {
 	Name     string
 	Capacity int
+	// Shares is this pool's apportionment among the organisations (the
+	// financial contribution to THIS machine); nil: the organisations' own
+	// shares apply (backwards compatible). An organisation absent from a
+	// non-nil Shares holds 0 slots of the pool. See poolshares.go.
+	Shares map[string]float64
+	// Borrow is BorrowAll (default) or BorrowShareholders.
+	Borrow string
 }
 
 // Cost is the price of tokens per million, in Unit: GPU-hours ("") for a

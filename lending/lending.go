@@ -117,6 +117,19 @@ type Result struct {
 	// charged to.
 	Unattributed float64
 	Requests     int
+	// Pools is the same evidence pool by pool, when there are several: the
+	// guarantee of a pool is its own apportionment (Pool.Shares), and the
+	// totals above are the sums over the pools. Requests of a pool the
+	// configuration no longer has are in the totals only.
+	Pools []PoolResult
+}
+
+// PoolResult is the lending evidence of one pool.
+type PoolResult struct {
+	Pool         string
+	Orgs         []OrgStat
+	Matrix       map[string]map[string]float64
+	Unattributed float64
 }
 
 type event struct {
@@ -154,8 +167,31 @@ func (p Pool) capacityAt(t time.Time) int {
 	return max(c, 0)
 }
 
-// Compute builds the report of [from, to) from the requests that finished in it.
+// Compute builds the report of [from, to) from the requests that finished in
+// it: the totals over the pools and, with several pools, each pool's own
+// (Result.Pools).
 func Compute(from, to time.Time, pools []Pool, reqs []Req) (*Result, error) {
+	res, err := compute(from, to, pools, reqs)
+	if err != nil || len(pools) < 2 {
+		return res, err
+	}
+	for _, p := range pools {
+		var sub []Req
+		for _, r := range reqs {
+			if r.Pool == p.Name {
+				sub = append(sub, r)
+			}
+		}
+		pr, err := compute(from, to, []Pool{p}, sub)
+		if err != nil {
+			return nil, err
+		}
+		res.Pools = append(res.Pools, PoolResult{Pool: p.Name, Orgs: pr.Orgs, Matrix: pr.Matrix, Unattributed: pr.Unattributed})
+	}
+	return res, nil
+}
+
+func compute(from, to time.Time, pools []Pool, reqs []Req) (*Result, error) {
 	if len(reqs) > MaxRequests {
 		return nil, ErrTooMany
 	}
