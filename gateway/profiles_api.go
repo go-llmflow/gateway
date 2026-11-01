@@ -432,14 +432,13 @@ type orgCapacity struct {
 const capacityWindow = 7 * 24 * time.Hour
 
 // capacityOf computes, per unit with a workday, the workdays a week an
-// organisation's share of the pools serves: share × C × the measured cost
+// organisation's share of the pools serves: Σ pools share(pool) × C × the measured cost
 // per slot-hour × 168 h ÷ workday. A pool without measured load counts as
 // unmeasured: the result is then nil with the reason, never a guess.
 func capacityOf(cfg *config.Config, org string, loads []store.PoolLoad, wds map[string]workdayValue) map[string]struct {
 	days *float64
 	note string
 } {
-	share := cfg.OrgShare(org)
 	cap := map[string]int{}
 	for _, p := range cfg.Pools {
 		cap[p.Name] = p.Capacity
@@ -471,7 +470,9 @@ func capacityOf(cfg *config.Config, org string, loads []store.PoolLoad, wds map[
 				continue
 			}
 			perSlotHour := l.Cost / (l.BusySeconds / 3600)
-			total += share * float64(cap[p.Name]) * perSlotHour * 168 / wd.Amount
+			// The organisation's share of THIS pool (its own shares, else the
+			// organisations').
+			total += cfg.PoolShare(p.Name, org) * float64(cap[p.Name]) * perSlotHour * 168 / wd.Amount
 			measured++
 		}
 		v := struct {

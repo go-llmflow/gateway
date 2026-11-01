@@ -25,9 +25,15 @@ import (
 
 // energyNode is one DCGM exporter.
 type energyNode struct {
-	key     string   // the interval's "upstream" in the store: scheme://host of the exporter
-	url     string   // the exporter's URL
-	labels  []string // the upstream labels of the records served on this node
+	key    string   // the interval's "upstream" in the store: scheme://host of the exporter
+	url    string   // the exporter's URL
+	labels []string // the upstream labels of the records served on this node
+	// pool is the pool the node's GPUs belong to (the models served on it):
+	// its idle energy is allocated by that pool's shares. "" when the models
+	// of the node belong to several pools (config refuses that when one of
+	// them has shares of its own): the organisations' shares apply.
+	pool    string
+	mixed   bool
 	meter   energy.Meter
 	pending []energy.Interval // measured, waiting for the accounting to settle
 }
@@ -43,10 +49,12 @@ func energyNodes(cfg *config.Config) []*energyNode {
 			}
 			n := by[u.DcgmURL]
 			if n == nil {
-				n = &energyNode{key: redactURL(u.DcgmURL), url: u.DcgmURL}
+				n = &energyNode{key: redactURL(u.DcgmURL), url: u.DcgmURL, pool: g.Pool}
 				n.meter.MaxGap = 3 * cfg.Fluids.Interval
 				by[u.DcgmURL] = n
 				nodes = append(nodes, n)
+			} else if n.pool != g.Pool {
+				n.mixed, n.pool = true, ""
 			}
 			if l := redactURL(u.BaseURL); !slices.Contains(n.labels, l) {
 				n.labels = append(n.labels, l)
@@ -59,12 +67,12 @@ func energyNodes(cfg *config.Config) []*energyNode {
 // attributeInterval splits one measured interval: its active energy between
 // the consumers by weighted work, the rest (idle, and active energy of an
 // interval without work) stays whole. The parts sum to the measured energy.
-func attributeInterval(upstream string, iv energy.Interval, work []energy.Work, f *config.Fluids) (store.EnergyInterval, []energy.Attributed) {
+func attributeInterval(upstream, pool string, iv energy.Interval, work []energy.Work, f *config.Fluids) (store.EnergyInterval, []energy.Attributed) {
 	active, idle := iv.SplitIdle(f.IdleWatts)
 	att, left := energy.AttributeActive(active, work, f.Weights())
 	return store.EnergyInterval{
 		Upstream: upstream, Start: iv.Start, End: iv.End, TotalMJ: iv.MJ, IdleMJ: idle + left,
-		GPUs: len(iv.PerGPU), Resets: iv.Resets, Gap: iv.Gap,
+		GPUs: len(iv.PerGPU), Resets: iv.Resets, Gap: iv.Gap, Pool: pool,
 	}, att
 }
 
@@ -129,7 +137,7 @@ func (s *Server) fluidsRound(ctx context.Context, es store.EnergyStore, nodes []
 				s.log.Error("fluids: reading the work of an interval failed; will retry", "node", n.key, "err", err)
 				break
 			}
-			ei, att := attributeInterval(n.key, iv, work, f)
+			ei, att := attributeInterval(n.key, n.pool, iv, work, f)
 			switch err := es.SaveEnergy(ctx, ei, att); {
 			case err == nil, errors.Is(err, store.ErrConflict): // stored by another replica
 			default:
