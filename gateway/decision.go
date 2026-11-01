@@ -25,7 +25,7 @@ import (
 // (guaranteed share against use, borrowed and lent GPU-hours, fluids, latency
 // in share against borrowing, adoption, cost centre), then the details (the
 // lending matrix, fluids, adoption, chargeback rows) and charts drawn with
-// go-plot. PDF is typeset by go-pdfkit/html2pdf (v0.3.0): A4 pages, page
+// go-plot. PDF is typeset by go-pdfkit/html2pdf (v0.4.0): A4 pages, page
 // numbers in the margin, a table of contents whose page numbers come from
 // CSS target-counter. XLSX carries the same figures as typed cells, one
 // column per unit.
@@ -709,13 +709,26 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 </body></html>
 `))
 
+// decisionPDFOptions are the options the report is typeset with. Fetch is
+// html2pdf.Offline: the report has no sub-resource but data: URLs, so the
+// renderer makes no network request at all. The names in the report are
+// escaped (decisionTmpl); this is the second barrier, so that a name which
+// somehow became markup could still not make the gateway fetch a URL from
+// inside the site's network.
+func decisionPDFOptions(d *decisionData) html2pdf.Options {
+	return html2pdf.Options{
+		Title: "Decision report " + d.From.UTC().Format("2006-01-02"),
+		Fetch: html2pdf.Offline,
+	}
+}
+
 // writeDecisionPDF typesets the report.
 func writeDecisionPDF(w io.Writer, d *decisionData) error {
 	var src bytes.Buffer
 	if err := decisionTmpl.Execute(&src, d.view()); err != nil {
 		return err
 	}
-	doc, err := html2pdf.Export(src.String(), html2pdf.Options{Title: "Decision report " + d.From.UTC().Format("2006-01-02")})
+	doc, err := html2pdf.Export(src.String(), decisionPDFOptions(d))
 	if err != nil {
 		return err
 	}

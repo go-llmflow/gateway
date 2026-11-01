@@ -1264,7 +1264,7 @@ profile lookup and a handful of in-memory reads per request (`usageHeaders`).
 for a period (at most 366 days) into the document a partnership's steering
 committee reads:
 
-- **PDF**, typeset by `go-pdfkit/html2pdf` v0.3.0: A4, page numbers in the
+- **PDF**, typeset by `go-pdfkit/html2pdf` v0.4.0: A4, page numbers in the
   margin (`counter(page)`), a table of contents whose page numbers come from CSS
   `target-counter`, then **one page per partner** (guaranteed capacity, use in
   share, borrowed and lent GPU-hours, net balance, inference GPU-hours against the
@@ -1276,6 +1276,19 @@ committee reads:
 - **json**: the same data. Proxy roles and `finance_viewer` read every partner and
   the matrix; `org_admin` and org-level viewers their own partner only. Every
   download is audited.
+
+Security note on the PDF: the HTML engine can fetch sub-resources (stylesheets,
+images), and the report carries names an organisation administrator sets
+(partner, cost centre, lab, profile). Two barriers keep such a name from making
+the gateway send a request from inside the site's network. First, every name is
+escaped by the template (`TestDecisionHTMLGolden`). Second, the PDF is typeset
+with `html2pdf.Offline` (html2pdf v0.4.0): the renderer makes **no network
+request at all**, so even a name that became markup would fetch nothing, and a
+`file:` URL is never read. The report needs no external resource (its charts are
+inline SVG). `TestDecisionPDFFetchesNothing` renders a report full of hostile
+names and `TestDecisionPDFOptionsAreOffline` hands a raw `<link>` and `<img>` to
+the gateway's own options; a loopback server receives zero requests in both,
+and a control with the default fetcher shows that the test can see a fetch.
 
 Scheduled delivery:
 
