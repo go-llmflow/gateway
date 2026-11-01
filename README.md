@@ -2325,15 +2325,20 @@ whose files hold the same key at start-up.
 (`eu.anthropic…`) to keep inference in the EU regions the profile lists; a
 geographic profile may route to another region of its geography, and with
 cross-region inference "retained inputs and outputs are stored in destination
-Regions". **Retention is not "none" by default.** The issue behind this feature
-quoted "Amazon Bedrock doesn't store any text, images, or documents that you
-provide as content"; that sentence is not on the data protection, data retention
-or prompt caching pages opened on 2026-10-31. What the data retention page says
-is that retention is a per-region, per-account mode (`none`, `default`,
+Regions". **Two AWS pages say different things, and both are quoted here.** The
+Converse API reference (docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html,
+opened 2026-11-01) says "Amazon Bedrock doesn't store any text, images, or
+documents that you provide as content. The data is only used to generate the
+response." The data retention page of the user guide (opened 2026-10-31) says
+that retention is a per-region, per-account mode (`none`, `default`,
 `aws_review`), that under `default` "data may be retained for abuse detection
-purposes", that models requiring `aws_review` keep prompts and completions "within
-the AWS boundary for up to 30 days", and that the content is "not shared with the
-model provider". Set `none` where the model allows it, and decide with your DPO.
+purposes", that models requiring `aws_review` keep prompts and completions
+"within the AWS boundary for up to 30 days", and that the content is "not shared
+with the model provider". **Retention is therefore not "none" by default**,
+whatever the API reference's summary says. Set `none` where the model allows it,
+and decide with your DPO. (An earlier version of this section said the API
+reference sentence did not exist: it does; only the user-guide pages had been
+checked.)
 
 **Performance.** `BenchmarkBedrockPrepare` (body, URL and SigV4 signature of a
 4 KiB prompt), `BenchmarkBedrockSign` and `BenchmarkBedrockStream` (200 chunks to
