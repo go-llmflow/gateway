@@ -174,6 +174,10 @@ func (f *fakeBedrock) serve(w http.ResponseWriter, r *http.Request) {
 		jsonErr(status, bad)
 		return
 	}
+	if strings.HasSuffix(r.URL.Path, "/converse") || strings.HasSuffix(r.URL.Path, "/converse-stream") {
+		f.serveConverse(w, r, raw, body, mode, usage, jsonErr)
+		return
+	}
 	stream := strings.HasSuffix(r.URL.Path, "/invoke-with-response-stream")
 	if !stream && !strings.HasSuffix(r.URL.Path, "/invoke") || !strings.HasPrefix(r.URL.Path, "/model/") {
 		jsonErr(404, "no such operation")

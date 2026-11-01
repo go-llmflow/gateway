@@ -180,6 +180,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				} else if !conv && ep != openai.Messages {
 					return "", errBedrockInvokeEndpoint
 				}
+				return g.cfg.UpstreamModel, nil
 			}
 			if g.ext != nil && ep != openai.Messages && ep != openai.CountTokens {
 				return "", errExternalEndpoint

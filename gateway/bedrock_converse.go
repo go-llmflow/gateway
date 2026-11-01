@@ -129,6 +129,10 @@ func converseIngress(h http.Header, body []byte) ([]byte, error) {
 			return nil, errors.New(`"n" must be 1 on a Bedrock Converse model`)
 		}
 	}
+	// The mapping is checked now, before anything is held or spent.
+	if _, err := converseRequest(body); err != nil {
+		return nil, err
+	}
 	return body, nil
 }
 
@@ -263,8 +267,8 @@ func converseRequest(body []byte) ([]byte, error) {
 			return nil, fmt.Errorf("the message role %q cannot be mapped to Bedrock Converse", clipText(printable(msg.Role), 40))
 		}
 	}
-	if len(conv) == 0 {
-		return nil, errors.New("a conversation needs a user message")
+	if len(conv) == 0 || conv[0]["role"] != "user" {
+		return nil, errors.New("a conversation must start with a user message")
 	}
 	out := map[string]any{"messages": conv}
 	if len(system) > 0 {
@@ -449,7 +453,9 @@ func newConverseSSE(r io.Reader, model, id string, now time.Time) *converseSSE {
 	c.event = c.handle
 	c.errEvent = func(why string) string {
 		msg, _ := json.Marshal(map[string]any{"error": map[string]any{"message": why, "type": "api_error"}})
-		return "data: " + string(msg) + "\n\ndata: [DONE]\n\n"
+		// No [DONE]: an OpenAI client reads a stream that ends without it as a
+		// failed one, whatever a filter between does with the error object.
+		return "data: " + string(msg) + "\n\n"
 	}
 	c.finished = func() bool { return c.start && c.stop && c.haveUsage }
 	c.end = func() { c.out.WriteString("data: [DONE]\n\n") }

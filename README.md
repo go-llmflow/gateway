@@ -2226,12 +2226,18 @@ References opened on 2026-10-26:
 
 ### Amazon Bedrock as an upstream (opt-in, #89)
 
-Claude models on Amazon Bedrock, in the same position as the Anthropic
-provider above and under the same hard-budget guarantee: a budget is never
-exceeded. The path is **InvokeModel / InvokeModelWithResponseStream with the
-Anthropic Messages body**, the closest to the Anthropic provider. **Converse**
-(the other vendors' models) is a later change; today only Claude model IDs are
-accepted.
+Amazon Bedrock models, in the same position as the Anthropic provider above and
+under the same hard-budget guarantee: a budget is never exceeded. Two paths,
+chosen per model by `api` (inferred from `model_id`: an Anthropic ID is
+`"invoke"`, any other vendor's is `"converse"`):
+
+- **`invoke`, Claude models**: InvokeModel / InvokeModelWithResponseStream with
+  the Anthropic Messages body, closest to the Anthropic provider; clients use
+  `/v1/messages`. This is the rest of this section.
+- **`converse`, Mistral, Llama, Nova and the other vendors**: Converse /
+  ConverseStream; clients use `/v1/chat/completions` in OpenAI format. See
+  [Converse](#converse-the-other-vendors-models) below. A model is reachable at
+  its own route only.
 
 ```hcl
 model "claude-sonnet-bedrock" {
@@ -2290,7 +2296,8 @@ keys page and the data retention page, under
 | 7 | `promptVariables`, Prompt management ARNs | refused (the prompt is server-side, its size unknown) |
 
 Also refused as `model_id`: custom, imported, Marketplace and SageMaker resources
-(price and vendor unknown) and any non-Anthropic model. `X-Amzn-Bedrock-Trace`
+(price and vendor unknown) and, with `api = "invoke"`, any non-Anthropic model.
+`X-Amzn-Bedrock-Trace`
 and `-Request-Metadata` are refused too: headers are built from scratch, nothing
 the client sent is forwarded.
 
@@ -2309,9 +2316,9 @@ without a budget the usual estimate is recorded.
 header count (16); both CRCs are checked; a chunk's base64 is bounded. It is
 re-emitted as Anthropic SSE to `/v1/messages` clients (the error cases as an
 `event: error`, with a fixed text, never the provider's). `/v1/chat/completions`,
-like for the Anthropic provider, is not served for this model: a Bedrock model is
-reachable at `/v1/messages` only, and `/v1/messages/count_tokens` is not offered
-(it would send the prompt to a second operation the gateway does not meter).
+like for the Anthropic provider, is not served for an `invoke` model, and
+`/v1/messages/count_tokens` is not offered (it would send the prompt to a second
+operation the gateway does not meter).
 
 **Cross-institution isolation.** The prompt caching page does not say that caches
 are isolated per AWS account. Until a source says so, `check-config` requires an
@@ -2339,6 +2346,90 @@ whatever the API reference's summary says. Set `none` where the model allows it,
 and decide with your DPO. (An earlier version of this section said the API
 reference sentence did not exist: it does; only the user-guide pages had been
 checked.)
+
+#### Converse: the other vendors' models
+
+```hcl
+model "mistral-large" {
+  provider = "bedrock"
+  region   = "eu-west-3"
+  model_id = "eu.mistral.mistral-large-2407-v1:0"   # api = "converse" is inferred (not an Anthropic ID)
+  pool           = "bedrock"
+  allow_external = true
+  orgs           = ["etabA", "etabB"]
+  context_window = 128000                           # required under a budget
+  cost { unit = "USD", price_date = "2026-11-01", input_per_mtok = 2, output_per_mtok = 6 }
+  org_credentials "etabA" { … }                     # one AWS account per organisation, as above
+}
+```
+
+`examples/bedrock-converse.hcl` is the full example, parsed by the tests and by
+`check-config`.
+
+**What was opened (2026-11-01).** Under `docs.aws.amazon.com/bedrock/latest/APIReference/`:
+`API_runtime_Converse.html` (`POST /model/{modelId}/converse`; the request fields
+`messages`, `system`, `inferenceConfig {maxTokens, stopSequences, temperature,
+topP}`, `toolConfig`, `guardrailConfig`, `additionalModelRequestFields`,
+`outputConfig`, `performanceConfig`, `promptVariables`, `requestMetadata`,
+`serviceTier`; "If you use a prompt from Prompt management, you can't include …
+`additionalModelRequestFields`, `inferenceConfig`, `system`, or `toolConfig`"; the
+answer's `stopReason` values, including `guardrail_intervened` and
+`model_context_window_exceeded`, and `usage` with `inputTokens`, `outputTokens`,
+`totalTokens`, `cacheReadInputTokens`, `cacheWriteInputTokens` and `cacheDetails
+[{inputTokens, ttl}]`; a guardrail's cost in
+`trace.guardrail….invocationMetrics.usage`), `API_runtime_ConverseStream.html`
+(`/converse-stream`; the event members `messageStart`, `contentBlockStart`,
+`contentBlockDelta`, `contentBlockStop`, `messageStop`, `metadata` and the five
+exceptions with their statuses), `API_runtime_ContentBlock.html`,
+`API_runtime_ImageBlock.html` (`png | jpeg | gif | webp`) and
+`API_runtime_InferenceConfiguration.html` (`maxTokens` at least 1); and, in the
+user guide, the prompt caching page: "total input tokens = inputTokens +
+cacheReadInputTokens + cacheWriteInputTokens".
+
+- **The mapping** (OpenAI chat → Converse): `system` and `developer` messages
+  become `system`; `user` and `assistant` messages become `messages`, consecutive
+  messages of one role merging (Converse alternates roles) and the first being a
+  user's; text parts become text blocks, `data:image/(png|jpeg|jpg|gif|webp);base64,…`
+  URLs become image blocks (a remote URL is refused: the gateway fetches nothing
+  for a client); `max_completion_tokens` (else `max_tokens`) becomes
+  `inferenceConfig.maxTokens`, `temperature` and `top_p` follow, `stop` becomes
+  `stopSequences`. The answer comes back as a `chat.completion` (`stopReason` →
+  `finish_reason`: `max_tokens` and `model_context_window_exceeded` → `length`,
+  `guardrail_intervened` and `content_filtered` → `content_filter`, the rest →
+  `stop`) and the stream as `chat.completion.chunk`s: a role chunk, the text
+  deltas, the finish, a usage chunk (forwarded when the client asked for it),
+  `[DONE]`.
+- **Refused, not dropped**, with 400 before anything is held or spent: the options
+  of the table above (`guardrailConfig`, `serviceTier`, `performanceConfig`,
+  `promptVariables`, `requestMetadata`, `outputConfig`, `X-Amzn-Bedrock-*`
+  headers); **`additionalModelRequestFields`**, because it carries
+  vendor-specific parameters (Anthropic betas and thinking budgets, `top_k`, Nova
+  and Mistral switches) that can widen the context or add sampling steps, and no
+  per-vendor allow-list of fields verified to be bounded exists here (the OpenAI
+  route cannot send it either); **tools** (`tools`, `tool_calls`, tool messages):
+  with a context window and `maxTokens` a tool exchange would be bounded like any
+  other, so this is a limit of this release, not of the bound; and every OpenAI
+  field with no Converse equivalent (`n` above 1, `seed`, `response_format`,
+  `logprobs`, the penalties, audio …). `check-config` refuses a prompt-router,
+  provisioned-model, custom-model-deployment, imported-model, SageMaker or Prompt
+  management ARN as `model_id`, and `anthropic_betas` on a Converse model.
+- **W** is as above: the context window from `context_window` (a budgeted request
+  to a model without one answers 503), `maxTokens` always set under a budget, the
+  highest input price, cache writes included. **Usage** is read from the Converse
+  fields (the OpenAI usage object has no room for cache writes, which are priced
+  apart): the prompt is `inputTokens` + the cache reads + the cache writes, and
+  the writes are split by lifetime from `cacheDetails` (all 5-minute when the
+  split is absent or does not add up). **A stream cut, an exception event, a CRC
+  failure, a missing `messageStop` or `metadata` usage, a 200 answer without
+  usage or with a body cut is charged W.** The client sees such a stream end
+  without `[DONE]`, which OpenAI clients read as a failed stream.
+- Tests: the same fake Bedrock, verifying every SigV4 signature, answers
+  Converse and ConverseStream; goldens for the request mapping, the answer and
+  the stream (byte for byte); usage tables; a budget test with maximal usage; one
+  refusal test per item; the chaos cases, each charged W; the planted-secret scan;
+  `FuzzConverseMapping` and `FuzzConverseStream` (never a panic, well-formed
+  SSE, never charged less than a complete stream's usage with its cache writes,
+  nor less than W for an incomplete one), both in the CI matrix.
 
 **Performance.** `BenchmarkBedrockPrepare` (body, URL and SigV4 signature of a
 4 KiB prompt), `BenchmarkBedrockSign` and `BenchmarkBedrockStream` (200 chunks to
