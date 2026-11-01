@@ -82,17 +82,19 @@ type anthropicUsage struct {
 }
 
 // usage converts to the gateway's Usage: the prompt is every input token,
-// cached or not; the cache writes are split by lifetime (all 5-minute when
-// the split is absent or does not add up).
+// cached or not; the cache writes are split by lifetime. When the split is
+// absent or does not add up the writes are of UNKNOWN lifetime and are priced
+// at the higher write price (Usage.CacheWriteUnknown): counting them as
+// 5-minute writes would settle below what is billed if they were 1-hour ones.
 func (a anthropicUsage) usage() Usage {
 	prompt := a.InputTokens + a.CacheReadInputTokens + a.CacheCreationInputTokens
 	u := Usage{PromptTokens: prompt, CompletionTokens: a.OutputTokens, TotalTokens: prompt + a.OutputTokens,
 		PromptTokensDetails: &struct {
 			CachedTokens int64 `json:"cached_tokens"`
 		}{a.CacheReadInputTokens}}
-	u.CacheWrite5m = a.CacheCreationInputTokens
+	u.CacheWriteUnknown = a.CacheCreationInputTokens
 	if c := a.CacheCreation; c != nil && c.Ephemeral5m >= 0 && c.Ephemeral1h >= 0 && c.Ephemeral5m+c.Ephemeral1h == a.CacheCreationInputTokens {
-		u.CacheWrite5m, u.CacheWrite1h = c.Ephemeral5m, c.Ephemeral1h
+		u.CacheWrite5m, u.CacheWrite1h, u.CacheWriteUnknown = c.Ephemeral5m, c.Ephemeral1h, 0
 	}
 	return u
 }

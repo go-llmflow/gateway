@@ -25,10 +25,15 @@ type Usage struct {
 	// provider prices them apart.
 	CacheWrite5m int64 `json:"-"`
 	CacheWrite1h int64 `json:"-"`
+	// CacheWriteUnknown are prompt tokens written to a cache whose lifetime the
+	// provider did not say (no split, or a split that does not add up). They
+	// are priced at the HIGHER of the two write prices, never at a guessed
+	// lifetime: guessing the cheaper one would settle below what is billed.
+	CacheWriteUnknown int64 `json:"-"`
 }
 
 // CacheWrites returns the prompt tokens written to a prompt cache.
-func (u Usage) CacheWrites() int64 { return u.CacheWrite5m + u.CacheWrite1h }
+func (u Usage) CacheWrites() int64 { return u.CacheWrite5m + u.CacheWrite1h + u.CacheWriteUnknown }
 
 // Cached returns the number of cached prompt tokens.
 func (u Usage) Cached() int64 {
@@ -44,7 +49,7 @@ func (u Usage) Cached() int64 {
 func (u Usage) Valid() bool {
 	return u.PromptTokens >= 0 && u.CompletionTokens >= 0 && u.Cached() >= 0 && u.Cached() <= u.PromptTokens &&
 		u.AudioSeconds >= 0 && u.AudioSeconds <= maxAudioSeconds &&
-		u.CacheWrite5m >= 0 && u.CacheWrite1h >= 0 && u.Cached()+u.CacheWrites() <= u.PromptTokens
+		u.CacheWrite5m >= 0 && u.CacheWrite1h >= 0 && u.CacheWriteUnknown >= 0 && u.Cached()+u.CacheWrites() <= u.PromptTokens
 }
 
 // maxAudioSeconds bounds a reported duration (a week): beyond it the count

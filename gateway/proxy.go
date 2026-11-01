@@ -91,13 +91,15 @@ func (g *group) cost(u openai.Usage) float64 {
 		lc.AudioPerHour = c.AudioPerHour
 		c = lc
 	}
-	var w5, w1h int64
+	var w5, w1h, wu int64
 	if c.CacheWrite5mPerMTok > 0 || c.CacheWrite1hPerMTok > 0 {
-		w5, w1h = u.CacheWrite5m, u.CacheWrite1h
+		w5, w1h, wu = u.CacheWrite5m, u.CacheWrite1h, u.CacheWriteUnknown
 	}
-	uncached := u.PromptTokens - u.Cached() - w5 - w1h
+	uncached := u.PromptTokens - u.Cached() - w5 - w1h - wu
+	// Writes of unknown lifetime cost the higher write price.
 	return (float64(uncached)*c.InputPerMTok+float64(u.Cached())*c.CachedPerMTok+
 		float64(w5)*c.CacheWrite5mPerMTok+float64(w1h)*c.CacheWrite1hPerMTok+
+		float64(wu)*max(c.CacheWrite5mPerMTok, c.CacheWrite1hPerMTok)+
 		float64(u.CompletionTokens)*c.OutputPerMTok)/1e6 + u.AudioSeconds/3600*c.AudioPerHour
 }
 
@@ -173,8 +175,14 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			if g == nil || g.cfg.Class == config.Guard || !s.budget.modelAllowed(key.Team, m) || !externalVisible(g, key) {
 				return "", errUnknownModel
 			}
-			if g.ext != nil && g.ext.bedrock != nil && ep != openai.Messages {
-				return "", errBedrockEndpoint
+			if g.ext != nil && g.ext.bedrock != nil {
+				// InvokeModel (Claude): /v1/messages; Converse: /v1/chat/completions.
+				if conv := g.ext.bedrock.converse(); conv && ep != openai.Chat {
+					return "", errBedrockConverseEndpoint
+				} else if !conv && ep != openai.Messages {
+					return "", errBedrockInvokeEndpoint
+				}
+				return g.cfg.UpstreamModel, nil
 			}
 			if g.ext != nil && ep != openai.Messages && ep != openai.CountTokens {
 				return "", errExternalEndpoint
@@ -226,7 +234,12 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			// Amazon Bedrock options that change a request's cost are refused;
 			// a beta in the body joins the header betas, so the allow-list and
 			// betaUnbounded see it (bedrock.go).
-			if out, eg.betas, err = bedrockIngress(r.Header, out, eg.betas); err != nil {
+			if g.ext.bedrock.converse() {
+				out, err = converseIngress(r.Header, out)
+			} else {
+				out, eg.betas, err = bedrockIngress(r.Header, out, eg.betas)
+			}
+			if err != nil {
 				apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 				return
 			}
@@ -383,7 +396,8 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			// billW: a Bedrock answer whose final usage was not read (a stream
 			// cut, an exception event, a CRC failure) is charged the worst case.
 			billW bool
-			bconv *bedrockSSE
+			bconv interface{ Complete() bool }
+			cconv *converseSSE
 		)
 		defer func() {
 			if !haveUsage && worked {
@@ -605,8 +619,14 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		if g.ext != nil && g.ext.bedrock != nil && req.Stream && resp.StatusCode < 300 && strings.HasPrefix(resp.Header.Get("Content-Type"), bedrockEventStream) {
 			// The provider's binary event stream, read as untrusted input and
 			// re-emitted as Anthropic SSE (bedrock.go).
-			bconv = newBedrockSSE(resp.Body)
-			events, isEvents = bconv, true
+			if g.ext.bedrock.converse() {
+				cconv = newConverseSSE(resp.Body, g.cfg.Name, rid, s.now(), req.ClientWantsUsage)
+				bconv, events = cconv, cconv
+			} else {
+				bsse := newBedrockSSE(resp.Body)
+				bconv, events = bsse, bsse
+			}
+			isEvents = true
 			h.Set("Content-Type", "text/event-stream")
 			h.Set("Cache-Control", "no-cache")
 		}
@@ -638,6 +658,11 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				_ = rc.Flush()
 			}
 			tUpEnd = time.Now()
+			if cconv != nil {
+				// The usage of the metadata event, cache writes included (an
+				// OpenAI usage chunk has no room for them).
+				st.Usage, st.HaveUsage = cconv.Usage()
+			}
 			if bconv != nil && adm != nil && adm.hold != nil {
 				// A stream that did not deliver its final usage is charged W.
 				_, billW = settleBedrockStream(bconv.Complete(), st, g.prices, adm.hold.w)
@@ -676,9 +701,21 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			h.Set("Content-Type", "application/json")
 		}
 		if resp.StatusCode < 300 {
-			usage, haveUsage = openai.ParseUsageFor(ep, data)
-			if !haveUsage && g.ext != nil && g.ext.bedrock != nil {
-				billW = true // the final usage was not delivered
+			if g.ext != nil && g.ext.bedrock != nil && g.ext.bedrock.converse() {
+				// A Converse answer, as an OpenAI chat completion; its usage is
+				// read from the Converse fields (cache writes priced apart).
+				tb, cu, ok := translateConverse(data, g.cfg.Name, rid, s.now())
+				if !ok {
+					billW, status = true, http.StatusBadGateway
+					apiError(w, status, "upstream_error", "the provider's answer could not be read")
+					return
+				}
+				data, usage, haveUsage = tb, cu, true
+			} else {
+				usage, haveUsage = openai.ParseUsageFor(ep, data)
+				if !haveUsage && g.ext != nil && g.ext.bedrock != nil {
+					billW = true // the final usage was not delivered
+				}
 			}
 			if rq != nil && ep.Guarded() && rq.hasStage("post") {
 				// The work is done and charged whatever the guards say.
@@ -749,7 +786,7 @@ func (s *Server) sendTyped(ctx context.Context, g *group, path string, body []by
 			// The operation, in the path; the Anthropic body without model and
 			// stream, with the version and the allowed betas (bedrock.go).
 			target = br.target(u.base, eg.stream)
-			wb, werr := br.wireBody(body, g.ext.cfg, eg.betas)
+			wb, werr := br.wire(body, g.ext.cfg, eg.betas)
 			if werr != nil {
 				return nil, nil, time.Now(), werr
 			}

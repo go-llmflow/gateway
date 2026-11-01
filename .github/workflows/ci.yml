@@ -112,6 +112,8 @@ jobs:
           - { target: FuzzBedrockStream, pkg: ./gateway }
           - { target: FuzzBedrockIngress, pkg: ./gateway }
           - { target: FuzzBedrockModelID, pkg: ./config }
+          - { target: FuzzConverseMapping, pkg: ./gateway }
+          - { target: FuzzConverseStream, pkg: ./gateway }
           - { target: FuzzBuildQuotas, pkg: ./gateway }
           - { target: FuzzBuildVariance, pkg: ./gateway }
           - { target: FuzzQuotaSubtraction, pkg: ./gateway }

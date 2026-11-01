@@ -218,7 +218,12 @@ func awsEscape(s string) string {
 // target is the URL of the operation for base (the derived endpoint).
 func (b *bedrockRuntime) target(base string, stream bool) string {
 	op := "/invoke"
-	if stream {
+	switch {
+	case b.converse() && stream:
+		op = "/converse-stream"
+	case b.converse():
+		op = "/converse"
+	case stream:
 		op = "/invoke-with-response-stream"
 	}
 	return base + "/model/" + awsEscape(b.cfg.ModelID) + op
@@ -252,10 +257,8 @@ func checkBedrockBody(m map[string]json.RawMessage) error {
 // betaUnbounded rules as the Anthropic provider see it: a beta in the body
 // must not slip past them.
 func bedrockIngress(h http.Header, body []byte, betas []string) ([]byte, []string, error) {
-	for k := range h {
-		if strings.HasPrefix(strings.ToLower(k), "x-amzn-bedrock-") {
-			return nil, nil, errors.New("X-Amzn-Bedrock-* headers (guardrails, service tier, performance config, trace, request metadata) are not forwarded: they change what a request costs")
-		}
+	if err := refuseBedrockHeaders(h); err != nil {
+		return nil, nil, err
 	}
 	m, err := bedrockObject(body)
 	if err != nil {
@@ -283,6 +286,15 @@ func bedrockIngress(h http.Header, body []byte, betas []string) ([]byte, []strin
 		return nil, nil, err
 	}
 	return enc, out, nil
+}
+
+// wire builds the body Bedrock receives: Converse's from an OpenAI chat body,
+// else InvokeModel's from the Messages body.
+func (b *bedrockRuntime) wire(body []byte, ext *config.External, betas []string) ([]byte, error) {
+	if b.converse() {
+		return converseRequest(body)
+	}
+	return b.wireBody(body, ext, betas)
 }
 
 // wireBody turns the gateway's Messages body into Bedrock's: no "model" and no
@@ -405,15 +417,24 @@ func printable(s string) string {
 // and a message_stop, then a clean end at a message boundary, and no
 // exception. Anything else is not, and the request is then charged W.
 type bedrockSSE struct {
-	dec                *eventstream.Decoder
-	out                bytes.Buffer
-	done, failed       bool
+	*eventReader
 	start, usage, stop bool
 }
 
 func newBedrockSSE(r io.Reader) *bedrockSSE {
-	return &bedrockSSE{dec: eventstream.NewDecoder(r, eventstream.Limits{
-		MaxMessage: bedrockMaxMessage, MaxHeadersLen: 4 << 10, MaxHeaders: 16, MaxValueLen: 256})}
+	b := &bedrockSSE{eventReader: newEventReader(r)}
+	b.event = func(typ string, payload []byte) {
+		if typ == "chunk" {
+			b.chunk(payload)
+		}
+	}
+	b.errEvent = func(why string) string {
+		msg, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": "api_error", "message": why}})
+		return "event: error\ndata: " + string(msg) + "\n\n"
+	}
+	b.finished = func() bool { return b.start && b.usage && b.stop }
+	b.endText = "the stream from the provider ended before message_stop"
+	return b
 }
 
 // Complete reports whether the final usage was delivered.
@@ -421,7 +442,33 @@ func (b *bedrockSSE) Complete() bool {
 	return b.done && !b.failed && b.start && b.usage && b.stop
 }
 
-func (b *bedrockSSE) Read(p []byte) (int, error) {
+// eventReader reads the AWS event-stream framing of a Bedrock answer, untrusted
+// input (eventstream.Limits bound lengths and header counts, both CRCs are
+// checked), and turns each message into text for the client through the
+// handlers of its owner: InvokeModelWithResponseStream (bedrockSSE) and
+// ConverseStream (converseSSE) share it.
+type eventReader struct {
+	dec          *eventstream.Decoder
+	out          bytes.Buffer
+	done, failed bool
+	// event handles an "event" message of the given :event-type.
+	event func(typ string, payload []byte)
+	// errEvent is the text a failure writes to the client; why is a fixed text.
+	errEvent func(why string) string
+	// finished says whether every event a complete stream carries was seen: a
+	// clean end before that is a failure; endText says so.
+	finished func() bool
+	endText  string
+	// end, if set, writes what closes a stream that ended cleanly and whole.
+	end func()
+}
+
+func newEventReader(r io.Reader) *eventReader {
+	return &eventReader{dec: eventstream.NewDecoder(r, eventstream.Limits{
+		MaxMessage: bedrockMaxMessage, MaxHeadersLen: 4 << 10, MaxHeaders: 16, MaxValueLen: 256})}
+}
+
+func (b *eventReader) Read(p []byte) (int, error) {
 	for b.out.Len() == 0 {
 		if b.done {
 			return 0, io.EOF
@@ -431,32 +478,30 @@ func (b *bedrockSSE) Read(p []byte) (int, error) {
 	return b.out.Read(p)
 }
 
-// fail ends the stream with an Anthropic error event. why is a fixed text.
-func (b *bedrockSSE) fail(why string) {
+// fail ends the stream with an error event. why is a fixed text.
+func (b *eventReader) fail(why string) {
 	b.failed, b.done = true, true
-	msg, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": "api_error", "message": why}})
-	b.out.WriteString("event: error\ndata: ")
-	b.out.Write(msg)
-	b.out.WriteString("\n\n")
+	b.out.WriteString(b.errEvent(why))
 }
 
-func (b *bedrockSSE) step() {
+func (b *eventReader) step() {
 	msg, err := b.dec.Next()
 	if err != nil {
 		b.done = true
 		if !errors.Is(err, io.EOF) {
 			b.fail("the stream from the provider was interrupted or malformed")
-		} else if !(b.start && b.usage && b.stop) {
-			b.fail("the stream from the provider ended before message_stop")
+		} else if !b.finished() {
+			b.fail(b.endText)
+		} else if b.end != nil {
+			b.end()
 		}
 		return
 	}
 	mt, _ := msg.Header(":message-type")
 	switch mt.Str() {
 	case "event":
-		if et, _ := msg.Header(":event-type"); et.Str() == "chunk" {
-			b.chunk(msg.Payload)
-		}
+		et, _ := msg.Header(":event-type")
+		b.event(et.Str(), msg.Payload)
 	case "exception", "error":
 		b.fail("the provider ended the stream with an exception")
 	default:

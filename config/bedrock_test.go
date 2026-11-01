@@ -41,6 +41,32 @@ func TestBedrockExample(t *testing.T) {
 	}
 }
 
+// The Converse example stays valid: two vendors' models, each reached through
+// Converse, their credentials among the key files check-config loads.
+func TestBedrockConverseExample(t *testing.T) {
+	c, err := Load(filepath.Join("..", "examples", "bedrock-converse.hcl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, g := range c.ModelGroups {
+		if g.External == nil || g.External.Bedrock == nil {
+			continue
+		}
+		b := g.External.Bedrock
+		seen[g.Name] = true
+		if b.API != APIConverse || g.MaxModelLen == 0 || g.Cost.Unit != "USD" || g.UpstreamModel != b.ModelID {
+			t.Errorf("%s: api %q window %d cost %+v", g.Name, b.API, g.MaxModelLen, g.Cost)
+		}
+	}
+	if !seen["mistral-large"] || !seen["nova-pro"] {
+		t.Fatalf("models %v", seen)
+	}
+	if !slices.Contains(c.KeyFiles(), "/etc/llmflow/bedrock-etabB.apikey") {
+		t.Errorf("key files %v", c.KeyFiles())
+	}
+}
+
 // Mixing the two ways to authenticate, half a key pair and a session token
 // alone are refused.
 func TestBedrockCredentialShapes(t *testing.T) {

@@ -138,7 +138,7 @@ func (v *validator) external(raw *fileHCL, c *Config) {
 		}
 		if m.Provider == nil {
 			for _, set := range []bool{m.AllowExternal != nil, len(m.Orgs) > 0, len(m.Teams) > 0, len(m.AnthropicVersions) > 0,
-				len(m.AnthropicBetas) > 0, len(m.OrgKeys) > 0, m.Region != nil, m.ModelID != nil, m.EndpointOverride != nil,
+				len(m.AnthropicBetas) > 0, len(m.OrgKeys) > 0, m.Region != nil, m.ModelID != nil, m.API != nil, m.EndpointOverride != nil,
 				len(m.Credentials) > 0, len(m.OrgCredentials) > 0} {
 				if set {
 					v.errf(m.DefRange, "Unexpected external settings", "%s: allow_external, orgs, teams, anthropic_*, org_key, region, model_id and credentials belong to a model with a provider", where)
@@ -155,7 +155,7 @@ func (v *validator) external(raw *fileHCL, c *Config) {
 			continue
 		}
 		bedrock := e.Provider == ProviderBedrock
-		if !bedrock && (m.Region != nil || m.ModelID != nil || m.EndpointOverride != nil || len(m.Credentials) > 0 || len(m.OrgCredentials) > 0) {
+		if !bedrock && (m.Region != nil || m.ModelID != nil || m.API != nil || m.EndpointOverride != nil || len(m.Credentials) > 0 || len(m.OrgCredentials) > 0) {
 			v.errf(m.DefRange, "Unexpected setting", "%s: region, model_id, endpoint_override, credentials and org_credentials belong to provider = \"bedrock\"", where)
 		}
 		if bedrock {

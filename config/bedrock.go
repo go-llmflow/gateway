@@ -68,6 +68,9 @@ func (c AWSCredRefs) Refs() []string {
 type Bedrock struct {
 	Region  string
 	ModelID string
+	// API is APIInvoke (Anthropic Messages body, /v1/messages) or APIConverse
+	// (/v1/chat/completions).
+	API string
 	// Endpoint is the base URL requests go to: derived from the region, or the
 	// endpoint_override of a test.
 	Endpoint string
@@ -137,14 +140,35 @@ var (
 // Provisioned Throughput (billed per hour, not per token), and custom,
 // imported, Marketplace and SageMaker resources (price and vendor unknown).
 func CheckBedrockModelID(id, region string) error {
+	return CheckBedrockModelIDFor(id, region, APIInvoke)
+}
+
+// The two operations a Bedrock model is reached through (#89): InvokeModel
+// with the Anthropic Messages body for Claude models, at /v1/messages; and
+// Converse / ConverseStream for the models of the other vendors (Mistral,
+// Llama, Nova …), at /v1/chat/completions.
+const (
+	APIInvoke   = "invoke"
+	APIConverse = "converse"
+)
+
+// bedrockVendorID is any vendor's base model or inference profile ID.
+var bedrockVendorID = regexp.MustCompile(`^(?:(?:eu|us|apac|au|jp|us-gov|global)\.)?[a-z0-9-]+\.[A-Za-z0-9.-]+(?::[0-9]{1,3})?$`)
+
+// CheckBedrockModelIDFor is CheckBedrockModelID for an operation: InvokeModel
+// takes Anthropic models only; Converse takes any vendor's.
+func CheckBedrockModelIDFor(id, region, api string) error {
 	if id == "" || len(id) > 2048 || !bedrockCharset.MatchString(id) {
-		return errors.New("want an Anthropic model ID such as \"anthropic.claude-sonnet-4-5-20250929-v1:0\" or an inference profile ID such as \"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\"")
+		return errors.New("want a model ID such as \"anthropic.claude-sonnet-4-5-20250929-v1:0\", \"eu.mistral.mistral-large-2407-v1:0\" or an inference profile ID")
 	}
 	if !strings.HasPrefix(id, "arn:") {
-		if bedrockPlainID.MatchString(id) {
+		if api == APIConverse && bedrockVendorID.MatchString(id) || bedrockPlainID.MatchString(id) {
 			return nil
 		}
-		return errors.New("only Anthropic Claude models are served through InvokeModel here (Converse, for other vendors, is a later change): want [geo.]anthropic.<model>")
+		if api == APIConverse {
+			return errors.New("want [geo.]<vendor>.<model>")
+		}
+		return errors.New("only Anthropic Claude models are served through InvokeModel (set api = \"converse\" for the other vendors' models): want [geo.]anthropic.<model>")
 	}
 	parts := strings.SplitN(id, ":", 6)
 	if len(parts) != 6 || parts[2] != "bedrock" {
@@ -204,6 +228,19 @@ func credsOK(c AWSCredRefs) string {
 	return ""
 }
 
+// bedrockAPI is the operation a model is reached through: api when set, else
+// InvokeModel for an Anthropic model ID (or ARN), Converse for the rest.
+func bedrockAPI(m modelHCL, id string) string {
+	if m.API != nil && (*m.API == APIInvoke || *m.API == APIConverse) {
+		return *m.API
+	}
+	if bedrockPlainID.MatchString(id) || strings.Contains(id, "/anthropic.") || strings.Contains(id, "/eu.anthropic.") ||
+		strings.Contains(id, "/us.anthropic.") || strings.Contains(id, "/global.anthropic.") || strings.Contains(id, "/apac.anthropic.") {
+		return APIInvoke
+	}
+	return APIConverse
+}
+
 // bedrockSetup validates the Bedrock settings of model m and fills e and g:
 // the model ID becomes the upstream model, and the one upstream is derived
 // from the region. Called with g.External = e.
@@ -228,9 +265,19 @@ func (v *validator) bedrockSetup(m modelHCL, g *ModelGroup, e *External, where s
 		v.errf(r, "Invalid region", "%s: region = %q: want an AWS region such as \"eu-west-3\"", where, b.Region)
 	}
 	b.ModelID = strOr(m.ModelID, "")
+	b.API = bedrockAPI(m, b.ModelID)
+	if m.API != nil && *m.API != APIInvoke && *m.API != APIConverse {
+		v.errf(m.APIRange, "Invalid api", "%s: api = %q: want \"invoke\" (Claude, at /v1/messages) or \"converse\" (any vendor, at /v1/chat/completions)", where, *m.API)
+	}
+	if m.API == nil && strings.Contains(b.ModelID, ":application-inference-profile/") {
+		v.errf(m.DefRange, "Missing api", "%s: an application inference profile does not name its vendor: set api = \"invoke\" (a Claude model) or \"converse\"", where)
+	}
+	if b.API == APIConverse && len(m.AnthropicBetas) > 0 {
+		v.errf(m.BetasRange, "Unexpected setting", "%s: anthropic_betas belong to InvokeModel; Converse takes no betas (additionalModelRequestFields is refused: it can carry anything that widens a request's cost)", where)
+	}
 	if m.ModelID == nil {
 		v.errf(m.DefRange, "Missing model_id", "%s: set model_id to the exact model ID or inference profile ID (the price is set per configured model ID)", where)
-	} else if err := CheckBedrockModelID(b.ModelID, b.Region); err != nil {
+	} else if err := CheckBedrockModelIDFor(b.ModelID, b.Region, b.API); err != nil {
 		v.errf(m.ModelIDRange, "Invalid model_id", "%s: model_id %q: %v", where, b.ModelID, err)
 	}
 	g.UpstreamModel = b.ModelID
