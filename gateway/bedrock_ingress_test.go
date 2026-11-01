@@ -19,6 +19,7 @@ func FuzzBedrockIngress(f *testing.F) {
 		`{"guardrailConfig":{}}`, `{"serviceTier":"priority"}`, `{"anthropic_beta":["context-1m-2025-08-07"]}`,
 		`{"anthropic_beta":"x"}`, `{"promptVariables":null}`, `[]`, `{`, `{"additionalModelRequestFields":{}}`,
 		`{"anthropic_version":"2023-06-01","stream":true,"model":"m","max_tokens":9}`,
+		`null`, // decoded into a nil map: wireBody panicked on it (main, 2026-11-01)
 	} {
 		f.Add([]byte(s), "Content-Type", "x")
 	}
@@ -66,6 +67,21 @@ func FuzzBedrockIngress(f *testing.F) {
 			t.Fatalf("version %s", w["anthropic_version"])
 		}
 	})
+}
+
+// The JSON literal null is not an object: both the ingress and the wire
+// builder refuse it instead of writing into a nil map (FuzzBedrockIngress
+// found the panic in wireBody on main, 2026-11-01).
+func TestBedrockRefusesNullBody(t *testing.T) {
+	for _, body := range []string{`null`, ` null `, `[]`, `"x"`, `1`} {
+		if _, _, err := bedrockIngress(http.Header{}, []byte(body), nil); err == nil {
+			t.Errorf("ingress accepted %q", body)
+		}
+		b := &bedrockRuntime{cfg: &config.Bedrock{}}
+		if _, err := b.wireBody([]byte(body), &config.External{}, nil); err == nil {
+			t.Errorf("wireBody accepted %q", body)
+		}
+	}
 }
 
 // A stored or masked body that still carries a refused option is caught again
