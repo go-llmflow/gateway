@@ -50,8 +50,21 @@ func (c *Config) PoolShares(pool string) map[string]float64 {
 	return out
 }
 
-// PoolShare is one organisation's share of one pool.
-func (c *Config) PoolShare(pool, org string) float64 { return c.PoolShares(pool)[org] }
+// PoolShare is one organisation's share of one pool. It is on the request
+// path (PoolAllows): it looks the share up without building PoolShares' map.
+func (c *Config) PoolShare(pool, org string) float64 {
+	for i := range c.Pools {
+		if p := &c.Pools[i]; p.Name == pool && p.Shares != nil {
+			return p.Shares[org]
+		}
+	}
+	for i := range c.Orgs {
+		if c.Orgs[i].Name == org {
+			return c.Orgs[i].Share
+		}
+	}
+	return 0
+}
 
 // PoolBorrow returns the pool's borrow policy.
 func (c *Config) PoolBorrow(pool string) string {
@@ -64,7 +77,8 @@ func (c *Config) PoolBorrow(pool string) string {
 }
 
 // PoolAllows reports whether org may use the pool at all: always, unless the
-// pool lends only to its shareholders and org holds none of it.
+// pool lends only to its shareholders and org holds none of it. It runs on
+// every request and allocates nothing.
 func (c *Config) PoolAllows(pool, org string) bool {
 	return c.PoolBorrow(pool) != BorrowShareholders || c.PoolShare(pool, org) > 0
 }
