@@ -669,6 +669,8 @@ type modelHCL struct {
 	RegionRange           hcl.Range     `hcl:"region,attr_value_range"`
 	ModelID               *string       `hcl:"model_id,optional"`
 	ModelIDRange          hcl.Range     `hcl:"model_id,attr_value_range"`
+	API                   *string       `hcl:"api,optional"`
+	APIRange              hcl.Range     `hcl:"api,attr_value_range"`
 	EndpointOverride      *string       `hcl:"endpoint_override,optional"`
 	EndpointOverrideRange hcl.Range     `hcl:"endpoint_override,attr_value_range"`
 	Credentials           []awsCredsHCL `hcl:"credentials,block"`
