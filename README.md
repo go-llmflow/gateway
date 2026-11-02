@@ -2698,6 +2698,35 @@ benchmark above did not move between v0.1.0 and v0.2.0, and the v0.3.0 and
 v0.4.0 paths add a HMAC per request (cache salt) and, for JWT access tokens, a
 cache lookup per request (a signature check on a cache miss).
 
+**v0.6.0 to v0.24.0, measured 2026-11-01 with go-llmflow/bench `gwbench`.**
+Six gateways (clean installs of each tag, the same memory-store configuration,
+one model, no budget) in front of one `fakevllm`, interleaved round by round in
+a random order and paired against a direct call of the same round; 6 runs of
+2 000 rounds kept at a 1-minute load of 3.39–3.91 (2 runs whose load ended
+above 4 were discarded); Apple M4 Max:
+
+| added latency, paired per round | p50 | p90 | p99 |
+|---|---|---|---|
+| v0.6.0 | 57.4 µs | 68.1 µs | 160.6 µs |
+| v0.12.0 | 60.0 µs | 70.3 µs | 166.5 µs |
+| v0.17.1 | 62.1 µs | 72.5 µs | 162.3 µs |
+| v0.19.0 | 62.3 µs | 72.8 µs | 163.2 µs |
+| v0.22.2 | 62.9 µs | 73.7 µs | 167.3 µs |
+| v0.24.0 | 62.7 µs | 73.3 µs | 164.7 µs |
+
+The p50 grew by about 5 µs (+9 %) over eighteen releases, in two steps of
+about 2.5 µs (v0.6.0 → v0.12.0) and 2.2 µs (v0.12.0 → v0.17.1); every per-run
+p50 keeps this order. Since v0.17.1 (hard budgets, profiles, soft quotas,
+decision reports, Bedrock, per-pool shares) it is flat within 0.6 µs. An
+earlier two-gateway run the same day (8 runs, load 3.52–3.72) gave 55.1 µs for
+v0.6.0 and 59.8 µs for v0.24.0. No single cause was found: allocations per
+request do not follow the latency (`BenchmarkOverhead` above: 423 at v0.6.0,
+375 at v0.12.0, 392 at v0.17.1, 422 at v0.25.0, with test configurations that
+differ between tags), and a CPU profile of `BenchmarkOverhead` is 96 %
+system calls, the gateway's own code about 1.5 % of the samples. The figures
+are absolute values on this machine; they are not comparable with the
+26 October harness above (another prompt size and machine state).
+
 ## Security
 
 Enforced:
