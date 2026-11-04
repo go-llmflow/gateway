@@ -256,6 +256,17 @@ func TestIdleUnallocated(t *testing.T) {
 	if a[""] != 100 {
 		t.Fatalf("%v", a)
 	}
+	// by_usage with no usage falls back to the shares (fixed costs are never
+	// left unbilled); the old code answered out[""] = 100.
+	b, _ := AllocateIdle(100, IdleByUsage, map[string]float64{"a": 3, "b": 1, "tiers": 0}, map[string]float64{})
+	if b["a"] != 75 || b["b"] != 25 || b[""] != 0 || len(b) != 2 {
+		t.Fatalf("fallback to shares: %v", b)
+	}
+	// With usage, the shares are not consulted: the third party pays its part.
+	c, _ := AllocateIdle(100, IdleByUsage, map[string]float64{"a": 1}, map[string]float64{"a": 1, "tiers": 1})
+	if c["a"] != 50 || c["tiers"] != 50 {
+		t.Fatalf("usage: %v", c)
+	}
 	if _, err := AllocateIdle(1, "x", nil, nil); err == nil {
 		t.Fatal("bad mode accepted")
 	}

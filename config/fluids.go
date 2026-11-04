@@ -21,6 +21,11 @@ import (
 //	  period "2026-07" { price_per_kwh = 0.21 }
 //	}
 //
+// A fixed_cost block adds an amount of money per month (racks), spread like
+// the idle energy:
+//
+//	fixed_cost "racks-b300" { monthly = 1800  pool = "b300" }
+//
 // The energy itself is scraped from the DCGM exporters named by the
 // upstreams' dcgm_url.
 type Fluids struct {
@@ -48,7 +53,35 @@ type Fluids struct {
 	// Periods override PUE and price for one month ("2026-07"), whatever the
 	// energy was measured: the tariff changes, the PUE is re-measured.
 	Periods map[string]FluidsPeriod
+	// FixedCosts are amounts in Currency per month that no energy meter sees
+	// (hosting of the racks: space, power distribution, network). They are
+	// spread over the organisations on the basis of the idle energy.
+	FixedCosts []FixedCost
 }
+
+// FixedCost is a fixed amount per month, for one pool or the whole platform.
+type FixedCost struct {
+	Name string
+	// Pool is the pool it is charged on; "" the whole platform.
+	Pool string
+	// Monthly is the amount per month, in Fluids.Currency, a multiple of the
+	// currency's minor unit.
+	Monthly float64
+	// Periods override Monthly for one month ("2026-07").
+	Periods map[string]float64
+}
+
+// MonthlyFor returns the amount of the month "YYYY-MM".
+func (c FixedCost) MonthlyFor(month string) float64 {
+	if v, ok := c.Periods[month]; ok {
+		return v
+	}
+	return c.Monthly
+}
+
+// MaxFixedMonthly bounds a fixed cost per month (keeps the integer minor-unit
+// arithmetic of the report far from overflow).
+const MaxFixedMonthly = 1e7
 
 // FluidsPeriod is a per-month override; a zero field keeps the block's value.
 type FluidsPeriod struct {
@@ -106,7 +139,26 @@ type fluidsHCL struct {
 	Settle         *string           `hcl:"settle,optional"`
 	SettleRange    hcl.Range         `hcl:"settle,attr_value_range"`
 	Periods        []fluidsPeriodHCL `hcl:"period,block"`
+	FixedCosts     []fixedCostHCL    `hcl:"fixed_cost,block"`
 	DefRange       hcl.Range         `hcl:",def_range"`
+}
+
+type fixedCostHCL struct {
+	Name         string           `hcl:"name,label"`
+	NameRange    hcl.Range        `hcl:"name,label_range"`
+	Monthly      float64          `hcl:"monthly"`
+	MonthlyRange hcl.Range        `hcl:"monthly,attr_value_range"`
+	Pool         *string          `hcl:"pool,optional"`
+	PoolRange    hcl.Range        `hcl:"pool,attr_value_range"`
+	Periods      []fixedPeriodHCL `hcl:"period,block"`
+	DefRange     hcl.Range        `hcl:",def_range"`
+}
+
+type fixedPeriodHCL struct {
+	Month        string    `hcl:"month,label"`
+	MonthRange   hcl.Range `hcl:"month,label_range"`
+	Monthly      float64   `hcl:"monthly"`
+	MonthlyRange hcl.Range `hcl:"monthly,attr_value_range"`
 }
 
 type fluidsPeriodHCL struct {
@@ -214,7 +266,58 @@ func (v *validator) fluids(raw *fileHCL, c *Config) {
 		}
 		out.Periods[p.Month] = o
 	}
+	v.fixedCosts(f, out, c)
 	c.Fluids = out
+}
+
+// fixedCosts validates the fixed_cost blocks: a name used once, an amount in
+// 0..MaxFixedMonthly that is a whole number of the currency's minor units, a
+// currency, a known pool, months that are months and used once.
+func (v *validator) fixedCosts(f *fluidsHCL, out *Fluids, c *Config) {
+	if len(f.FixedCosts) > 0 && out.Currency == "" {
+		v.errf(f.DefRange, "Missing currency", "fixed_cost is an amount of money: name its currency (currency = \"EUR\")")
+	}
+	amount := func(x float64, r hcl.Range, what string) float64 {
+		if math.IsNaN(x) || x < 0 || x > MaxFixedMonthly {
+			v.errf(r, "Invalid monthly", "%s: monthly = %v: want 0..%v", what, x, MaxFixedMonthly)
+			return 0
+		}
+		scaled := x * math.Pow10(out.CurrencyDecimals)
+		if math.Abs(scaled-math.Round(scaled)) > 1e-6 {
+			v.errf(r, "Invalid monthly", "%s: monthly = %v has more decimals than currency_decimals = %d", what, x, out.CurrencyDecimals)
+		}
+		return x
+	}
+	names := map[string]bool{}
+	for _, fc := range f.FixedCosts {
+		if fc.Name == "" || len(fc.Name) > 64 || names[fc.Name] {
+			v.errf(fc.NameRange, "Invalid fixed_cost", "fixed_cost %q: empty, longer than 64 or declared twice", fc.Name)
+			continue
+		}
+		names[fc.Name] = true
+		o := FixedCost{Name: fc.Name, Monthly: amount(fc.Monthly, fc.MonthlyRange, "fixed_cost "+fc.Name), Periods: map[string]float64{}}
+		if fc.Pool != nil && *fc.Pool != "" {
+			o.Pool = *fc.Pool
+			known := false
+			for _, p := range c.Pools {
+				known = known || p.Name == o.Pool
+			}
+			if !known {
+				v.errf(fc.PoolRange, "Unknown pool", "fixed_cost %q: pool %q is not declared", fc.Name, o.Pool)
+			}
+		}
+		for _, p := range fc.Periods {
+			if !monthRE.MatchString(p.Month) {
+				v.errf(p.MonthRange, "Invalid period", "fixed_cost %q period %q: want a month, YYYY-MM", fc.Name, p.Month)
+				continue
+			}
+			if _, dup := o.Periods[p.Month]; dup {
+				v.errf(p.MonthRange, "Duplicate period", "fixed_cost %q: period %q is declared twice", fc.Name, p.Month)
+			}
+			o.Periods[p.Month] = amount(p.Monthly, p.MonthlyRange, "fixed_cost "+fc.Name+" period "+p.Month)
+		}
+		out.FixedCosts = append(out.FixedCosts, o)
+	}
 }
 
 // FluidsMonths lists the months with an override, sorted.

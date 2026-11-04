@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -22,10 +23,12 @@ import (
 //
 // Allocation of idle energy follows the agreement (fluids.idle_energy) and
 // is decided per month, on the whole month's energy: pro rata to the
-// guaranteed shares (by_share) or to what each organisation used (by_usage).
+// guaranteed shares (by_share) or to what each organisation used (by_usage,
+// a third party included; a month and pool in which nobody worked fall back
+// to the shares since v0.26.0, so a fixed cost is never left unbilled).
 // An organisation's idle energy is then spread over its rows pro rata to
 // their active energy, so that every grouping sums to the measured total.
-// Energy nobody can be charged for (no share configured, no usage) is the
+// Energy nobody can be charged for (neither usage nor share) is the
 // organisation "(unallocated)", only visible to the proxy roles.
 
 // Unallocated names the energy no organisation is charged for.
@@ -61,6 +64,9 @@ type fluidsCell struct {
 	Day string
 	energy.Consumer
 	ActiveMJ, IdleMJ int64
+	// FixedMinor is the part of the fixed costs (racks) charged here, in the
+	// currency's minor units (an integer: sums are exact).
+	FixedMinor int64
 }
 
 func (c fluidsCell) month() string {
@@ -218,8 +224,13 @@ type FluidsRow struct {
 	// Cost is kWh × PUE × price in Currency ("" when no price is set).
 	Cost     float64 `json:"fluids_cost"`
 	Currency string  `json:"currency"`
+	// FixedCost is the fixed costs (racks) charged, in Currency, exact to the
+	// currency's minor unit; TotalCost is FluidsCost + FixedCost rounded to the
+	// minor unit, half to even, once per row.
+	FixedCost float64 `json:"fixed_cost"`
+	TotalCost float64 `json:"total_cost"`
 
-	activeMJ, idleMJ int64
+	activeMJ, idleMJ, fixedMinor int64
 }
 
 func (r FluidsRow) dim(d string) string {
@@ -273,6 +284,7 @@ func groupFluids(cells []fluidsCell, dims []string, f *config.Fluids) []FluidsRo
 		}
 		r.activeMJ += c.ActiveMJ
 		r.idleMJ += c.IdleMJ
+		r.fixedMinor += c.FixedMinor
 		r.Cost += f.Params(c.month()).Cost(c.ActiveMJ + c.IdleMJ)
 	}
 	sort.Strings(keys)
@@ -281,6 +293,8 @@ func groupFluids(cells []fluidsCell, dims []string, f *config.Fluids) []FluidsRo
 		r := *agg[k]
 		r.KWhActive, r.KWhIdle = energy.KWh(r.activeMJ), energy.KWh(r.idleMJ)
 		r.KWh = energy.KWh(r.activeMJ + r.idleMJ)
+		r.FixedCost = float64(r.fixedMinor) / math.Pow10(f.CurrencyDecimals)
+		r.TotalCost = float64(minorUnits(r.Cost+r.FixedCost, f.CurrencyDecimals)) / math.Pow10(f.CurrencyDecimals)
 		out = append(out, r)
 	}
 	return out
@@ -313,10 +327,18 @@ func (s *Server) poolShares(pool string) map[string]float64 { return s.cfg.PoolS
 // agreement), so that a part of a month is split as the month is and the parts
 // add up to it (#110).
 func (s *Server) allocatedEnergy(ctx context.Context, es store.EnergyStore, from, to time.Time) ([]fluidsCell, error) {
+	out, _, err := s.allocatedEnergyBasis(ctx, es, from, to)
+	return out, err
+}
+
+// allocatedEnergyBasis is allocatedEnergy that also returns the usage basis
+// of the partial months (see allocateFluidsPools), which the fixed costs
+// share.
+func (s *Server) allocatedEnergyBasis(ctx context.Context, es store.EnergyStore, from, to time.Time) ([]fluidsCell, map[string]map[string]map[string]float64, error) {
 	f := s.cfg.Fluids
 	cells, idle, err := es.EnergyBetween(ctx, from, to)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var basis map[string]map[string]map[string]float64
 	if f.IdleEnergy == energy.IdleByUsage {
@@ -328,7 +350,7 @@ func (s *Server) allocatedEnergy(ctx context.Context, es store.EnergyStore, from
 			}
 			mc, _, err := es.EnergyBetween(ctx, ms, me)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			u := map[string]map[string]float64{"": {}}
 			for _, c := range mc {
@@ -349,7 +371,8 @@ func (s *Server) allocatedEnergy(ctx context.Context, es store.EnergyStore, from
 			idle[i].Pool = ""
 		}
 	}
-	return allocateFluidsPools(cells, idle, f, s.poolShares, s.cfg.HasPoolShares, basis)
+	out, err := allocateFluidsPools(cells, idle, f, s.poolShares, s.cfg.HasPoolShares, basis)
+	return out, basis, err
 }
 
 // fluidsData computes the visible rows of the fluids report, with GPU-hours
@@ -360,10 +383,11 @@ func (s *Server) fluidsData(r *http.Request, p *principal, from, to time.Time, d
 		return nil, store.ErrNotFound
 	}
 	f := s.cfg.Fluids
-	all, err := s.allocatedEnergy(r.Context(), es, from, to)
+	all, basis, err := s.allocatedEnergyBasis(r.Context(), es, from, to)
 	if err != nil {
 		return nil, err
 	}
+	all = allocateFixedCosts(all, f, from, to, s.poolShares, basis)
 	// Visibility is decided on the finest cells, before grouping: a row of a
 	// grouping that does not name the organisation must still hold nothing of
 	// another one.
@@ -405,7 +429,7 @@ func (s *Server) fluidsData(r *http.Request, p *principal, from, to time.Time, d
 }
 
 func fluidsHeader(dims []string) []string {
-	return append(append([]string{"from", "to"}, dims...), "gpu_hours", "kwh_active", "kwh_idle", "kwh", "fluids_cost", "currency")
+	return append(append([]string{"from", "to"}, dims...), "gpu_hours", "kwh_active", "kwh_idle", "kwh", "fluids_cost", "currency", "fixed_cost", "total_cost")
 }
 
 func fluidsRecord(from, to time.Time, dims []string, r FluidsRow) []string {
@@ -414,7 +438,7 @@ func fluidsRecord(from, to time.Time, dims []string, r FluidsRow) []string {
 		rec = append(rec, csvSafe(r.dim(d)))
 	}
 	f := func(v float64) string { return strconv.FormatFloat(v, 'f', 6, 64) }
-	return append(rec, f(r.GPUHours), f(r.KWhActive), f(r.KWhIdle), f(r.KWh), f(r.Cost), r.Currency)
+	return append(rec, f(r.GPUHours), f(r.KWhActive), f(r.KWhIdle), f(r.KWh), f(r.Cost), r.Currency, f(r.FixedCost), f(r.TotalCost))
 }
 
 // fluidsReport answers GET /admin/fluids?from=&to=&group_by=&format=json|csv.

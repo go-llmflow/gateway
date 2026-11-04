@@ -16,7 +16,10 @@
 #   - the fluids block meters the nodes (DCGM) and prices electricity x PUE.
 #     Active energy is attributed by weighted tokens to whoever worked, so
 #     tiers pays for its own work: GET /admin/fluids?group_by=org gives its row.
-#     Idle energy is allocated by_share: the third party, share 0, pays none.
+#     Fixed costs (idle electricity; cooling through the PUE) are spread over
+#     ALL clients, the third party included: idle_energy = "by_usage" (pro rata
+#     to each organisation's active energy in the month and pool). With the
+#     default "by_share" the third party, share 0, would pay none of it.
 #
 # Parsed by the test suite (config/ilaas_example_test.go) and by check-config.
 master_key_file     = "/etc/llmflow/master.key"
@@ -26,8 +29,20 @@ fluids {
   pue           = 1.3
   price_per_kwh = 0.18
   currency      = "EUR"
-  idle_energy   = "by_share" # the third party, share 0, pays none of the idle energy
-  idle_watts    = 150        # per GPU: the baseline is booked as idle, paid by the owners
+  idle_energy   = "by_usage" # fixed costs shared by all clients, the third party included
+  idle_watts    = 150        # per GPU: the baseline is booked as idle and shared by_usage
+
+  # Fixed costs: hosting of the racks (space, power distribution, network), an
+  # amount of money per month, not energy. Spread over ALL clients like the idle
+  # energy (by_usage; no usage in the month: the shares), a part of a month
+  # prorated by time. Reported in the fixed_cost and total_cost columns.
+  fixed_cost "racks-b300" {
+    monthly = 1800
+    pool    = "b300" # omit for the whole platform
+    period "2026-12" {
+      monthly = 1950 # per-month override
+    }
+  }
 }
 
 org "etabA" {

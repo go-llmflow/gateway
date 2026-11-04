@@ -129,9 +129,11 @@ func ValidIdleMode(m string) bool { return m == IdleByShare || m == IdleByUsage 
 // AllocateIdle splits idle energy between organisations: pro rata to the
 // guaranteed shares (IdleByShare, the default of the agreement) or to what
 // each used (IdleByUsage, weights are the orgs' attributed energy or work).
-// The parts sum to idle exactly. Idle energy nobody can be charged for (no
-// share configured, no usage) stays under the organisation "" so that the
-// total remains the measured one.
+// The parts sum to idle exactly. With IdleByUsage, a month and pool in which
+// nobody worked (all usage weights zero) fall back to the shares, so a fixed
+// cost is never left unbilled for want of usage. Idle energy nobody can be
+// charged for (neither usage nor share) stays under the organisation "" so
+// that the total remains the measured one.
 func AllocateIdle(idle int64, mode string, shares, usage map[string]float64) (map[string]int64, error) {
 	if !ValidIdleMode(mode) {
 		return nil, fmt.Errorf("energy: idle_energy %q: want %s or %s", mode, IdleByShare, IdleByUsage)
@@ -140,20 +142,26 @@ func AllocateIdle(idle int64, mode string, shares, usage map[string]float64) (ma
 	if idle <= 0 {
 		return out, nil
 	}
+	split := func(src map[string]float64) ([]string, []int64) {
+		orgs := make([]string, 0, len(src))
+		for o := range src {
+			orgs = append(orgs, o)
+		}
+		sort.Strings(orgs)
+		ws := make([]float64, len(orgs))
+		for i, o := range orgs {
+			ws[i] = src[o]
+		}
+		return orgs, Apportion(idle, ws)
+	}
 	src := shares
 	if mode == IdleByUsage {
 		src = usage
 	}
-	orgs := make([]string, 0, len(src))
-	for o := range src {
-		orgs = append(orgs, o)
+	orgs, parts := split(src)
+	if parts == nil && mode == IdleByUsage {
+		orgs, parts = split(shares)
 	}
-	sort.Strings(orgs)
-	ws := make([]float64, len(orgs))
-	for i, o := range orgs {
-		ws[i] = src[o]
-	}
-	parts := Apportion(idle, ws)
 	if parts == nil {
 		out[""] = idle
 		return out, nil

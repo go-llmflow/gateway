@@ -209,7 +209,7 @@ pool "b300" {
   capacity = 256
   borrow   = "spare"      # owners as with "all"; a non-shareholder only while there is room
 }
-fluids { pue = 1.3  price_per_kwh = 0.18  currency = "EUR"  idle_energy = "by_share" }
+fluids { pue = 1.3  price_per_kwh = 0.18  currency = "EUR"  idle_energy = "by_usage" }
 ```
 
 - **Admission.** A non-shareholder of the pool (its share of THIS pool is 0; for
@@ -238,17 +238,25 @@ fluids { pue = 1.3  price_per_kwh = 0.18  currency = "EUR"  idle_energy = "by_sh
   pool is full, and always yields first.
 - **Billing its fluids needs no extra configuration.** Active energy is
   attributed by weighted tokens to whoever worked, so the third party pays for
-  its own requests; idle energy is allocated `by_share` (default), so the third
-  party, holding no share, pays none of it, or `by_usage`, by each organisation's
-  energy over the month. The price is `kWh_IT × PUE × price_per_kwh`, per month.
+  its own requests. **Fixed costs** (idle electricity, and cooling through the
+  PUE, which multiplies idle and active kWh alike) are spread over ALL clients,
+  the third party included, with `idle_energy = "by_usage"` (**recommended here**):
+  pro rata to each organisation's active energy in the month and pool. With the
+  default `by_share` the third party, holding no share, pays none of the idle
+  energy and the owners bear it all. `by_usage` falls back to the shares for a
+  month and pool in which nobody worked. The price is
+  `kWh_IT × PUE × price_per_kwh`, per month. The **racks** are a fixed cost
+  too (`fixed_cost "racks-b300" { monthly = 1800  pool = "b300" }`), spread on the
+  same basis; see the fluids section (columns `fixed_cost`, `total_cost`).
+  Fixed costs: idle energy, cooling via the PUE, racks.
   `GET /admin/fluids?group_by=org` gives the third party's row; its `org_admin`
   sees only its own row. `GET /admin/lending` gives the lent and borrowed
   GPU-hours (owners to third party).
 - **`idle_watts`.** With `idle_watts > 0`, the idle baseline of a GPU during the
   third party's work is booked as idle and paid by the owners (the third party
-  pays the marginal energy above it). With `idle_watts = 0`, the third party pays
-  all the energy of the intervals it used. Choose according to the contract; for
-  ILaaS we recommend `idle_energy = "by_share"`.
+  pays the marginal energy above it, plus its `by_usage` part of the idle
+  energy). With `idle_watts = 0`, the third party pays all the energy of the
+  intervals it used. For ILaaS we recommend `idle_energy = "by_usage"`.
 
 ### Ordering borrowers: Slurm Fair Tree
 
@@ -1142,12 +1150,34 @@ model "llama" {
   `idle_watts` floor) is allocated over a month by the agreement: `by_share`
   pro rata to the organisations' shares, `by_usage` to their energy over the **whole calendar month** (a report over part of
   a month splits that part's idle energy as the month's report would, so the parts
-  add up to the month); energy no
-  one can be charged for is `(unallocated)`, visible to the proxy roles only.
+  add up to the month); a month and pool in which nobody worked have no usage:
+  `by_usage` then falls back to the shares (**behaviour change in v0.26.0**; the
+  idle energy was `(unallocated)` and went unbilled); energy neither usage nor
+  shares can be charged for is `(unallocated)`, visible to the proxy roles only.
   An organisation's idle energy is spread over its rows pro rata to their active
   energy, so every grouping adds up to the measured total.
 - **Cost** is `kWh_IT × PUE × price_per_kWh`, priced per month (a `period` block
   overrides PUE and price for one month).
+- **Fixed costs (since v0.26.0)**: idle energy, cooling (through the PUE) and the
+  **racks**. The racks (space, power distribution, network) are an amount of
+  money per month, not energy:
+  `fixed_cost "racks-b300" { monthly = 1800  pool = "b300" }` (`pool` optional:
+  the whole platform; `period "2026-12" { monthly = 1950 }` overrides a month).
+  Validated: `monthly` in 0..10 000 000 and a whole number of the currency's minor
+  units, `currency` required, a declared pool, names and months used once. Each
+  month's amount is split between the organisations on the **same basis as the idle
+  energy** (`by_usage`: pro rata to active energy in that month and pool, a third
+  party included; no usage: the pool's shares; neither: `(unallocated)`), then,
+  inside an organisation, over its rows pro rata to active energy. The split is in
+  integer minor units (largest remainder), so every grouping adds up to the
+  configured amount to the cent. A report over part of a month gets the part
+  covered **by time** (UTC): an organisation's share `A` of the month is charged
+  `round_half_even(A × elapsed / month length)` at the window's end minus the same
+  at its start, so the parts of a month add up exactly, per organisation, to its
+  share, and a whole month is the amount (the split between organisations uses
+  the whole month's usage). New columns, appended so the others are unchanged:
+  `fixed_cost` and `total_cost` (`fluids_cost + fixed_cost`, rounded to
+  `currency_decimals`, half to even, once per row).
 - **Report.** `GET /admin/fluids?from=&to=&group_by=&format=json|csv` with
   `group_by` in org, lab, team, project, user, model, pool, day. Columns:
   `gpu_hours`, `kwh_active`, `kwh_idle`, `kwh`, `fluids_cost`, `currency`: three
