@@ -1406,7 +1406,11 @@ profile lookup and a handful of in-memory reads per request (`usageHeaders`).
   quote, space or leading sign: it is read by a finance system).
 - **`GET /admin/chargeback?from=&to=&format=csv|json`** (csv by default): one
   row per cost centre and calendar month of the period, with `gpu_hours`, `kwh`,
-  `fluids_cost` and `fluids_currency` from the fluids block, and an external
+  `fluids_cost`, `fixed_cost` (since v0.26.0: the `fixed_cost` blocks, in the
+  fluids currency, exact integers; the CSV column follows `fluids_cost`, so the
+  columns after it moved by one; JSON adds `fixed_cost` and `fixed_cost_minor`,
+  and the decision report's chargeback sheet and table a "Fixed cost" column) and
+  `fluids_currency` from the fluids block, and an external
   provider's spend in its own currency on a row of its own (`provider_cost`,
   `provider_currency`). **Money is exact**: each row's cost is rounded once, half
   to even, to the currency's minor unit (`fluids.currency_decimals`, default 2;

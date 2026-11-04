@@ -149,6 +149,56 @@ func TestChargebackMoneyIsMinorUnits(t *testing.T) {
 	}
 }
 
+// The fixed costs (racks) are in the chargeback, per cost centre, and its
+// total for the month is the fluids report's total_cost for the same month.
+func TestChargebackCarriesFixedCosts(t *testing.T) {
+	e := energyEnv(t, energy.IdleByUsage)
+	e.srv.cfg.Fluids.FixedCosts = []config.FixedCost{{Name: "racks", Monthly: 100.01}}
+	e.srv.cfg.Orgs[0].CostCenter, e.srv.cfg.Orgs[1].CostCenter = "GL-A", "GL-B"
+	saveEnergy(t, e, time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC), kWhMJ, 0, "etabA")
+	saveEnergy(t, e, time.Date(2026, 10, 6, 10, 0, 0, 0, time.UTC), 3*kWhMJ, 0, "etabB")
+	resp := e.do("GET", "/admin/chargeback?from=2026-10-01&to=2026-11-01&format=json", master, "")
+	var a struct {
+		Rows []ChargebackRow `json:"rows"`
+	}
+	if err := json.Unmarshal([]byte(readAll(t, resp)), &a); err != nil || len(a.Rows) == 0 {
+		t.Fatalf("%v %+v", err, a)
+	}
+	var total, fixed int64
+	for _, r := range a.Rows {
+		total += r.FluidsCostMinor + r.FixedCostMinor
+		fixed += r.FixedCostMinor
+		// 10001 minor units over 25 % / 75 %: 2500.25 and 7500.75, the floors
+		// leave one unit, which goes to the largest remainder (GL-B).
+		if r.CostCenter == "GL-A" && r.FixedCostMinor != 2500 || r.CostCenter == "GL-B" && r.FixedCostMinor != 7501 {
+			t.Errorf("row %+v", r)
+		}
+	}
+	if fixed != 10001 || total != 400+10001 {
+		t.Fatalf("fixed %d total %d", fixed, total)
+	}
+	resp = e.do("GET", "/admin/fluids?from=2026-10-01&to=2026-11-01&group_by=", master, "")
+	var f struct {
+		Rows []FluidsRow `json:"rows"`
+	}
+	if err := json.Unmarshal([]byte(readAll(t, resp)), &f); err != nil || len(f.Rows) != 2 {
+		t.Fatalf("%v %+v", err, f)
+	}
+	var got int64
+	for _, r := range f.Rows {
+		got += minorUnits(r.TotalCost, 2)
+	}
+	if got != total {
+		t.Fatalf("fluids total_cost %d minor, chargeback %d", got, total)
+	}
+	// The file's header and a record carry the column after fluids_cost.
+	resp = e.do("GET", "/admin/chargeback?from=2026-10-01&to=2026-11-01", master, "")
+	recs, err := csv.NewReader(strings.NewReader(readAll(t, resp))).ReadAll()
+	if err != nil || len(recs) < 2 || recs[0][5] != "fluids_cost" || recs[0][6] != "fixed_cost" {
+		t.Fatalf("%v %v", recs, err)
+	}
+}
+
 // Small cells are not shown: one person is never a figure.
 func TestAdoptionSmallCells(t *testing.T) {
 	up := newFakeVLLM(t)

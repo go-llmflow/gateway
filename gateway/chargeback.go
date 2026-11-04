@@ -47,8 +47,14 @@ type ChargebackRow struct {
 	// rounded once per row, half to even; FluidsCost and ProviderCost are the
 	// same amounts as decimal strings. The rows of a file therefore add up to
 	// its total exactly, in integers (#110).
-	FluidsCostMinor   int64  `json:"fluids_cost_minor"`
-	FluidsCost        string `json:"fluids_cost"`
+	FluidsCostMinor int64  `json:"fluids_cost_minor"`
+	FluidsCost      string `json:"fluids_cost"`
+	// FixedCostMinor and FixedCost are the fixed costs (racks, fluids {
+	// fixed_cost }) charged to the cost centre, in the fluids currency; exact
+	// integers (the split is in minor units), the total of a month is
+	// FluidsCostMinor + FixedCostMinor.
+	FixedCostMinor    int64  `json:"fixed_cost_minor"`
+	FixedCost         string `json:"fixed_cost"`
 	FluidsCurrency    string `json:"fluids_currency"`
 	ProviderCostMinor int64  `json:"provider_cost_minor"`
 	ProviderCost      string `json:"provider_cost"`
@@ -160,10 +166,11 @@ func (s *Server) chargeback(r *http.Request, p *principal, from, to time.Time) (
 			// span its start falls in, exactly as in /admin/fluids, whatever
 			// time of day the period ends (#110).
 			for _, sp := range spans {
-				all, err := s.allocatedEnergy(ctx, es, sp[0], sp[1])
+				all, basis, err := s.allocatedEnergyBasis(ctx, es, sp[0], sp[1])
 				if err != nil {
 					return nil, err
 				}
+				all = allocateFixedCosts(all, f, sp[0], sp[1], s.poolShares, basis)
 				for _, c := range all {
 					if !p.reportView() && (c.Org == Unallocated || !visible(c.Org)) {
 						continue
@@ -171,6 +178,7 @@ func (s *Server) chargeback(r *http.Request, p *principal, from, to time.Time) (
 					a := row(sp, ccOf(c.Org, c.Lab, c.Team, c.Project), "")
 					a.KWh += energy.KWh(c.ActiveMJ + c.IdleMJ)
 					a.fluids += f.Params(sp[0].Format("2006-01")).Cost(c.ActiveMJ + c.IdleMJ)
+					a.FixedCostMinor += c.FixedMinor
 					a.FluidsCurrency = f.Currency
 				}
 			}
@@ -184,6 +192,7 @@ func (s *Server) chargeback(r *http.Request, p *principal, from, to time.Time) (
 	for _, a := range agg {
 		a.FluidsCostMinor, a.ProviderCostMinor = minorUnits(a.fluids, dec), minorUnits(a.provider, ProviderDecimals)
 		a.FluidsCost, a.ProviderCost = formatMinor(a.FluidsCostMinor, dec), formatMinor(a.ProviderCostMinor, ProviderDecimals)
+		a.FixedCost = formatMinor(a.FixedCostMinor, dec)
 		out = append(out, *a)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -199,11 +208,11 @@ func (s *Server) chargeback(r *http.Request, p *principal, from, to time.Time) (
 	return out, nil
 }
 
-var chargebackHeader = []string{"period_from", "period_to", "cost_center", "gpu_hours", "kwh", "fluids_cost", "fluids_currency", "provider_cost", "provider_currency"}
+var chargebackHeader = []string{"period_from", "period_to", "cost_center", "gpu_hours", "kwh", "fluids_cost", "fixed_cost", "fluids_currency", "provider_cost", "provider_currency"}
 
 func (c ChargebackRow) record() []string {
 	f := func(v float64) string { return strconv.FormatFloat(v, 'f', 6, 64) }
-	return []string{c.From.UTC().Format("2006-01-02"), c.To.UTC().Format("2006-01-02"), csvSafe(c.CostCenter), f(c.GPUHours), f(c.KWh), c.FluidsCost,
+	return []string{c.From.UTC().Format("2006-01-02"), c.To.UTC().Format("2006-01-02"), csvSafe(c.CostCenter), f(c.GPUHours), f(c.KWh), c.FluidsCost, c.FixedCost,
 		c.FluidsCurrency, c.ProviderCost, c.ProviderCurrency}
 }
 

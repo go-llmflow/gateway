@@ -83,7 +83,7 @@ func TestChargeback(t *testing.T) {
 	index := func(rows [][]string) map[string][]string {
 		m := map[string][]string{}
 		for _, r := range rows {
-			m[r[0]+"|"+r[2]+"|"+r[8]] = r
+			m[r[0]+"|"+r[2]+"|"+r[9]] = r
 		}
 		return m
 	}
@@ -108,7 +108,7 @@ func TestChargeback(t *testing.T) {
 	check("2026-10-01|UNMAPPED|", 8, 0.25, 0.25) // etabB: its 0.25 of the idle energy, no code
 	check("2026-11-01|UNMAPPED|", 16, 0, 0)
 	check("2026-10-01|GL-A|USD", 0, 0, 0)
-	if r := m["2026-10-01|GL-A|USD"]; r == nil || num(r[7]) != 0.5 || r[8] != "USD" {
+	if r := m["2026-10-01|GL-A|USD"]; r == nil || num(r[8]) != 0.5 || r[9] != "USD" {
 		t.Fatalf("provider row %v", r)
 	}
 	// It adds up to the energy measured (2 kWh) and the GPU-hours recorded (31).
