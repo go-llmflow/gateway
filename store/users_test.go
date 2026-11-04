@@ -18,6 +18,7 @@ func contractUsers(t *testing.T, s Store) {
 	}
 	must(s.CreateUser(ctx, "alice"))
 	must(s.CreateUser(ctx, "bob"))
+	contractIdP(t, s)
 	if err := s.CreateUser(ctx, "alice"); !errors.Is(err, ErrExists) {
 		t.Fatalf("duplicate user: %v", err)
 	}
@@ -189,5 +190,26 @@ func TestMemoryUsersFaults(t *testing.T) {
 		if !errors.Is(err, boom) {
 			t.Fatalf("call %d: %v", i, err)
 		}
+	}
+}
+
+// v0.27.0: a user is linked once to the identity provider and subject that
+// vouched for them; the first link wins.
+func TestUserIdPLink(t *testing.T) { contractIdP(t, NewMemory()) }
+
+func contractIdP(t *testing.T, m Store) {
+	ctx := context.Background()
+	if _, err := m.UserIdP(ctx, "idp-user"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("no link yet: %v", err)
+	}
+	a := IdPLink{Provider: "a", Subject: "s1"}
+	if got, err := m.LinkUserIdP(ctx, "idp-user", a); err != nil || got != a {
+		t.Fatalf("first link: %+v %v", got, err)
+	}
+	if got, err := m.LinkUserIdP(ctx, "idp-user", IdPLink{Provider: "b", Subject: "s1"}); err != nil || got != a {
+		t.Fatalf("the first link wins: %+v %v", got, err)
+	}
+	if got, err := m.UserIdP(ctx, "idp-user"); err != nil || got != a {
+		t.Fatalf("read back: %+v %v", got, err)
 	}
 }

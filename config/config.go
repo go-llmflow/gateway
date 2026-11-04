@@ -76,6 +76,9 @@ type Config struct {
 	// JWT, when set, accepts OpenID Connect access tokens on the inference
 	// API besides virtual keys.
 	JWT *JWT
+	// JWTs are the named jwt blocks (several issuers); JWT is the unnamed
+	// one of earlier versions. Never both.
+	JWTs []*JWT
 	// SSO, when set, logs administrators in with OpenID Connect
 	// (authorization code + PKCE) and keeps them in a session cookie.
 	SSO *SSO
@@ -328,6 +331,10 @@ type SSO struct {
 	// Roles map ID token claims to role bindings, added to the bindings
 	// the user has in the store.
 	Roles []SSORole
+	// Providers are the named provider blocks; when present the fields
+	// above that describe one issuer are empty and RedirectURL is the base
+	// of every provider's callback (/admin/callback/<name>).
+	Providers []SSOProvider
 }
 
 // SSORole grants Role (on Org or Team, or proxy-wide) to whoever's Claim
@@ -363,6 +370,13 @@ type JWT struct {
 	RPM, TPM, MaxInFlight int
 	// Maps are tried in order; the first match names the team.
 	Maps []JWTMap
+	// Name labels a jwt "<name>" block ("" for the unnamed one). Orgs are
+	// the organisations this issuer may vouch for (a map to a team of another
+	// organisation is a configuration error; empty: unrestricted, the
+	// unnamed block only). Accept: all must hold, or the token is refused.
+	Name   string
+	Orgs   []string
+	Accept []Accept
 }
 
 // JWTMap maps a claim value to a team (and optionally a project).

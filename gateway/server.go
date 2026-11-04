@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-authn/oidc"
 	"github.com/go-llmflow/gateway/audit"
 	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/export"
@@ -49,6 +48,8 @@ type Secrets struct {
 	// SSOClientSecret is the admin login client's secret (empty: a public
 	// client).
 	SSOClientSecret string
+	// SSOClientSecrets are the secrets of the provider blocks, by name.
+	SSOClientSecrets map[string]string
 	// SCIMToken is the bearer token of the provisioning client.
 	SCIMToken string
 	// AuditKey is the audit checkpoint signing key (an Ed25519 seed, base64
@@ -133,7 +134,7 @@ type Server struct {
 	alerts      *alerter
 	// jwt verifies OpenID Connect access tokens (nil: virtual keys only);
 	// jwtCache keeps verified tokens until their expiry or the key TTL.
-	jwt       *oidc.Verifier
+	jwt       []*jwtIssuer
 	jwtCache  *keyCache
 	jwtClient *http.Client
 	// sso holds the admin login client, sessions and logins in progress.

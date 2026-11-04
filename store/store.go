@@ -367,6 +367,15 @@ type Store interface {
 	ListUsers(ctx context.Context) ([]User, error)
 	// DisableUser disables a user and revokes their admin tokens.
 	DisableUser(ctx context.Context, name string) error
+	// LinkUserIdP binds a user to the identity provider and subject that
+	// vouched for them, once: when the user has no link it is stored and
+	// returned; when it has one, the stored link is returned unchanged. The
+	// caller compares (OpenID Connect Core §2: sub is unique within an issuer
+	// only, so an identity is a provider and a subject).
+	LinkUserIdP(ctx context.Context, user string, l IdPLink) (IdPLink, error)
+	// UserIdP returns a user's link, or ErrNotFound for a user stored before
+	// v0.27.0 or never logged in through SSO.
+	UserIdP(ctx context.Context, user string) (IdPLink, error)
 	CreateUserToken(ctx context.Context, t UserToken) error
 	ListUserTokens(ctx context.Context, user string) ([]UserToken, error)
 	RevokeUserToken(ctx context.Context, user, id string) error
