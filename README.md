@@ -127,7 +127,7 @@ pool "b300" { capacity = 256 }                     # no shares: the organisation
 pool "rtx6000" {
   capacity = 64
   shares   = { etabA = 0.5, etabC = 0.3, etabD = 0.2 }   # what each paid for THIS machine
-  borrow   = "shareholders"                              # or "all" (default)
+  borrow   = "shareholders"                              # "all" (default) or "spare"
 }
 ```
 
@@ -191,6 +191,72 @@ pool "rtx6000" {
   gateway's pool plays the partition's role, and each pool has its tree: its own
   shares. The pages do not describe how Slurm combines partition-specific
   associations, so none of that is copied.
+
+### Lending to a third party (ILaaS) and billing its fluids (since v0.26.0)
+
+A multi-institution B300 pool can lend its capacity to a third party (an
+organisation that holds no share of it) **only while the owners' total use is
+below 100 %**, and bill that party's electricity and cooling. Example:
+`examples/b300-ilaas.hcl` (parsed by the tests and `check-config`).
+
+```hcl
+org "etabA" { share = 0.5  team "lab-nlp" {} }
+org "etabB" { share = 0.3  team "lab-chem" {} }
+org "etabC" { share = 0.2  team "lab-vision" {} }
+org "tiers" { share = 0    team "tiers-prod" {} }     # the third party
+
+pool "b300" {
+  capacity = 256
+  borrow   = "spare"      # owners as with "all"; a non-shareholder only while there is room
+}
+fluids { pue = 1.3  price_per_kwh = 0.18  currency = "EUR"  idle_energy = "by_usage" }
+```
+
+- **Admission.** A non-shareholder of the pool (its share of THIS pool is 0; for
+  a pool without `shares`, the organisation's own share) is admitted only if
+  fewer than C requests are in flight, decided and taken atomically
+  (`TryAcquire`, also across replicas under `ha`), and vLLM does not report its
+  queues as saturated (a waiting request, #58). Otherwise: **429**
+  `rate_limit_exceeded` with `Retry-After: 5` (a fixed 5 s), a message naming the
+  pool and saying the organisation holds no share and is served from spare
+  capacity only (nothing about the owners' use), metric
+  `llmflow_denied_total{reason="pool_spare"}`. It is 429 and not 403 (as for
+  `shareholders`) because retrying later can succeed. The same rule applies when a
+  request falls back into such a pool. Owners are unchanged.
+- **Priority.** Admitted, the third party always takes the last priority band
+  (`BorrowBase + RankStep × MaxRank`). Shareholders that borrow clamp one band
+  earlier (`MaxRank - 1`), so a zero-share organisation never ties with the most
+  over-served owner, whatever the number of distinct usage levels (before v0.26.0
+  the ranks were clamped at 9 for everyone, and with 10 or more distinct levels
+  the two tied). vLLM then preempts the third party first when KV blocks run out.
+- **What this does not promise.** vLLM's scheduler (re-opened 2026-11-04,
+  `vllm/v1/core/sched/scheduler.py` and `request_queue.py` on main) preempts on
+  KV exhaustion the running request with the largest `(priority,
+  arrival_time)`, and a waiting request never preempts a running one: an owner
+  arriving when the pool is full waits for a slot, or for a KV preemption of the
+  third party. The guarantee is that the third party never takes a slot while the
+  pool is full, and always yields first.
+- **Billing its fluids needs no extra configuration.** Active energy is
+  attributed by weighted tokens to whoever worked, so the third party pays for
+  its own requests. **Fixed costs** (idle electricity, and cooling through the
+  PUE, which multiplies idle and active kWh alike) are spread over ALL clients,
+  the third party included, with `idle_energy = "by_usage"` (**recommended here**):
+  pro rata to each organisation's active energy in the month and pool. With the
+  default `by_share` the third party, holding no share, pays none of the idle
+  energy and the owners bear it all. `by_usage` falls back to the shares for a
+  month and pool in which nobody worked. The price is
+  `kWh_IT × PUE × price_per_kwh`, per month. The **racks** are a fixed cost
+  too (`fixed_cost "racks-b300" { monthly = 1800  pool = "b300" }`), spread on the
+  same basis; see the fluids section (columns `fixed_cost`, `total_cost`).
+  Fixed costs: idle energy, cooling via the PUE, racks.
+  `GET /admin/fluids?group_by=org` gives the third party's row; its `org_admin`
+  sees only its own row. `GET /admin/lending` gives the lent and borrowed
+  GPU-hours (owners to third party).
+- **`idle_watts`.** With `idle_watts > 0`, the idle baseline of a GPU during the
+  third party's work is booked as idle and paid by the owners (the third party
+  pays the marginal energy above it, plus its `by_usage` part of the idle
+  energy). With `idle_watts = 0`, the third party pays all the energy of the
+  intervals it used. For ILaaS we recommend `idle_energy = "by_usage"`.
 
 ### Ordering borrowers: Slurm Fair Tree
 
@@ -1084,12 +1150,34 @@ model "llama" {
   `idle_watts` floor) is allocated over a month by the agreement: `by_share`
   pro rata to the organisations' shares, `by_usage` to their energy over the **whole calendar month** (a report over part of
   a month splits that part's idle energy as the month's report would, so the parts
-  add up to the month); energy no
-  one can be charged for is `(unallocated)`, visible to the proxy roles only.
+  add up to the month); a month and pool in which nobody worked have no usage:
+  `by_usage` then falls back to the shares (**behaviour change in v0.26.0**; the
+  idle energy was `(unallocated)` and went unbilled); energy neither usage nor
+  shares can be charged for is `(unallocated)`, visible to the proxy roles only.
   An organisation's idle energy is spread over its rows pro rata to their active
   energy, so every grouping adds up to the measured total.
 - **Cost** is `kWh_IT × PUE × price_per_kWh`, priced per month (a `period` block
   overrides PUE and price for one month).
+- **Fixed costs (since v0.26.0)**: idle energy, cooling (through the PUE) and the
+  **racks**. The racks (space, power distribution, network) are an amount of
+  money per month, not energy:
+  `fixed_cost "racks-b300" { monthly = 1800  pool = "b300" }` (`pool` optional:
+  the whole platform; `period "2026-12" { monthly = 1950 }` overrides a month).
+  Validated: `monthly` in 0..10 000 000 and a whole number of the currency's minor
+  units, `currency` required, a declared pool, names and months used once. Each
+  month's amount is split between the organisations on the **same basis as the idle
+  energy** (`by_usage`: pro rata to active energy in that month and pool, a third
+  party included; no usage: the pool's shares; neither: `(unallocated)`), then,
+  inside an organisation, over its rows pro rata to active energy. The split is in
+  integer minor units (largest remainder), so every grouping adds up to the
+  configured amount to the cent. A report over part of a month gets the part
+  covered **by time** (UTC): an organisation's share `A` of the month is charged
+  `round_half_even(A × elapsed / month length)` at the window's end minus the same
+  at its start, so the parts of a month add up exactly, per organisation, to its
+  share, and a whole month is the amount (the split between organisations uses
+  the whole month's usage). New columns, appended so the others are unchanged:
+  `fixed_cost` and `total_cost` (`fluids_cost + fixed_cost`, rounded to
+  `currency_decimals`, half to even, once per row).
 - **Report.** `GET /admin/fluids?from=&to=&group_by=&format=json|csv` with
   `group_by` in org, lab, team, project, user, model, pool, day. Columns:
   `gpu_hours`, `kwh_active`, `kwh_idle`, `kwh`, `fluids_cost`, `currency`: three
@@ -1318,7 +1406,11 @@ profile lookup and a handful of in-memory reads per request (`usageHeaders`).
   quote, space or leading sign: it is read by a finance system).
 - **`GET /admin/chargeback?from=&to=&format=csv|json`** (csv by default): one
   row per cost centre and calendar month of the period, with `gpu_hours`, `kwh`,
-  `fluids_cost` and `fluids_currency` from the fluids block, and an external
+  `fluids_cost`, `fixed_cost` (since v0.26.0: the `fixed_cost` blocks, in the
+  fluids currency, exact integers; the CSV column follows `fluids_cost`, so the
+  columns after it moved by one; JSON adds `fixed_cost` and `fixed_cost_minor`,
+  and the decision report's chargeback sheet and table a "Fixed cost" column) and
+  `fluids_currency` from the fluids block, and an external
   provider's spend in its own currency on a row of its own (`provider_cost`,
   `provider_currency`). **Money is exact**: each row's cost is rounded once, half
   to even, to the currency's minor unit (`fluids.currency_decimals`, default 2;

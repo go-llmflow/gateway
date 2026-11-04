@@ -382,13 +382,13 @@ func writeDecisionXLSX(w io.Writer, d *decisionData) error {
 		}
 	}
 	cb, err := sheet("Chargeback", []float64{14, 14, 18}, "Period from", "Period to", "Cost centre", "GPU-hours", "Energy (kWh)",
-		"Fluids cost", "Fluids currency", "Provider cost", "Provider currency")
+		"Fluids cost", "Fixed cost", "Fluids currency", "Provider cost", "Provider currency")
 	if err != nil {
 		return err
 	}
 	for _, c := range d.Chargeback {
 		if err := cb.AppendRow(xlsx.String(c.From.UTC().Format("2006-01-02")), xlsx.String(c.To.UTC().Format("2006-01-02")), xlsx.String(c.CostCenter),
-			num(c.GPUHours), num(c.KWh), money(c.FluidsCostMinor, d.CurrencyDecimals), xlsx.String(c.FluidsCurrency),
+			num(c.GPUHours), num(c.KWh), money(c.FluidsCostMinor, d.CurrencyDecimals), money(c.FixedCostMinor, d.CurrencyDecimals), xlsx.String(c.FluidsCurrency),
 			money(c.ProviderCostMinor, ProviderDecimals), xlsx.String(c.ProviderCurrency)); err != nil {
 			return err
 		}
@@ -568,7 +568,7 @@ func signed(v float64) string {
 
 type matrixView struct{ Lender, Borrower, GPUHours string }
 
-type chargebackView struct{ Period, CostCenter, GPUHours, KWh, Fluids, Provider string }
+type chargebackView struct{ Period, CostCenter, GPUHours, KWh, Fluids, Fixed, Provider string }
 
 func pctS(v float64) string { return strconv.FormatFloat(100*v, 'f', 1, 64) + " %" }
 
@@ -639,7 +639,11 @@ func (d *decisionData) view() decisionView {
 		if c.FluidsCurrency != "" || c.FluidsCostMinor != 0 {
 			fl = c.FluidsCost + " " + c.FluidsCurrency
 		}
-		v.Chargeback = append(v.Chargeback, chargebackView{c.From.UTC().Format("2006-01"), c.CostCenter, fmtNum(c.GPUHours), fmtNum(c.KWh), fl, prov})
+		fx := ""
+		if c.FixedCostMinor != 0 {
+			fx = c.FixedCost + " " + c.FluidsCurrency
+		}
+		v.Chargeback = append(v.Chargeback, chargebackView{c.From.UTC().Format("2006-01"), c.CostCenter, fmtNum(c.GPUHours), fmtNum(c.KWh), fl, fx, prov})
 	}
 	v.HasRecon, v.ReconNote, v.Recon, v.ReconAssumption = d.HasRecon, d.ReconNote, d.reconViews(), reconAssumption
 	v.Quota = d.Quotas.view()
@@ -756,8 +760,8 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 {{range .Recon}}<tr><td>{{.Org}}</td><td class="n">{{.Slurm}}</td><td class="n">{{.DCGM}}</td><td class="n">{{.Diff}}</td><td class="n">{{.Pct}}</td></tr>
 {{end}}</table>{{end}}
 <h2 id="d-chargeback">Chargeback</h2>
-{{if .Chargeback}}<table><tr><th>Month</th><th>Cost centre</th><th class="n">GPU-hours</th><th class="n">kWh</th><th class="n">Fluids</th><th class="n">Provider spend</th></tr>
-{{range .Chargeback}}<tr><td>{{.Period}}</td><td>{{.CostCenter}}</td><td class="n">{{.GPUHours}}</td><td class="n">{{.KWh}}</td><td class="n">{{.Fluids}}</td><td class="n">{{.Provider}}</td></tr>
+{{if .Chargeback}}<table><tr><th>Month</th><th>Cost centre</th><th class="n">GPU-hours</th><th class="n">kWh</th><th class="n">Fluids</th><th class="n">Fixed costs</th><th class="n">Provider spend</th></tr>
+{{range .Chargeback}}<tr><td>{{.Period}}</td><td>{{.CostCenter}}</td><td class="n">{{.GPUHours}}</td><td class="n">{{.KWh}}</td><td class="n">{{.Fluids}}</td><td class="n">{{.Fixed}}</td><td class="n">{{.Provider}}</td></tr>
 {{end}}</table>{{else}}<p>No chargeback rows.</p>{{end}}
 <h2 id="d-variance">Budget against actual</h2>
 <p class="note">{{.VarianceNote}}</p>

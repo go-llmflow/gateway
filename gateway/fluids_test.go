@@ -213,7 +213,7 @@ func TestFluidsEndToEnd(t *testing.T) {
 	_ = readAll(t, resp)
 	resp = e.do("GET", "/admin/fluids?from=2026-10-01&to=2026-11-01&group_by=org,day&format=csv", master, "")
 	csv := readAll(t, resp)
-	if !strings.HasPrefix(csv, "from,to,org,day,gpu_hours,kwh_active,kwh_idle,kwh,fluids_cost,currency\n") || !strings.Contains(csv, "etabB,2026-10-15,") {
+	if !strings.HasPrefix(csv, "from,to,org,day,gpu_hours,kwh_active,kwh_idle,kwh,fluids_cost,currency,fixed_cost,total_cost\n") || !strings.Contains(csv, "etabB,2026-10-15,") {
 		t.Fatalf("csv:\n%s", csv)
 	}
 }
@@ -266,6 +266,20 @@ func TestAllocateFluidsModes(t *testing.T) {
 		if mode == energy.IdleByShare && (a != 500 || b != 500) || mode == energy.IdleByUsage && (a != 400 || b != 600) {
 			t.Errorf("%s: a %d b %d", mode, a, b)
 		}
+	}
+	// by_usage with no usage at all (nobody worked that month): the shares
+	// bear the idle energy (it was "(unallocated)" before v0.26.0).
+	f.IdleEnergy = energy.IdleByUsage
+	cs0, _ := allocateFluids(nil, idle, f, shares)
+	var s0 int64
+	for _, c := range cs0 {
+		if c.Org == Unallocated {
+			t.Errorf("by_usage with no usage left %d unallocated", c.IdleMJ)
+		}
+		s0 += c.IdleMJ
+	}
+	if s0 != 1000 {
+		t.Errorf("by_usage fallback allocated %d of 1000", s0)
 	}
 	// No share and no usage: unallocated, still counted.
 	f.IdleEnergy = energy.IdleByShare
