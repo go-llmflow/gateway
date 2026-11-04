@@ -27,6 +27,18 @@
 // exponential exp(-ln2·Δt/half_life), of which Slurm's factor is the
 // first-order expansion). The most over-served borrower gets the largest
 // priority number, so it is admitted last and preempted first.
+//
+// Ranks are clamped so that the last band, MaxRank, belongs to the teams
+// that hold no share (a third party lent spare capacity, ILaaS): shareholders
+// clamp at MaxRank-1, so a zero-share team never ties with the most
+// over-served owner, however many distinct usage levels the owners have.
+//
+// Re-opened 2026-11-04 (vllm main, scheduler.py ~l.950 and request_queue.py
+// PriorityRequestQueue): the claim above still holds. On KV exhaustion the
+// victim is max(running, key=(priority, arrival_time)); the waiting queue is
+// a heapq on (priority, arrival_time), and the waiting loop is only entered
+// when nothing was preempted in the step. The file has grown (pause states,
+// connectors, deferred waiting) but the policy is unchanged.
 package fairshare
 
 import (
@@ -72,6 +84,7 @@ type Pool struct {
 	last     time.Time
 	teams    map[string]*team
 	order    []*team
+	anyShare bool // set by rank: some team holds a share
 }
 
 type team struct {
@@ -410,8 +423,14 @@ func (p *Pool) acquire(teamName string, class Class, estTokens int64, needRoom b
 	} else {
 		p.rank()
 		r := t.rank
-		if r > MaxRank {
+		switch {
+		case p.anyShare && t.share <= 0:
+			// A team without a share (a third party lent spare capacity)
+			// always takes the last band, whatever the number of distinct
+			// ranks among the shareholders.
 			r = MaxRank
+		case r > MaxRank-1:
+			r = MaxRank - 1
 		}
 		g.Priority = BorrowBase + RankStep*r + int(class)
 		g.Borrowing = true
@@ -487,6 +506,7 @@ func (p *Pool) rank() {
 		sumS += t.share
 		sumU += t.usage
 	}
+	p.anyShare = sumS > 0
 	for _, t := range p.order {
 		s, u := 0.0, 0.0
 		if sumS > 0 {

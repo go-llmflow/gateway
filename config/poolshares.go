@@ -30,6 +30,12 @@ const (
 	// BorrowShareholders lends it only to the pool's contributors: an
 	// organisation holding no share of the pool is refused (403).
 	BorrowShareholders = "shareholders"
+	// BorrowSpare lends capacity to a third party (an organisation holding no
+	// share of the pool, ILaaS) only while the pool has room: such a request
+	// is admitted only if fewer than C are in flight and vLLM's queues are not
+	// saturated, otherwise it is refused (429, Retry-After). Shareholders are
+	// unaffected and may still borrow from each other as with BorrowAll.
+	BorrowSpare = "spare"
 )
 
 // PoolShares returns the shares of the pool's organisations: the pool's own
@@ -81,6 +87,13 @@ func (c *Config) PoolBorrow(pool string) string {
 // every request and allocates nothing.
 func (c *Config) PoolAllows(pool, org string) bool {
 	return c.PoolBorrow(pool) != BorrowShareholders || c.PoolShare(pool, org) > 0
+}
+
+// PoolSpareOnly reports whether org is served from the pool's spare capacity
+// only: the pool lends with BorrowSpare and org holds no share of it. It runs
+// on every request and allocates nothing.
+func (c *Config) PoolSpareOnly(pool, org string) bool {
+	return c.PoolBorrow(pool) == BorrowSpare && c.PoolShare(pool, org) <= 0
 }
 
 // HasPoolShares reports whether the pool has an apportionment of its own.
@@ -158,10 +171,10 @@ func (v *validator) poolShares(p poolHCL, pool *Pool, orgs map[string]bool) {
 	pool.Borrow = BorrowAll
 	if p.Borrow != nil {
 		switch *p.Borrow {
-		case BorrowAll, BorrowShareholders:
+		case BorrowAll, BorrowShareholders, BorrowSpare:
 			pool.Borrow = *p.Borrow
 		default:
-			v.errf(p.BorrowRange, "Invalid borrow", "pool %q borrow = %q: want \"all\" or \"shareholders\"", p.Name, *p.Borrow)
+			v.errf(p.BorrowRange, "Invalid borrow", "pool %q borrow = %q: want \"all\", \"shareholders\" or \"spare\"", p.Name, *p.Borrow)
 		}
 	}
 	if p.Shares == nil {

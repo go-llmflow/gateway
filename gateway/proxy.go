@@ -69,6 +69,40 @@ func movesOnSaturation(g *group, grant *fairshare.Grant) bool {
 	return grant.Borrowing && g.cfg.FallsBackOn("saturated") && (grant.Saturated || g.queueSaturated())
 }
 
+// spareRetryAfter is the Retry-After (seconds) of a request refused because
+// the pool has no spare capacity (borrow = "spare"): long enough for a slot
+// to free, short enough for a client to retry without backing off for long.
+const spareRetryAfter = 5
+
+// acquireFor takes the request's slot in g's pool. An organisation served
+// from spare capacity only (borrow = "spare", no share) takes it only if
+// fewer than C requests are in flight and vLLM's queues are not saturated;
+// spare is then false and no grant is held. Anyone else acquires as before.
+func (s *Server) acquireFor(g *group, org string, est int64) (grant *fairshare.Grant, spare bool, err error) {
+	if !s.cfg.PoolSpareOnly(g.cfg.Pool, org) {
+		grant, err = g.pool.acquire(org, g.class, est)
+		return grant, false, err
+	}
+	grant, ok := g.pool.tryAcquire(org, g.class, est)
+	if ok && g.queueSaturated() {
+		grant.Release(0)
+		ok = false
+	}
+	if !ok {
+		return nil, true, nil
+	}
+	return grant, false, nil
+}
+
+// refuseSpare answers a spare-only organisation when the pool has no room:
+// 429, with a Retry-After. It says nothing of the other organisations' use.
+func (s *Server) refuseSpare(w http.ResponseWriter, key store.Key, pool string) {
+	s.met.denied.add(1, key.Team, "pool_spare")
+	w.Header().Set("Retry-After", strconv.Itoa(spareRetryAfter))
+	apiError(w, http.StatusTooManyRequests, "rate_limit_exceeded",
+		"the GPU pool "+pool+" has no spare capacity right now: organisation "+key.Org+" holds no share of it and is served from spare capacity only; retry in a few seconds")
+}
+
 var errUnknownModel = errors.New("unknown model")
 
 // requestID returns a random identifier for one request.
@@ -328,7 +362,12 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			}
 		}
 		promptEst := int64(len(out) / 4)
-		grant, aerr := g.pool.acquire(key.Org, g.class, promptEst+req.MaxTokens)
+		grant, spare, aerr := s.acquireFor(g, key.Org, promptEst+req.MaxTokens)
+		if spare {
+			s.limiter.release(key.ID, 0)
+			s.refuseSpare(w, key, g.cfg.Pool)
+			return
+		}
 		if aerr != nil {
 			// ha, on_owner_unreachable = "reject"; or the owner decides with
 			// other shares than this pool's.
@@ -542,7 +581,13 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			adm.release(0)
 			g, out, adm = next, fb.out, fb.adm
 			scope.model, scope.unit, scope.overflow = g.cfg.Name, g.cfg.Cost.Unit, adm.overflow
-			ng, aerr := g.pool.acquire(key.Org, g.class, promptEst+req.MaxTokens)
+			ng, spare, aerr := s.acquireFor(g, key.Org, promptEst+req.MaxTokens)
+			if spare {
+				// The target pool lends spare capacity only and has none.
+				status = http.StatusTooManyRequests
+				s.refuseSpare(w, key, g.cfg.Pool)
+				return
+			}
 			if aerr != nil {
 				// The released grant stays the one the deferred accounting
 				// releases again (a no-op).

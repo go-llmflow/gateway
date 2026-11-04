@@ -587,7 +587,7 @@ type Pool struct {
 	// shares apply (backwards compatible). An organisation absent from a
 	// non-nil Shares holds 0 slots of the pool. See poolshares.go.
 	Shares map[string]float64
-	// Borrow is BorrowAll (default) or BorrowShareholders.
+	// Borrow is BorrowAll (default), BorrowShareholders or BorrowSpare.
 	Borrow string
 }
 

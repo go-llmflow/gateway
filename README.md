@@ -127,7 +127,7 @@ pool "b300" { capacity = 256 }                     # no shares: the organisation
 pool "rtx6000" {
   capacity = 64
   shares   = { etabA = 0.5, etabC = 0.3, etabD = 0.2 }   # what each paid for THIS machine
-  borrow   = "shareholders"                              # or "all" (default)
+  borrow   = "shareholders"                              # "all" (default) or "spare"
 }
 ```
 
@@ -191,6 +191,64 @@ pool "rtx6000" {
   gateway's pool plays the partition's role, and each pool has its tree: its own
   shares. The pages do not describe how Slurm combines partition-specific
   associations, so none of that is copied.
+
+### Lending to a third party (ILaaS) and billing its fluids (since v0.26.0)
+
+A multi-institution B300 pool can lend its capacity to a third party (an
+organisation that holds no share of it) **only while the owners' total use is
+below 100 %**, and bill that party's electricity and cooling. Example:
+`examples/b300-ilaas.hcl` (parsed by the tests and `check-config`).
+
+```hcl
+org "etabA" { share = 0.5  team "lab-nlp" {} }
+org "etabB" { share = 0.3  team "lab-chem" {} }
+org "etabC" { share = 0.2  team "lab-vision" {} }
+org "tiers" { share = 0    team "tiers-prod" {} }     # the third party
+
+pool "b300" {
+  capacity = 256
+  borrow   = "spare"      # owners as with "all"; a non-shareholder only while there is room
+}
+fluids { pue = 1.3  price_per_kwh = 0.18  currency = "EUR"  idle_energy = "by_share" }
+```
+
+- **Admission.** A non-shareholder of the pool (its share of THIS pool is 0; for
+  a pool without `shares`, the organisation's own share) is admitted only if
+  fewer than C requests are in flight, decided and taken atomically
+  (`TryAcquire`, also across replicas under `ha`), and vLLM does not report its
+  queues as saturated (a waiting request, #58). Otherwise: **429**
+  `rate_limit_exceeded` with `Retry-After: 5` (a fixed 5 s), a message naming the
+  pool and saying the organisation holds no share and is served from spare
+  capacity only (nothing about the owners' use), metric
+  `llmflow_denied_total{reason="pool_spare"}`. It is 429 and not 403 (as for
+  `shareholders`) because retrying later can succeed. The same rule applies when a
+  request falls back into such a pool. Owners are unchanged.
+- **Priority.** Admitted, the third party always takes the last priority band
+  (`BorrowBase + RankStep × MaxRank`). Shareholders that borrow clamp one band
+  earlier (`MaxRank - 1`), so a zero-share organisation never ties with the most
+  over-served owner, whatever the number of distinct usage levels (before v0.26.0
+  the ranks were clamped at 9 for everyone, and with 10 or more distinct levels
+  the two tied). vLLM then preempts the third party first when KV blocks run out.
+- **What this does not promise.** vLLM's scheduler (re-opened 2026-11-04,
+  `vllm/v1/core/sched/scheduler.py` and `request_queue.py` on main) preempts on
+  KV exhaustion the running request with the largest `(priority,
+  arrival_time)`, and a waiting request never preempts a running one: an owner
+  arriving when the pool is full waits for a slot, or for a KV preemption of the
+  third party. The guarantee is that the third party never takes a slot while the
+  pool is full, and always yields first.
+- **Billing its fluids needs no extra configuration.** Active energy is
+  attributed by weighted tokens to whoever worked, so the third party pays for
+  its own requests; idle energy is allocated `by_share` (default), so the third
+  party, holding no share, pays none of it, or `by_usage`, by each organisation's
+  energy over the month. The price is `kWh_IT × PUE × price_per_kwh`, per month.
+  `GET /admin/fluids?group_by=org` gives the third party's row; its `org_admin`
+  sees only its own row. `GET /admin/lending` gives the lent and borrowed
+  GPU-hours (owners to third party).
+- **`idle_watts`.** With `idle_watts > 0`, the idle baseline of a GPU during the
+  third party's work is booked as idle and paid by the owners (the third party
+  pays the marginal energy above it). With `idle_watts = 0`, the third party pays
+  all the energy of the intervals it used. Choose according to the contract; for
+  ILaaS we recommend `idle_energy = "by_share"`.
 
 ### Ordering borrowers: Slurm Fair Tree
 

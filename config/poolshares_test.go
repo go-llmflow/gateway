@@ -228,7 +228,7 @@ func FuzzPoolShares(f *testing.F) {
 			if sum > 1+1e-9 {
 				t.Fatalf("pool %s: shares sum to %v", p.Name, sum)
 			}
-			if p.Borrow != BorrowAll && p.Borrow != BorrowShareholders {
+			if p.Borrow != BorrowAll && p.Borrow != BorrowShareholders && p.Borrow != BorrowSpare {
 				t.Fatalf("pool %s: borrow %q", p.Name, p.Borrow)
 			}
 			// The reservations never exceed C.
