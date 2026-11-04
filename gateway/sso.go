@@ -75,9 +75,6 @@ type pendingLogin struct {
 type ssoProvider struct {
 	cfg    config.SSOProvider
 	client *rp.Client
-	// adopter: the first provider adopts the users that exist without a link
-	// (created before v0.27.0, or never logged in).
-	adopter bool
 }
 
 type ssoState struct {
@@ -110,7 +107,7 @@ func (s *Server) startSSO(ctx context.Context) error {
 		return nil
 	}
 	st := &ssoState{providers: map[string]*ssoProvider{}, sessions: map[[32]byte]*session{}, logins: map[string]pendingLogin{}, perNet: map[netip.Prefix]int{}}
-	for i, pc := range c.ProviderList() {
+	for _, pc := range c.ProviderList() {
 		p, err := rp.Discover(ctx, s.jwtClient, pc.Issuer)
 		if err != nil {
 			return fmt.Errorf("gateway: sso provider %q: %w", pc.Name, err)
@@ -124,7 +121,7 @@ func (s *Server) startSSO(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("gateway: sso provider %q: %w", pc.Name, err)
 		}
-		sp := &ssoProvider{cfg: pc, client: cl, adopter: i == 0}
+		sp := &ssoProvider{cfg: pc, client: cl}
 		st.providers[pc.Name] = sp
 		st.order = append(st.order, sp)
 	}
@@ -415,9 +412,10 @@ func (s *Server) ssoBindings(p *ssoProvider, id *oidc.Token, user string) []stor
 
 // bindIdentity links a stored user to (provider, subject) the first time, and
 // afterwards accepts only that identity. A user without a link (stored before
-// v0.27.0, or provisioned and not logged in yet) is adopted by the first
-// provider, or by a provider whose organisations cover every role the user
-// holds (the user a SCIM client provisioned for an institution).
+// v0.27.0, or provisioned and not logged in yet) is adopted by the single
+// unrestricted sso issuer of earlier versions, or by a provider block whose
+// organisations cover every role the user holds (a user with no role: only a
+// provider with adopt = true).
 func (s *Server) bindIdentity(ctx context.Context, p *ssoProvider, user, subject string) (bool, error) {
 	want := store.IdPLink{Provider: p.cfg.Name, Subject: subject}
 	cur, err := s.st.UserIdP(ctx, user)
@@ -427,16 +425,19 @@ func (s *Server) bindIdentity(ctx context.Context, p *ssoProvider, user, subject
 	case !errors.Is(err, store.ErrNotFound):
 		return false, err
 	}
-	if !p.adopter {
+	if p.cfg.Restricted {
+		// A provider block adopts a user only when it may vouch for every
+		// role they hold (proxy-wide roles need allow_proxy_roles), and a
+		// user with no role only with adopt = true.
 		bs, err := s.st.Bindings(ctx, user)
 		if err != nil {
 			return false, err
 		}
-		if len(bs) == 0 {
+		if len(bs) == 0 && !p.cfg.Adopt {
 			return false, nil
 		}
 		for _, b := range bs {
-			if !p.cfg.MayGrant(s.cfg, config.SSORole{Org: b.Org, Team: b.Team}) {
+			if !p.cfg.MayGrant(s.cfg, config.SSORole{Role: string(b.Role), Org: b.Org, Team: b.Team}) {
 				return false, nil
 			}
 		}
@@ -522,6 +523,7 @@ func (s *Server) sessionPrincipal(w http.ResponseWriter, r *http.Request) (p *pr
 			return nil, "", true
 		}
 	}
+	linked := false
 	// Stored roles and the disabled flag are read on every request, so a
 	// revocation takes effect at once.
 	u, err := s.st.GetUser(r.Context(), cp.user)
@@ -546,13 +548,23 @@ func (s *Server) sessionPrincipal(w http.ResponseWriter, r *http.Request) (p *pr
 			apiError(w, http.StatusServiceUnavailable, "service_unavailable", "user store unreachable")
 			return nil, "", true
 		case lerr == nil && link == (store.IdPLink{Provider: cp.provider, Subject: cp.subject}):
+			linked = true
 			if stored, err = s.st.Bindings(r.Context(), cp.user); err != nil {
 				apiError(w, http.StatusServiceUnavailable, "service_unavailable", "user store unreachable")
 				return nil, "", true
 			}
+		default:
+			// The user exists now and is not (yet) bound to the identity this
+			// session was opened with: a session opened before the user was
+			// stored, or for another provider, must not become theirs. Log in
+			// again, which goes through the adoption rule.
+			s.dropSession(r.Context(), h)
+			setCookie(w, sessionCookie, "", -1)
+			apiError(w, http.StatusUnauthorized, "authentication_error", "session no longer valid; log in again at /admin/login")
+			return nil, "", true
 		}
 	}
-	return &principal{name: cp.user, bindings: append(slices.Clip(cp.bindings), stored...), session: h, provider: cp.provider}, cp.csrf, true
+	return &principal{name: cp.user, bindings: append(slices.Clip(cp.bindings), stored...), session: h, provider: cp.provider, linked: linked}, cp.csrf, true
 }
 
 func unsafeMethod(m string) bool {

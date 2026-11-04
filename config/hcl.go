@@ -360,6 +360,7 @@ type ssoProviderHCL struct {
 	Orgs             []string     `hcl:"orgs"`
 	OrgsRange        hcl.Range    `hcl:"orgs,attr_value_range"`
 	AllowProxyRoles  *bool        `hcl:"allow_proxy_roles,optional"`
+	Adopt            *bool        `hcl:"adopt,optional"`
 	Accepts          []acceptHCL  `hcl:"accept,block"`
 	Roles            []ssoRoleHCL `hcl:"role,block"`
 }
@@ -1439,7 +1440,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		for pi := range o.Providers {
 			p := &o.Providers[pi]
 			cp := SSOProvider{Name: p.Name, Issuer: p.Issuer, ClientID: p.ClientID, ClientSecretFile: strOr(p.ClientSecretFile, ""),
-				Scopes: p.Scopes, Restricted: true, Orgs: p.Orgs, AllowProxyRoles: p.AllowProxyRoles != nil && *p.AllowProxyRoles,
+				Scopes: p.Scopes, Restricted: true, Orgs: p.Orgs, AllowProxyRoles: p.AllowProxyRoles != nil && *p.AllowProxyRoles, Adopt: p.Adopt != nil && *p.Adopt,
 				MinRefresh: v.dur(p.MinRefresh, p.MinRefreshRange, "min_refresh", time.Minute)}
 			where := "sso provider " + strconv.Quote(p.Name)
 			if !ValidName(p.Name) {

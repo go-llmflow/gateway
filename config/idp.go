@@ -32,6 +32,10 @@ type SSOProvider struct {
 	// AllowProxyRoles lets this provider grant proxy-wide roles
 	// (proxy_admin, proxy_viewer, finance_viewer).
 	AllowProxyRoles bool
+	// Adopt lets this provider claim a stored user that has no role at all
+	// and no link yet. Without it such a user is refused: nothing says which
+	// institution they belong to.
+	Adopt bool
 	// Accept are conditions on the ID token's claims, all of which must hold.
 	Accept []Accept
 	// Roles map claims to role bindings.
@@ -152,7 +156,24 @@ func Normalize(claim, v string) string {
 	if !FoldsCase(claim) {
 		return v
 	}
-	return strings.ToLower(strings.TrimSuffix(v, "."))
+	return asciiLower(strings.TrimSuffix(v, "."))
+}
+
+// asciiLower folds A-Z only. strings.ToLower is Unicode: it maps the Kelvin
+// sign U+212A to "k", so "univ-K.fr" would match "univ-k.fr".
+func asciiLower(s string) string {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; 'A' <= c && c <= 'Z' {
+			b := []byte(s)
+			for j := i; j < len(b); j++ {
+				if 'A' <= b[j] && b[j] <= 'Z' {
+					b[j] += 'a' - 'A'
+				}
+			}
+			return string(b)
+		}
+	}
+	return s
 }
 
 // Holds reports whether one of values (a claim's, however many it has) is one

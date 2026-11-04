@@ -121,3 +121,14 @@ func FuzzAcceptHolds(f *testing.F) {
 		}
 	})
 }
+
+// Review of #136: folding is ASCII only (Kelvin sign U+212A is not "k").
+func TestAcceptFoldsASCIIOnly(t *testing.T) {
+	a := Accept{Claim: "schac_home_organization", Values: []string{"univ-k.fr"}}
+	if a.Holds([]string{"univ-K.fr"}) {
+		t.Fatal("the Kelvin sign matches k")
+	}
+	if !a.Holds([]string{"UNIV-K.FR"}) {
+		t.Fatal("ASCII case is folded")
+	}
+}
