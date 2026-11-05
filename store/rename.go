@@ -226,11 +226,13 @@ func (p *Postgres) RenameUsers(ctx context.Context, rs []UserRename) ([]UserRena
 				`UPDATE llmflow_profile_assignments SET user_name = $2 WHERE user_name = $1`,
 				`UPDATE llmflow_warn_marks SET user_name = $2 WHERE user_name = $1`,
 				`UPDATE llmflow_warn_events SET user_name = $2 WHERE user_name = $1`,
-				`DELETE FROM llmflow_users WHERE name = $1`,
 			} {
 				if _, err := tx.Exec(ctx, q, r.From, r.To); err != nil {
 					return err
 				}
+			}
+			if _, err := tx.Exec(ctx, `DELETE FROM llmflow_users WHERE name = $1`, r.From); err != nil {
+				return err
 			}
 		}
 		return nil
