@@ -2,12 +2,8 @@ package gateway
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"math"
-	"net/http"
-	"os"
 	"slices"
 	"time"
 
@@ -93,8 +89,7 @@ func energyNodes(cfg *config.Config, secrets Secrets) []*energyNode {
 				n.factor = u.NodeOverheadFactor
 			}
 			if u.RedfishURL != "" && n.bmc == nil {
-				n.bmc = &energy.RedfishScraper{URL: u.RedfishURL, User: u.RedfishUser, Password: secrets.RedfishPasswords[u.RedfishPasswordFile]}
-				n.bmc.Client = redfishClient(u.RedfishCAFile)
+				n.bmc = &energy.RedfishScraper{URL: u.RedfishURL, User: u.RedfishUser, Password: secrets.RedfishPasswords[u.RedfishPasswordFile], CAFile: u.RedfishCAFile}
 			}
 		}
 	}
@@ -126,25 +121,6 @@ func attributeInterval(upstream, pool string, p pendingInterval, work []energy.W
 		GPUs: len(iv.PerGPU), Resets: iv.Resets, Gap: iv.Gap, Pool: pool,
 		OverheadMJ: p.overheadMJ, OverheadSource: p.overheadBy, Preemptions: p.preempt,
 	}, att
-}
-
-// redfishClient is the HTTP client of a BMC: TLS verified against the CA file
-// when one is configured (a BMC's certificate is often signed by the site's
-// own CA), the system roots otherwise.
-func redfishClient(caFile string) *http.Client {
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
-	if caFile != "" {
-		pem, err := os.ReadFile(caFile)
-		if err == nil {
-			pool := x509.NewCertPool()
-			if pool.AppendCertsFromPEM(pem) {
-				tlsCfg.RootCAs = pool
-			}
-		}
-	}
-	tr.TLSClientConfig = tlsCfg
-	return &http.Client{Transport: tr}
 }
 
 // scrapePreemptions reads the vLLM preemption counter of every upstream of
