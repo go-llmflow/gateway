@@ -175,7 +175,7 @@ func jwtEnv(t *testing.T, idp *fakeIdP, clock func() time.Time, typ string) *env
 	cfg := testConfig(up.URL())
 	cfg.AuthFailuresPerMinute = 0
 	cfg.JWT = &config.JWT{
-		Issuer: idp.srv.URL, Audience: "llmflow", Type: typ, ClockSkew: time.Minute, MinRefresh: time.Hour,
+		Domain: "example.org", Issuer: idp.srv.URL, Audience: "llmflow", Type: typ, ClockSkew: time.Minute, MinRefresh: time.Hour,
 		Maps: []config.JWTMap{
 			{Claim: "groups", Value: "lab-a", Team: "etabA"},
 			{Claim: "department", Value: "physics", Team: "etabB", Project: "p1"},
@@ -309,7 +309,7 @@ func TestJWTDiscoveryFailureStopsStart(t *testing.T) {
 	dead := httptest.NewServer(http.NotFoundHandler())
 	dead.Close()
 	cfg := testConfig("http://127.0.0.1:1")
-	cfg.JWT = &config.JWT{Issuer: dead.URL, Audience: "x", Maps: []config.JWTMap{{Claim: "groups", Value: "a", Team: "etabA"}}}
+	cfg.JWT = &config.JWT{Domain: "example.org", Issuer: dead.URL, Audience: "x", Maps: []config.JWTMap{{Claim: "groups", Value: "a", Team: "etabA"}}}
 	srv, err := New(cfg, store.NewMemory(), Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg), CacheSaltKey: testSaltKey})
 	if err != nil {
 		t.Fatal(err)
@@ -328,7 +328,7 @@ func FuzzJWTBearer(f *testing.F) {
 	now := time.Now()
 	cfg := testConfig("http://127.0.0.1:1")
 	cfg.AuthFailuresPerMinute = 0
-	cfg.JWT = &config.JWT{Issuer: idp.srv.URL, Audience: "llmflow", MinRefresh: time.Hour,
+	cfg.JWT = &config.JWT{Domain: "example.org", Issuer: idp.srv.URL, Audience: "llmflow", MinRefresh: time.Hour,
 		Maps: []config.JWTMap{{Claim: "groups", Value: "lab-a", Team: "etabA"}}}
 	srv, err := New(cfg, store.NewMemory(), Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg), CacheSaltKey: testSaltKey},
 		WithClock(func() time.Time { return now }))
