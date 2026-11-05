@@ -396,3 +396,115 @@ func TestMultiIdPJWT(t *testing.T) {
 		t.Fatalf("the unknown issuer's key set was fetched %d times", n)
 	}
 }
+
+// Review of #136, F3: a grant held at provider B but bound to a login started
+// at A must be refused at B's callback. (Without the provider check on the
+// pending login the answer is a 303.)
+func TestMultiIdPFlowBoundToProvider(t *testing.T) {
+	m := newMultiEnv(t)
+	authURL, ck := m.begin("a")
+	state, code := m.idps["b"].issue(t, authURL, m.claims("b", "sb-1", "carol", map[string]any{"groups": []string{"admins"}}))
+	if c, body, sess := m.finish("b", state, code, ck, ""); c != 400 || sess != "" {
+		t.Fatalf("login started at a finished at b: %d %s", c, body)
+	}
+}
+
+// Review of #136, F1: a provider block adopts an unlinked user only when it
+// may vouch for every role the user holds.
+func TestMultiIdPAdoptionNeedsOrgs(t *testing.T) {
+	m := newMultiEnv(t)
+	ctx := context.Background()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	adm := map[string]any{"groups": []string{"admins"}}
+	// An etabB user (SCIM) cannot be taken over through a, the first provider.
+	must(m.st.CreateUser(ctx, "erin"))
+	must(m.st.Grant(ctx, store.Binding{User: "erin", Role: store.RoleMember, Team: "etabB", Provenance: store.ProvSCIM}))
+	if code, _, _ := m.login("a", m.claims("a", "attacker", "erin", adm)); code != http.StatusForbidden {
+		t.Fatalf("a adopted an etabB user: %d", code)
+	}
+	// Nor an unlinked proxy admin, as long as a does not allow proxy roles.
+	must(m.st.CreateUser(ctx, "root"))
+	must(m.st.Grant(ctx, store.Binding{User: "root", Role: store.RoleProxyAdmin, Provenance: store.ProvProxyAdmin}))
+	if code, _, _ := m.login("a", m.claims("a", "attacker", "root", adm)); code != http.StatusForbidden {
+		t.Fatalf("a adopted a proxy admin: %d", code)
+	}
+	// A user with no role is adopted only with adopt = true.
+	must(m.st.CreateUser(ctx, "nobody"))
+	if code, _, _ := m.login("a", m.claims("a", "s-n", "nobody", adm)); code != http.StatusForbidden {
+		t.Fatalf("a adopted a user with no role: %d", code)
+	}
+	m.srv.sso.providers["a"].cfg.Adopt = true
+	if code, _, _ := m.login("a", m.claims("a", "s-n", "nobody", adm)); code != http.StatusSeeOther {
+		t.Fatalf("adopt = true: %d", code)
+	}
+	// The real owner of erin's account is still free to log in at b.
+	if code, _, _ := m.login("b", m.claims("b", "sb-erin", "erin", nil)); code != http.StatusSeeOther {
+		t.Fatalf("erin at b: %d", code)
+	}
+}
+
+// Review of #136, F2: a session opened before the user was stored does not
+// become theirs, and cannot mint an admin token carrying their roles.
+func TestMultiIdPSessionBeforeUser(t *testing.T) {
+	m := newMultiEnv(t)
+	ctx := context.Background()
+	code, _, sess := m.login("b", m.claims("b", "sb-mallory", "frank", map[string]any{"groups": []string{"users"}}))
+	if code != http.StatusSeeOther {
+		t.Fatalf("login: %d", code)
+	}
+	resp := m.req("GET", "/admin/session", map[string]string{sessionCookie: sess})
+	var info struct {
+		CSRF string `json:"csrf_token"`
+	}
+	_ = json.Unmarshal([]byte(readAll(t, resp)), &info)
+	if err := m.st.CreateUser(ctx, "frank"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.st.Grant(ctx, store.Binding{User: "frank", Role: store.RoleOrgAdmin, Org: "etabA", Provenance: store.ProvProxyAdmin}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.st.LinkUserIdP(ctx, "frank", store.IdPLink{Provider: "a", Subject: "sa-frank"}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := http.NewRequest("POST", m.gw.URL+"/admin/users/frank/tokens", nil)
+	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: sess})
+	r.Header.Set(csrfHeader, info.CSRF)
+	r.Header.Set("Origin", gwOrigin)
+	resp, err := noRedirect.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body := readAll(t, resp); resp.StatusCode == http.StatusCreated || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("token minted or wrong refusal: %d %s", resp.StatusCode, body)
+	}
+	// The session is gone.
+	if r := m.req("GET", "/admin/session", map[string]string{sessionCookie: sess}); r.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("session still valid: %d", r.StatusCode)
+	}
+}
+
+// Review of #136, F2, second layer: a session principal manages its own tokens
+// only when the session's identity is the user's linked one, even if the
+// session itself were not dropped.
+func TestSelfOrProxyAdminNeedsALinkedSession(t *testing.T) {
+	sess := [32]byte{1}
+	for _, tc := range []struct {
+		name string
+		p    principal
+		want bool
+	}{
+		{"unlinked session", principal{name: "frank", session: sess}, false},
+		{"linked session", principal{name: "frank", session: sess, linked: true}, true},
+		{"admin token (no session)", principal{name: "frank"}, true},
+		{"another user", principal{name: "mallory", session: sess, linked: true}, false},
+	} {
+		if got := selfOrProxyAdmin(&tc.p, "frank"); got != tc.want {
+			t.Errorf("%s: %v", tc.name, got)
+		}
+	}
+}
