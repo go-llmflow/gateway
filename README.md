@@ -1313,7 +1313,7 @@ the tests.)
   Chassis, EnvironmentMetrics) or the path of the chassis' EnvironmentMetrics
   resource. The gateway reads its **`EnergykWh.Reading`** (DMTF
   EnvironmentMetrics v1.3.1: "the total energy, in kilowatt-hour units"), a
-  counter, so the energy of an interval is exact. Since v0.32.0 a BMC that
+  counter, so the energy of an interval is exact. Since v0.33.0 a BMC that
   reports only a power
   (`PowerWatts`, else `PowerControl[].PowerConsumedWatts`) is metered by the
   **trapezoid** of its samples, one per round, exact for a constant power and an
