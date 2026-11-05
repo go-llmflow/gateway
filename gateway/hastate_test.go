@@ -111,7 +111,7 @@ func TestChaosHASSOSessionSurvives(t *testing.T) {
 	c := &ssoEnv{env: haEnv(t, cfg, direct, "c"), idp: idp, clock: time.Now()}
 	r := c.req("GET", "/admin/session", map[string]string{sessionCookie: sess}, "")
 	info := readAll(t, r)
-	if r.StatusCode != 200 || !bytes.Contains([]byte(info), []byte(`"alice"`)) {
+	if r.StatusCode != 200 || !bytes.Contains([]byte(info), []byte(`"alice@example.org"`)) {
 		t.Fatalf("session on a replica started after its creator died: %d %s", r.StatusCode, info)
 	}
 
