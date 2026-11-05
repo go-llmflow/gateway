@@ -144,3 +144,24 @@ func TestSCIMNeedsADomain(t *testing.T) {
 		t.Errorf("domains: %v %+v", err, c.SCIM)
 	}
 }
+
+func TestLegacyDomainAndNamesFlag(t *testing.T) {
+	c, err := parse(valid + ssoBlock("https://i.example", "https://llm.example.org/admin/callback", `domain = "univ-a.fr"`) +
+		"scim {\n  token_file = \"/t\"\n  base_url = \"https://gw.example/scim/v2\"\n  domain = \"Univ-A.fr\"\n}\nlegacy_unscoped_names = true\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, err := c.LegacyDomain(); err != nil || d != "univ-a.fr" || !c.LegacyNames {
+		t.Fatalf("%q %v %v", d, err, c.LegacyNames)
+	}
+	c, _ = parse(valid)
+	if d, _ := c.LegacyDomain(); d != "" || c.LegacyNames {
+		t.Fatalf("defaults: %q %v", d, c.LegacyNames)
+	}
+	// Two different legacy domains cannot be reported as one.
+	c.SSO = &SSO{Domain: "a.fr"}
+	c.SCIM = &SCIM{Domain: "b.fr"}
+	if _, err := c.LegacyDomain(); err == nil {
+		t.Fatal("two legacy domains")
+	}
+}

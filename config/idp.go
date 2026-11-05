@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -210,3 +211,38 @@ func (j *JWT) NameScopes() []string { return scopes(j.Domain, j.Domains, j.Accep
 
 // NameScopes of the provisioning client: see scopes.
 func (s *SCIM) NameScopes() []string { return scopes(s.Domain, s.Domains, nil) }
+
+// LegacyDomain is the one domain that scopes the unscoped names of the
+// accounts that predate scoped names, from the sso, jwt and scim blocks ("" when
+// none sets one). More than one distinct value is an error: unscoped names belong
+// to one institution.
+func (c *Config) LegacyDomain() (string, error) {
+	var ds []string
+	add := func(d string) {
+		if d != "" && !slices.Contains(ds, d) {
+			ds = append(ds, d)
+		}
+	}
+	if c.SSO != nil {
+		add(c.SSO.Domain)
+		for _, p := range c.SSO.Providers {
+			add(p.Domain)
+		}
+	}
+	if c.JWT != nil {
+		add(c.JWT.Domain)
+	}
+	for _, j := range c.JWTs {
+		add(j.Domain)
+	}
+	if c.SCIM != nil {
+		add(c.SCIM.Domain)
+	}
+	switch len(ds) {
+	case 0:
+		return "", nil
+	case 1:
+		return ds[0], nil
+	}
+	return "", fmt.Errorf("config: several legacy domains %v: the unscoped names of the old accounts belong to one institution", ds)
+}

@@ -31,6 +31,7 @@ func newMultiEnv(t testing.TB) *multiEnv {
 	m := &multiEnv{idps: map[string]*fakeIdP{"a": newFakeIdP(t), "b": newFakeIdP(t), "fed": newFakeIdP(t)}}
 	cfg := testConfig("http://127.0.0.1:1")
 	cfg.AuthFailuresPerMinute = 0
+	cfg.LegacyNames = true // these tests create bare-named users after the start
 	cfg.SSO = &config.SSO{RedirectURL: gwOrigin + "/admin/callback", SessionTTL: time.Hour}
 	mk := func(name, domain string, domains []string, orgs []string, accept []config.Accept, roles []config.SSORole) {
 		cfg.SSO.Providers = append(cfg.SSO.Providers, config.SSOProvider{

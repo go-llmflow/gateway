@@ -18,6 +18,7 @@ const scimToken = "scim-token-0123456789abcdef0123456789"
 func scimConfig(t *testing.T) *config.Config {
 	cfg := testConfig("http://127.0.0.1:1")
 	cfg.AuthFailuresPerMinute = 0
+	cfg.LegacyNames = true // these tests create bare-named users after the start
 	cfg.SCIM = &config.SCIM{Domain: "example.org", BaseURL: "https://llm.example.org/scim/v2", Groups: []config.SCIMGroup{
 		{Name: "Lab Physics", Team: "etabA", Role: "member"},
 		{Name: "lab leads", Team: "etabA", Role: "team_admin"},
