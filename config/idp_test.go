@@ -133,3 +133,14 @@ func TestDomainsConfig(t *testing.T) {
 		t.Errorf("one issuer, one legacy domain: %v", err)
 	}
 }
+
+func TestSCIMNeedsADomain(t *testing.T) {
+	base := "scim {\n  token_file = \"/t\"\n  base_url = \"https://gw.example/scim/v2\"\n"
+	if _, err := parse(valid + base + "}\n"); err == nil || !strings.Contains(err.Error(), "Missing domain") || !strings.Contains(err.Error(), "test.hcl:") {
+		t.Errorf("scim without a domain: %v", err)
+	}
+	c, err := parse(valid + base + "  domains = [\"univ-a.fr\", \"univ-b.fr\"]\n}\n")
+	if err != nil || !slices.Equal(c.SCIM.NameScopes(), []string{"univ-a.fr", "univ-b.fr"}) || c.SCIM.Domain != "" {
+		t.Errorf("domains: %v %+v", err, c.SCIM)
+	}
+}

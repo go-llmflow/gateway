@@ -207,3 +207,6 @@ func (p *SSOProvider) NameScopes() []string { return scopes(p.Domain, p.Domains,
 
 // NameScopes of the issuer: see scopes.
 func (j *JWT) NameScopes() []string { return scopes(j.Domain, j.Domains, j.Accept) }
+
+// NameScopes of the provisioning client: see scopes.
+func (s *SCIM) NameScopes() []string { return scopes(s.Domain, s.Domains, nil) }

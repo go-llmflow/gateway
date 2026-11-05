@@ -178,6 +178,11 @@ type scimHCL struct {
 	BaseURL      string         `hcl:"base_url"`
 	BaseURLRange hcl.Range      `hcl:"base_url,attr_value_range"`
 	Groups       []scimGroupHCL `hcl:"group,block"`
+	Domain       *string        `hcl:"domain,optional"`
+	Domains      []string       `hcl:"domains,optional"`
+	DomainRange  hcl.Range      `hcl:"domain,attr_value_range"`
+	DomainsRange hcl.Range      `hcl:"domains,attr_value_range"`
+	DefRange     hcl.Range      `hcl:",def_range"`
 }
 
 type scimGroupHCL struct {
@@ -1737,6 +1742,10 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			}
 			seen[strings.ToLower(g.Name)] = true
 			cs.Groups = append(cs.Groups, cg)
+		}
+		cs.Domain, cs.Domains = v.domains(sc.Domain, sc.Domains, sc.DomainRange, sc.DomainsRange, "scim", "scim", map[string]string{})
+		if len(cs.Domains) == 0 {
+			v.errf(sc.DefRange, "Missing domain", "scim needs domain = \"<the institution's domain>\" (or domains = [...]): a provisioned user is local@domain, and an account is relative to an institution. domain also keeps the users created before scoped names")
 		}
 		c.SCIM = cs
 	}

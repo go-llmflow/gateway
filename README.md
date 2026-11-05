@@ -2152,6 +2152,7 @@ stores what is pushed and derives its own state from it:
 scim {
   token_file = "vault:secret/llmflow#scim"      # the provider's bearer token, at least 32 bytes
   base_url   = "https://llm.example.org/scim/v2"
+  domain     = "example.org"                    # the institution: a user is local@example.org (required)
   group "Lab Physics" { team = "etabA" }         # members get member on etabA
   group "Lab Physics Leads" {
     team = "etabA"
@@ -2160,10 +2161,22 @@ scim {
 }
 ```
 
-- A provisioned user is a gateway user of the same `userName` (letters,
-  digits, `_ . - @ +`, at most 128), disabled while `active` is false or
-  after deletion, which revokes their admin tokens. A renamed user is a new
-  gateway user; the old name is disabled.
+- A provisioned user is a gateway user named `local@domain` (v0.30.0): the
+  `userName` (letters, digits, `_ . - @ +`, at most 128) is scoped, its domain
+  must be the `domain` or one of the `domains` of the `scim` block (another is a
+  400 `invalidValue`), and an unscoped one takes `domain`. A stored user with the
+  unscoped name (created before scoped names) is that person and keeps their
+  name. The user is disabled while `active` is false or after deletion, which
+  revokes their admin tokens. A renamed user is a new gateway user; the old name
+  is disabled.
+- **SCIM acts only on the users it provisioned.** A user is created with origin
+  `scim`; only such a user is enabled, disabled or retired by SCIM. A user created
+  by hand (a proxy admin, say) whose name a SCIM client posts and deletes is left
+  alone, and a user an administrator disabled (`DELETE /admin/users/{name}`) stays
+  disabled whatever SCIM writes next: SCIM re-enables only what SCIM disabled.
+  Users stored before origins existed are claimed at start-up when SCIM gave them
+  roles and nobody else did; any other stays out of its reach (a user SCIM
+  deactivated before v0.30.0 is not re-enabled by SCIM: an administrator does it).
 - The members of a mapped group (display names compare without case) get the
   block's role on its team; leaving the group, deactivation or deletion takes
   it away. Only those (role, team) pairs of provisioned users are managed:
