@@ -97,7 +97,7 @@ func TestFluidsEndToEnd(t *testing.T) {
 	var clockNs atomic.Int64
 	clockNs.Store(time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC).UnixNano())
 	now := func() time.Time { return time.Unix(0, clockNs.Load()).UTC() }
-	nodes := energyNodes(cfg)
+	nodes := energyNodes(cfg, Secrets{})
 	if len(nodes) != 1 || len(nodes[0].labels) != 1 || nodes[0].labels[0] != redactURL(up.URL()) {
 		t.Fatalf("nodes %+v", nodes)
 	}
@@ -308,7 +308,7 @@ func TestAttributeIntervalSums(t *testing.T) {
 		for k := int64(0); k < n%5; k++ {
 			work = append(work, energy.Work{Consumer: energy.Consumer{Org: fmt.Sprint(k)}, Prefill: n*3 + k, Decode: n + 1})
 		}
-		ei, att := attributeInterval("n", "p", iv, work, f)
+		ei, att := attributeInterval("n", "p", pendingInterval{iv: iv, preempt: -1}, work, f)
 		sum := ei.IdleMJ
 		for _, a := range att {
 			sum += a.MJ

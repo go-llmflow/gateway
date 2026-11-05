@@ -2,7 +2,12 @@ package gateway
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"math"
+	"net/http"
+	"os"
 	"slices"
 	"time"
 
@@ -32,14 +37,35 @@ type energyNode struct {
 	// its idle energy is allocated by that pool's shares. "" when the models
 	// of the node belong to several pools (config refuses that when one of
 	// them has shares of its own): the organisations' shares apply.
-	pool    string
-	mixed   bool
-	meter   energy.Meter
-	pending []energy.Interval // measured, waiting for the accounting to settle
+	pool  string
+	mixed bool
+	meter energy.Meter
+	// The energy beyond the GPUs (nodeenergy.go): the BMC's counter when the
+	// node has one, the fallback factor otherwise (1: none).
+	bmc      *energy.RedfishScraper
+	bmcMeter energy.Meter
+	factor   float64
+	// The vLLM preemption counters of the node's upstreams (their base URLs),
+	// as last read, and the preemptions seen since the last interval ended
+	// (preemptBad: a counter could not be read, the count is then unknown).
+	upstreams   []string
+	preemptPrev map[string]float64
+	preemptAcc  int64
+	preemptBad  bool
+	pending     []pendingInterval // measured, waiting for the accounting to settle
 }
 
-// energyNodes lists the configured exporters.
-func energyNodes(cfg *config.Config) []*energyNode {
+// pendingInterval is a measured interval with what was learnt beside the GPUs.
+type pendingInterval struct {
+	iv         energy.Interval
+	overheadMJ int64
+	overheadBy string // "redfish", "factor" or ""
+	preempt    int64  // vLLM preemptions in the interval, -1 unknown
+}
+
+// energyNodes lists the configured exporters. secrets holds the BMC
+// passwords, by redfish_password_file reference.
+func energyNodes(cfg *config.Config, secrets Secrets) []*energyNode {
 	var nodes []*energyNode
 	by := map[string]*energyNode{}
 	for _, g := range cfg.ModelGroups {
@@ -49,8 +75,9 @@ func energyNodes(cfg *config.Config) []*energyNode {
 			}
 			n := by[u.DcgmURL]
 			if n == nil {
-				n = &energyNode{key: redactURL(u.DcgmURL), url: u.DcgmURL, pool: g.Pool}
+				n = &energyNode{key: redactURL(u.DcgmURL), url: u.DcgmURL, pool: g.Pool, factor: cfg.Fluids.NodeOverheadFactor, preemptPrev: map[string]float64{}}
 				n.meter.MaxGap = 3 * cfg.Fluids.Interval
+				n.bmcMeter.MaxGap = 3 * cfg.Fluids.Interval
 				by[u.DcgmURL] = n
 				nodes = append(nodes, n)
 			} else if n.pool != g.Pool {
@@ -58,6 +85,16 @@ func energyNodes(cfg *config.Config) []*energyNode {
 			}
 			if l := redactURL(u.BaseURL); !slices.Contains(n.labels, l) {
 				n.labels = append(n.labels, l)
+			}
+			if !slices.Contains(n.upstreams, u.BaseURL) {
+				n.upstreams = append(n.upstreams, u.BaseURL)
+			}
+			if u.NodeOverheadFactor > 0 {
+				n.factor = u.NodeOverheadFactor
+			}
+			if u.RedfishURL != "" && n.bmc == nil {
+				n.bmc = &energy.RedfishScraper{URL: u.RedfishURL, User: u.RedfishUser, Password: secrets.RedfishPasswords[u.RedfishPasswordFile]}
+				n.bmc.Client = redfishClient(u.RedfishCAFile)
 			}
 		}
 	}
@@ -67,13 +104,98 @@ func energyNodes(cfg *config.Config) []*energyNode {
 // attributeInterval splits one measured interval: its active energy between
 // the consumers by weighted work, the rest (idle, and active energy of an
 // interval without work) stays whole. The parts sum to the measured energy.
-func attributeInterval(upstream, pool string, iv energy.Interval, work []energy.Work, f *config.Fluids) (store.EnergyInterval, []energy.Attributed) {
+//
+// The node's energy beyond the GPUs (overheadMJ) is split like the GPUs': in
+// the proportion of the GPUs' active and idle energy of the interval, then
+// the active part by the same weights as the GPUs' active energy, the idle
+// part as idle. The total is the GPUs' plus the overhead, exactly.
+func attributeInterval(upstream, pool string, p pendingInterval, work []energy.Work, f *config.Fluids) (store.EnergyInterval, []energy.Attributed) {
+	iv := p.iv
 	active, idle := iv.SplitIdle(f.IdleWatts)
+	if p.overheadMJ > 0 {
+		oa := int64(0)
+		if parts := energy.Apportion(p.overheadMJ, []float64{float64(active), float64(idle)}); parts != nil {
+			oa = parts[0]
+		}
+		active += oa
+		idle += p.overheadMJ - oa
+	}
 	att, left := energy.AttributeActive(active, work, f.Weights())
 	return store.EnergyInterval{
-		Upstream: upstream, Start: iv.Start, End: iv.End, TotalMJ: iv.MJ, IdleMJ: idle + left,
+		Upstream: upstream, Start: iv.Start, End: iv.End, TotalMJ: iv.MJ + p.overheadMJ, IdleMJ: idle + left,
 		GPUs: len(iv.PerGPU), Resets: iv.Resets, Gap: iv.Gap, Pool: pool,
+		OverheadMJ: p.overheadMJ, OverheadSource: p.overheadBy, Preemptions: p.preempt,
 	}, att
+}
+
+// redfishClient is the HTTP client of a BMC: TLS verified against the CA file
+// when one is configured (a BMC's certificate is often signed by the site's
+// own CA), the system roots otherwise.
+func redfishClient(caFile string) *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if caFile != "" {
+		pem, err := os.ReadFile(caFile)
+		if err == nil {
+			pool := x509.NewCertPool()
+			if pool.AppendCertsFromPEM(pem) {
+				tlsCfg.RootCAs = pool
+			}
+		}
+	}
+	tr.TLSClientConfig = tlsCfg
+	return &http.Client{Transport: tr}
+}
+
+// scrapePreemptions reads the vLLM preemption counter of every upstream of
+// the node and adds what happened since the last read (a counter that went
+// down is a restart: its new value is what happened since).
+func (s *Server) scrapePreemptions(ctx context.Context, n *energyNode) {
+	for _, base := range n.upstreams {
+		v, ok := s.scrapeCounter(ctx, base, preemptionMetrics...)
+		if !ok {
+			n.preemptBad = true
+			continue
+		}
+		prev, known := n.preemptPrev[base]
+		n.preemptPrev[base] = v
+		switch {
+		case !known:
+		case v >= prev:
+			n.preemptAcc += int64(v - prev)
+		default:
+			n.preemptAcc += int64(v)
+		}
+	}
+}
+
+// takePreemptions returns the preemptions since the last interval ended (-1
+// when a counter could not be read) and starts the next count.
+func (n *energyNode) takePreemptions() int64 {
+	v := n.preemptAcc
+	if n.preemptBad || len(n.upstreams) == 0 {
+		v = -1
+	}
+	n.preemptAcc, n.preemptBad = 0, false
+	return v
+}
+
+// overhead decides the node's energy beyond the GPUs for an interval: the
+// BMC's counter minus the GPUs' when the BMC was read for exactly this
+// interval, else the fallback factor, else none.
+func (s *Server) overhead(n *energyNode, iv energy.Interval, bi energy.Interval, bok bool) (int64, string) {
+	if bok && bi.Start.Equal(iv.Start) && bi.End.Equal(iv.End) {
+		if bi.MJ >= iv.MJ {
+			return bi.MJ - iv.MJ, "redfish"
+		}
+		s.log.Warn("fluids: the BMC reports less energy than the GPUs alone; no overhead counted for this interval", "node", n.key, "node_mj", bi.MJ, "gpu_mj", iv.MJ)
+	} else if n.bmc != nil {
+		s.log.Warn("fluids: the BMC was not read for this interval; the fallback factor applies", "node", n.key)
+	}
+	if n.factor > 1 {
+		return int64(math.Round(float64(iv.MJ) * (n.factor - 1))), "factor"
+	}
+	return 0, ""
 }
 
 const maxPendingIntervals = 2000
@@ -84,7 +206,7 @@ func (s *Server) startFluids(ctx context.Context) {
 	if s.cfg.Fluids == nil {
 		return
 	}
-	nodes := energyNodes(s.cfg)
+	nodes := energyNodes(s.cfg, s.secrets)
 	if len(nodes) == 0 {
 		return
 	}
@@ -116,23 +238,38 @@ func (s *Server) fluidsLoop(ctx context.Context, es store.EnergyStore, nodes []*
 func (s *Server) fluidsRound(ctx context.Context, es store.EnergyStore, nodes []*energyNode) {
 	f := s.cfg.Fluids
 	for _, n := range nodes {
+		now := s.now()
 		sc := energy.Scraper{URL: n.url, Client: s.client, Timeout: s.cfg.Health.Timeout}
-		rd, err := sc.Scrape(ctx, s.now())
+		rd, err := sc.Scrape(ctx, now)
 		if err != nil {
 			s.log.Warn("fluids: scrape failed; its energy is counted in the next interval", "node", n.key, "err", redactErr(err))
 			continue
 		}
+		// The BMC, at the same instant (an interval is the GPUs' and the node's
+		// over the same time); a failed read leaves the fallback to this interval.
+		var bi energy.Interval
+		var bok bool
+		if n.bmc != nil {
+			n.bmc.Timeout = s.cfg.Health.Timeout
+			if brd, berr := n.bmc.Scrape(ctx, now); berr != nil {
+				s.log.Warn("fluids: the BMC could not be read", "node", n.key, "err", redactErr(berr))
+			} else {
+				bi, bok = n.bmcMeter.Observe(brd)
+			}
+		}
+		s.scrapePreemptions(ctx, n)
 		if iv, ok := n.meter.Observe(rd); ok {
 			if len(n.pending) >= maxPendingIntervals { // the store has been failing for hours
 				s.log.Error("fluids: too many unstored intervals; dropping the oldest", "node", n.key)
 				n.pending = n.pending[1:]
 			}
-			n.pending = append(n.pending, iv)
+			oh, by := s.overhead(n, iv, bi, bok)
+			n.pending = append(n.pending, pendingInterval{iv: iv, overheadMJ: oh, overheadBy: by, preempt: n.takePreemptions()})
 		}
 		cutoff := s.now().Add(-f.Settle)
-		for len(n.pending) > 0 && !n.pending[0].End.After(cutoff) {
+		for len(n.pending) > 0 && !n.pending[0].iv.End.After(cutoff) {
 			iv := n.pending[0]
-			work, err := es.WorkBetween(ctx, n.labels, iv.Start, iv.End)
+			work, err := es.WorkBetween(ctx, n.labels, iv.iv.Start, iv.iv.End)
 			if err != nil {
 				s.log.Error("fluids: reading the work of an interval failed; will retry", "node", n.key, "err", err)
 				break

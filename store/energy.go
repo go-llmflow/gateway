@@ -413,3 +413,89 @@ var (
 	_ EnergyStore = (*Memory)(nil)
 	_ EnergyStore = (*Postgres)(nil)
 )
+
+// hourAt is the instant of a UTC day's hour.
+func hourAt(day string, hour int) time.Time {
+	t, err := time.Parse("2006-01-02", day)
+	if err != nil {
+		return time.Time{}
+	}
+	return t.Add(time.Duration(hour) * time.Hour)
+}
+
+// PreemptionRow says how much of a month's measured energy was used in
+// intervals during which vLLM preempted requests (the recompute a preemption
+// causes is not billed to anyone: this is measured, to show whether it
+// matters). Intervals whose counter could not be read are not in Known.
+type PreemptionRow struct {
+	Month string
+	Pool  string
+	// Intervals is the number of intervals, Known those with a readable
+	// counter, WithPreemptions those that saw at least one preemption.
+	Intervals, Known, WithPreemptions int64
+	// Preemptions is the number of preemptions, TotalMJ the energy of every
+	// interval and PreemptedMJ the energy of the intervals with preemptions.
+	Preemptions, TotalMJ, PreemptedMJ int64
+}
+
+func (m *Memory) PreemptionBetween(ctx context.Context, from, to time.Time) ([]PreemptionRow, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.Fail != nil {
+		return nil, m.Fail
+	}
+	type k struct{ month, pool string }
+	agg := map[k]*PreemptionRow{}
+	for _, iv := range m.en.ivs {
+		if iv.Start.Before(from) || !iv.Start.Before(to) {
+			continue
+		}
+		key := k{iv.Start.UTC().Format("2006-01"), iv.Pool}
+		a := agg[key]
+		if a == nil {
+			a = &PreemptionRow{Month: key.month, Pool: key.pool}
+			agg[key] = a
+		}
+		a.Intervals++
+		a.TotalMJ += iv.TotalMJ
+		if iv.Preemptions >= 0 {
+			a.Known++
+		}
+		if iv.Preemptions > 0 {
+			a.WithPreemptions++
+			a.Preemptions += iv.Preemptions
+			a.PreemptedMJ += iv.TotalMJ
+		}
+	}
+	out := make([]PreemptionRow, 0, len(agg))
+	for _, a := range agg {
+		out = append(out, *a)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Month != out[j].Month {
+			return out[i].Month < out[j].Month
+		}
+		return out[i].Pool < out[j].Pool
+	})
+	return out, nil
+}
+
+func (p *Postgres) PreemptionBetween(ctx context.Context, from, to time.Time) ([]PreemptionRow, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT to_char(ts_start AT TIME ZONE 'UTC', 'YYYY-MM'), pool, count(*),
+		       count(*) FILTER (WHERE preemptions >= 0), count(*) FILTER (WHERE preemptions > 0),
+		       coalesce(sum(preemptions) FILTER (WHERE preemptions > 0), 0)::bigint,
+		       coalesce(sum(total_mj), 0)::bigint, coalesce(sum(total_mj) FILTER (WHERE preemptions > 0), 0)::bigint
+		FROM llmflow_energy_intervals WHERE ts_start >= $1 AND ts_start < $2 GROUP BY 1, pool ORDER BY 1, pool`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (PreemptionRow, error) {
+		var x PreemptionRow
+		err := r.Scan(&x.Month, &x.Pool, &x.Intervals, &x.Known, &x.WithPreemptions, &x.Preemptions, &x.TotalMJ, &x.PreemptedMJ)
+		return x, err
+	})
+}
