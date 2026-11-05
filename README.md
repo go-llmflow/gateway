@@ -1293,7 +1293,7 @@ the tests.)
   parts add up) are fuzzed. A fixed cost is at most 10 000 000 per month and a
   whole number of the currency's minor units.
 
-### The energy beyond the GPUs, a time-of-use tariff, preemptions (since v0.29.0)
+### The energy beyond the GPUs, a time-of-use tariff, preemptions (since v0.30.0)
 
 - **Node energy (Redfish).** `DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION` is the GPUs'
   energy only: CPUs, memory, NVSwitch, NICs and fans were unbilled. On an
