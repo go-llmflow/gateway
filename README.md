@@ -1322,9 +1322,10 @@ the tests.)
   overhead (property-tested). `node_overhead_factor` (1 to 5, on the fluids block
   or an upstream) is the fallback when no BMC is configured or it could not be
   read for that interval: overhead = GPU energy × (factor − 1). A BMC that reports
-  less than the GPUs adds nothing and is logged. The Redfish client is the
-  self-contained package `redfish/` (service root discovery, session or basic
-  authentication, typed errors, JSON decoding fuzzed), written to be lifted out.
+  less than the GPUs adds nothing and is logged. The Redfish client is
+  [go-redfish/redfish](https://github.com/go-redfish/redfish) (service root
+  discovery, session or basic authentication, typed errors, JSON decoding
+  fuzzed), a module of its own since v0.1.0.
 - **Sub-meter variance.** `meter "2026-10" { kwh = 41250.5  pool = "b300" }`
   records the racks' sub-meter reading of a month. `/admin/fluids` (JSON,
   `meter_variance`) and the decision report's Method section show it against the

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-llmflow/gateway/redfish"
+	"github.com/go-redfish/redfish"
 )
 
 // Redfish: the energy of a whole node, from its BMC, through package redfish.
