@@ -3,6 +3,7 @@ package gateway
 import (
 	"encoding/json"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,9 +42,15 @@ func totals(o cbOut) (total, adj int64, byCC map[string]int64) {
 // is booked as an adjustment on the next open month, and the totals reconcile
 // (what was billed plus the adjustment is what the live computation gives).
 func TestCloseMonthFreezesAndAdjustsTheNextOne(t *testing.T) {
-	e := energyEnv(t, energy.IdleByShare)
+	// The clock is the server's own (an option), moved by an atomic: a plain
+	// assignment would race with the goroutines the server starts.
+	var clock atomic.Int64
+	clock.Store(time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC).UnixNano())
+	up := newFakeVLLM(t)
+	cfg := testConfig(up.URL())
+	cfg.Fluids = &config.Fluids{PUE: 1, PricePerKWh: 1, Currency: "EUR", CurrencyDecimals: 2, IdleEnergy: energy.IdleByShare, WPrefill: 1, WDecode: 1}
+	e := newEnv(t, cfg, WithClock(func() time.Time { return time.Unix(0, clock.Load()).UTC() }))
 	e.srv.cfg.Orgs[0].CostCenter, e.srv.cfg.Orgs[1].CostCenter = "GL-A", "GL-B"
-	e.srv.now = func() time.Time { return time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC) }
 	saveEnergy(t, e, time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC), kWhMJ, 0, "etabA")
 	saveEnergy(t, e, time.Date(2026, 10, 6, 10, 0, 0, 0, time.UTC), 3*kWhMJ, 0, "etabB")
 
@@ -107,7 +114,7 @@ func TestCloseMonthFreezesAndAdjustsTheNextOne(t *testing.T) {
 
 	// Close November in December: it keeps its adjustment, and December does
 	// not book it a second time.
-	e.srv.now = func() time.Time { return time.Date(2026, 12, 15, 12, 0, 0, 0, time.UTC) }
+	clock.Store(time.Date(2026, 12, 15, 12, 0, 0, 0, time.UTC).UnixNano())
 	if resp := e.do("POST", "/admin/billing/close?month=2026-11", master, ""); resp.StatusCode != 200 {
 		t.Fatalf("close November: %d", resp.StatusCode)
 	}
