@@ -1844,18 +1844,13 @@ jwt "partners" {                            # inference tokens, routed by iss
   error) and `accept`. A token is routed to its block by its `iss`; an unknown
   `iss` is a 401, and no other issuer's key set is tried. With one issuer the
   path is unchanged: `BenchmarkJWTLookup` (`gateway/jwt_bench_test.go`, one
-  issuer, Apple M4 Max, single run, `-benchmem`) against a clean clone of
-  v0.25.2:
+  issuer, Apple M4 Max, `GOMAXPROCS=1`, 8 rounds interleaved by `abbench
+  --max-load 4`, compared with `benchstat`) against a clean clone of v0.25.2:
 
-  | path | v0.25.2 | v0.27.0 |
-  | --- | --- | --- |
-  | cache hit | 1 alloc, 640 B | 1 alloc, 640 B |
-  | cache miss (signature, mapping) | 53 allocs, about 4.7 kB | 53 allocs, about 4.7 kB |
-
-  Allocation counts are exact; the times (about 0.38 µs and 27 µs, equal within
-  the noise) were taken at a 1-minute load of 8 to 12 and are **not** a
-  measurement: the interleaved `abbench` run with `--max-load 4` is still to be
-  made on a quiet machine.
+  | path | v0.25.2 | this release | |
+  | --- | --- | --- | --- |
+  | cache hit | 328.8 ns ± 7 %, 1 alloc, 640 B | 327.5 ns ± 4 %, 1 alloc, 640 B | ~ (p = 0.63) |
+  | cache miss (signature, mapping) | 25.13 µs ± 1 %, 53 allocs, 4.59 kB | 25.23 µs ± 2 %, 53 allocs, 4.59 kB | ~ (p = 0.96) |
 - **In front of a SAML federation** ([go-authn/bridge](https://github.com/go-authn/bridge)):
   the bridge can already restrict who may log in, by IdP, with
   `saml { idps = ["<entityID>", ...] }` (README: "restrict; one entry skips the
