@@ -265,6 +265,13 @@ func (s *Server) createTeam(w http.ResponseWriter, r *http.Request, p *principal
 		forbidden(w)
 		return
 	}
+	// A team name the configuration declares under another organisation is
+	// reserved: squatting it would make the next start refuse ("belongs to
+	// another org in the store") for everybody (security review, finding 10).
+	if o := s.cfg.OrgOfTeam(in.Name); o != "" && o != in.Org {
+		apiError(w, http.StatusConflict, "invalid_request_error", "team name reserved by the configuration for another organisation")
+		return
+	}
 	if err := s.st.CreateTeam(r.Context(), in.Name, in.Org); err != nil {
 		storeError(w, err)
 		return
