@@ -1301,6 +1301,61 @@ the tests.)
   parts add up) are fuzzed. A fixed cost is at most 10 000 000 per month and a
   whole number of the currency's minor units.
 
+### The energy beyond the GPUs, a time-of-use tariff, preemptions (since v0.30.0)
+
+- **Node energy (Redfish).** `DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION` is the GPUs'
+  energy only: CPUs, memory, NVSwitch, NICs and fans were unbilled. On an
+  upstream, `redfish_url` names the node's BMC (https only: `redfish_user` and
+  `redfish_password_file`, a secret reference, are sent with every read;
+  `redfish_ca_file` is a PEM file of the authorities that sign its certificate,
+  else the system roots; no redirect is followed, answers are bounded to 1 MiB).
+  The URL is either the BMC's address (the service is discovered: service root,
+  Chassis, EnvironmentMetrics) or the path of the chassis' EnvironmentMetrics
+  resource. The gateway reads its **`EnergykWh.Reading`** (DMTF
+  EnvironmentMetrics v1.3.1: "the total energy, in kilowatt-hour units"), a
+  counter, so the energy of an interval is exact; a BMC that reports only a power
+  is not metered (the factor below applies). A node is a `dcgm_url`: its BMC and
+  its GPUs are read at the same instant, and the node's energy minus its GPUs' is
+  the **overhead** of the interval. It is split like the GPUs' energy: in the
+  proportion of their active and idle energy, the active part by the same weights
+  (tokens), the idle part as idle; the total is exactly the GPUs' plus the
+  overhead (property-tested). `node_overhead_factor` (1 to 5, on the fluids block
+  or an upstream) is the fallback when no BMC is configured or it could not be
+  read for that interval: overhead = GPU energy × (factor − 1). A BMC that reports
+  less than the GPUs adds nothing and is logged. The Redfish client is the
+  self-contained package `redfish/` (service root discovery, session or basic
+  authentication, typed errors, JSON decoding fuzzed), written to be lifted out.
+- **Sub-meter variance.** `meter "2026-10" { kwh = 41250.5  pool = "b300" }`
+  records the racks' sub-meter reading of a month. `/admin/fluids` (JSON,
+  `meter_variance`) and the decision report's Method section show it against the
+  IT energy measured for the whole month (GPUs plus overhead): the difference in
+  kWh and as a percentage of the measured energy. **Variance only: nothing is
+  rescaled.** The proxy roles and the finance viewer read it.
+- **Time-of-use tariff.** `timezone = "Europe/Paris"` and `tariff "peak" {
+  price_per_kwh, days, from, to }` blocks price each **hour** at the band its
+  local start falls in: whole hours, `to` exclusive (`"24:00"` allowed), `from`
+  after `to` wraps midnight, `days` (mon..sun, all when omitted), no two bands
+  overlap, the hours no band covers pay `price_per_kwh` (a `period` overrides that
+  default, not the bands). The energy was already stored per interval: it is now
+  read by UTC hour (no migration) and each hour converted with the zone's rules,
+  so on the day the clocks go forward there are 23 local hours and on the day
+  they go back 25, the 02:00 hour that happens twice priced twice (tested on
+  2026-03-29 and 2026-10-25 in Europe/Paris). The idle energy of the month is
+  allocated as before, then priced at the bands it was used in (the
+  organisation's share of each band's idle energy). An interval is attributed to
+  the hour of its start, as to a day. A closed month keeps the tariff it was
+  closed with; the method states it.
+- **Preemptions (measured, not billed).** On every round the gateway reads the
+  vLLM counter `vllm:num_preemptions` (exposed as `…_total`; vLLM
+  `vllm/v1/metrics/loggers.py`, "Cumulative number of preemption from the
+  engine") of the node's upstreams, adds what happened since the last read (a
+  counter that went down is a restart) and stores it with the interval (−1 when
+  unreadable). `/admin/fluids` (JSON, `preemptions`) gives per month and pool the
+  intervals, the intervals with a readable counter and with preemptions, the
+  preemptions, and the energy of the intervals with preemptions and its share of
+  the total: an upper bound of what the recompute of preempted requests can account
+  for. Nothing is billed on it.
+
 ### Guaranteed share against use, and the lending balance (#97)
 
 `GET /admin/lending?from=&to=&format=json|csv` settles the first two rules of a

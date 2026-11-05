@@ -686,7 +686,16 @@ type upstreamHCL struct {
 	// DcgmURL is the NVIDIA DCGM exporter of this node (fluids, #97).
 	DcgmURL      *string   `hcl:"dcgm_url,optional"`
 	DcgmURLRange hcl.Range `hcl:"dcgm_url,attr_value_range"`
-	DefRange     hcl.Range `hcl:",def_range"`
+	// The node's BMC and overhead factor (nodeenergy.go).
+	RedfishURL          *string   `hcl:"redfish_url,optional"`
+	RedfishURLRange     hcl.Range `hcl:"redfish_url,attr_value_range"`
+	RedfishUser         *string   `hcl:"redfish_user,optional"`
+	RedfishUserRange    hcl.Range `hcl:"redfish_user,attr_value_range"`
+	RedfishPasswordFile *string   `hcl:"redfish_password_file,optional"`
+	RedfishCAFile       *string   `hcl:"redfish_ca_file,optional"`
+	NodeOverheadFactor  *float64  `hcl:"node_overhead_factor,optional"`
+	NodeOverheadRange   hcl.Range `hcl:"node_overhead_factor,attr_value_range"`
+	DefRange            hcl.Range `hcl:",def_range"`
 }
 
 type modelHCL struct {
@@ -1755,6 +1764,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	v.external(raw, c)
 	v.budgets(raw, c)
 	v.fluids(raw, c)
+	v.redfishNodes(raw, c)
 	v.dcgmPools(raw, c)
 	v.adoptionPrivacy(raw, c)
 	v.decisionReport(raw, c)
@@ -1812,6 +1822,12 @@ func (c *Config) SecretRefs() []string {
 	}
 	for _, g := range c.Guardrails {
 		add(g.TokenFile)
+	}
+	for _, g := range c.ModelGroups {
+		for _, u := range g.Upstreams {
+			add(u.RedfishPasswordFile)
+			add(u.RedfishCAFile)
+		}
 	}
 	if c.Tracing != nil {
 		add(c.Tracing.TokenFile)

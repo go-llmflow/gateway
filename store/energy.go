@@ -30,6 +30,16 @@ type EnergyInterval struct {
 	// stored before per-pool shares or from a node serving several pools: the
 	// organisations' shares apply.
 	Pool string
+	// OverheadMJ is the part of TotalMJ that is not the GPUs' (the node's
+	// energy beyond them: CPUs, memory, NVSwitch, NICs, fans), and
+	// OverheadSource says where it comes from: "redfish" (the BMC's counter
+	// minus the GPUs'), "factor" (node_overhead_factor) or "" (none).
+	OverheadMJ     int64
+	OverheadSource string
+	// Preemptions is the number of vLLM preemptions the node's upstreams
+	// reported in the interval (vllm:num_preemptions), -1 when unknown. Measured,
+	// not billed.
+	Preemptions int64
 }
 
 // EnergyCell is the active energy of a consumer on a UTC day.
@@ -37,6 +47,9 @@ type EnergyCell struct {
 	Day string
 	energy.Consumer
 	MJ int64
+	// At is the UTC hour the cell starts at (hourly reads only: the zero time
+	// for a day).
+	At time.Time
 }
 
 // EnergyIdle is the unattributed energy of a UTC day on a pool's nodes
@@ -45,6 +58,7 @@ type EnergyIdle struct {
 	Day  string
 	Pool string
 	MJ   int64
+	At   time.Time // as EnergyCell
 }
 
 // EnergyStore keeps measured energy. Memory and Postgres implement it.
@@ -59,6 +73,12 @@ type EnergyStore interface {
 	// EnergyBetween returns the energy of the intervals that start in
 	// [from, to), by day.
 	EnergyBetween(ctx context.Context, from, to time.Time) ([]EnergyCell, []EnergyIdle, error)
+	// EnergyHourly is EnergyBetween by UTC hour (the cells and idle rows carry
+	// At), for a time-of-use tariff.
+	EnergyHourly(ctx context.Context, from, to time.Time) ([]EnergyCell, []EnergyIdle, error)
+	// PreemptionBetween sums, per month and pool, the intervals that start in
+	// [from, to) and the vLLM preemptions they saw.
+	PreemptionBetween(ctx context.Context, from, to time.Time) ([]PreemptionRow, error)
 	// LastEnergy is the end of the newest interval of an upstream (zero when none).
 	LastEnergy(ctx context.Context, upstream string) (time.Time, error)
 }
@@ -165,6 +185,14 @@ func (m *Memory) SaveEnergy(ctx context.Context, iv EnergyInterval, active []ene
 func day(t time.Time) string { return t.UTC().Format("2006-01-02") }
 
 func (m *Memory) EnergyBetween(ctx context.Context, from, to time.Time) ([]EnergyCell, []EnergyIdle, error) {
+	return m.energyGrouped(ctx, from, to, false)
+}
+
+func (m *Memory) EnergyHourly(ctx context.Context, from, to time.Time) ([]EnergyCell, []EnergyIdle, error) {
+	return m.energyGrouped(ctx, from, to, true)
+}
+
+func (m *Memory) energyGrouped(ctx context.Context, from, to time.Time, hourly bool) ([]EnergyCell, []EnergyIdle, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
@@ -175,48 +203,61 @@ func (m *Memory) EnergyBetween(ctx context.Context, from, to time.Time) ([]Energ
 	}
 	type ck struct {
 		d string
+		h time.Time
 		c energy.Consumer
+	}
+	hour := func(t time.Time) time.Time {
+		if !hourly {
+			return time.Time{}
+		}
+		return t.UTC().Truncate(time.Hour)
 	}
 	cells := map[ck]int64{}
 	for _, c := range m.en.cells {
 		if c.start.Before(from) || !c.start.Before(to) {
 			continue
 		}
-		cells[ck{day(c.start), c.Consumer}] += c.MJ
+		cells[ck{day(c.start), hour(c.start), c.Consumer}] += c.MJ
 	}
-	idle := map[[2]string]int64{}
+	type ik struct {
+		d, pool string
+		h       time.Time
+	}
+	idle := map[ik]int64{}
 	for _, iv := range m.en.ivs {
 		if iv.Start.Before(from) || !iv.Start.Before(to) {
 			continue
 		}
-		idle[[2]string{day(iv.Start), iv.Pool}] += iv.IdleMJ
+		idle[ik{day(iv.Start), iv.Pool, hour(iv.Start)}] += iv.IdleMJ
 	}
 	var oc []EnergyCell
 	for k, v := range cells {
-		oc = append(oc, EnergyCell{k.d, k.c, v})
+		oc = append(oc, EnergyCell{k.d, k.c, v, k.h})
 	}
 	sort.Slice(oc, func(i, j int) bool {
 		if oc[i].Day != oc[j].Day {
 			return oc[i].Day < oc[j].Day
 		}
+		if !oc[i].At.Equal(oc[j].At) {
+			return oc[i].At.Before(oc[j].At)
+		}
 		return oc[i].Consumer.Org+"\x00"+oc[i].User+"\x00"+oc[i].Team+"\x00"+oc[i].Project+"\x00"+oc[i].Model <
 			oc[j].Consumer.Org+"\x00"+oc[j].User+"\x00"+oc[j].Team+"\x00"+oc[j].Project+"\x00"+oc[j].Model
 	})
-	return oc, sortIdle(idle), nil
-}
-
-func sortIdle(m map[[2]string]int64) []EnergyIdle {
-	out := make([]EnergyIdle, 0, len(m))
-	for k, v := range m {
-		out = append(out, EnergyIdle{k[0], k[1], v})
+	oi := make([]EnergyIdle, 0, len(idle))
+	for k, v := range idle {
+		oi = append(oi, EnergyIdle{k.d, k.pool, v, k.h})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Day != out[j].Day {
-			return out[i].Day < out[j].Day
+	sort.Slice(oi, func(i, j int) bool {
+		if oi[i].Day != oi[j].Day {
+			return oi[i].Day < oi[j].Day
 		}
-		return out[i].Pool < out[j].Pool
+		if !oi[i].At.Equal(oi[j].At) {
+			return oi[i].At.Before(oi[j].At)
+		}
+		return oi[i].Pool < oi[j].Pool
 	})
-	return out
+	return oc, oi, nil
 }
 
 func (m *Memory) LastEnergy(ctx context.Context, upstream string) (time.Time, error) {
@@ -255,6 +296,9 @@ CREATE TABLE IF NOT EXISTS llmflow_energy_active (
 );
 CREATE INDEX IF NOT EXISTS llmflow_energy_active_ts ON llmflow_energy_active (ts_start);
 ALTER TABLE llmflow_energy_intervals ADD COLUMN IF NOT EXISTS pool text NOT NULL DEFAULT '';
+ALTER TABLE llmflow_energy_intervals ADD COLUMN IF NOT EXISTS overhead_mj bigint NOT NULL DEFAULT 0;
+ALTER TABLE llmflow_energy_intervals ADD COLUMN IF NOT EXISTS overhead_src text NOT NULL DEFAULT '';
+ALTER TABLE llmflow_energy_intervals ADD COLUMN IF NOT EXISTS preemptions bigint NOT NULL DEFAULT -1;
 `
 
 func (p *Postgres) WorkBetween(ctx context.Context, upstreams []string, from, to time.Time) ([]energy.Work, error) {
@@ -289,8 +333,8 @@ func (p *Postgres) SaveEnergy(ctx context.Context, iv EnergyInterval, active []e
 		if clash {
 			return ErrConflict
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO llmflow_energy_intervals (upstream, ts_start, ts_end, total_mj, idle_mj, gpus, resets, gap, pool) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-			iv.Upstream, iv.Start.UTC(), iv.End.UTC(), iv.TotalMJ, iv.IdleMJ, iv.GPUs, iv.Resets, iv.Gap, iv.Pool); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO llmflow_energy_intervals (upstream, ts_start, ts_end, total_mj, idle_mj, gpus, resets, gap, pool, overhead_mj, overhead_src, preemptions) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+			iv.Upstream, iv.Start.UTC(), iv.End.UTC(), iv.TotalMJ, iv.IdleMJ, iv.GPUs, iv.Resets, iv.Gap, iv.Pool, iv.OverheadMJ, iv.OverheadSource, iv.Preemptions); err != nil {
 			return err
 		}
 		for _, a := range active {
@@ -306,30 +350,51 @@ func (p *Postgres) SaveEnergy(ctx context.Context, iv EnergyInterval, active []e
 }
 
 func (p *Postgres) EnergyBetween(ctx context.Context, from, to time.Time) ([]EnergyCell, []EnergyIdle, error) {
+	return p.energyGrouped(ctx, from, to, false)
+}
+
+func (p *Postgres) EnergyHourly(ctx context.Context, from, to time.Time) ([]EnergyCell, []EnergyIdle, error) {
+	return p.energyGrouped(ctx, from, to, true)
+}
+
+func (p *Postgres) energyGrouped(ctx context.Context, from, to time.Time, hourly bool) ([]EnergyCell, []EnergyIdle, error) {
+	// The hour is the UTC hour of the interval's start; 0 for a day read.
+	hourExpr := "0"
+	if hourly {
+		hourExpr = "extract(hour from ts_start AT TIME ZONE 'UTC')::int"
+	}
 	rows, err := p.pool.Query(ctx, `
-		SELECT to_char(ts_start AT TIME ZONE 'UTC', 'YYYY-MM-DD'), org, lab, team, project, user_name, model, pool, sum(mj)::bigint
+		SELECT to_char(ts_start AT TIME ZONE 'UTC', 'YYYY-MM-DD'), `+hourExpr+`, org, lab, team, project, user_name, model, pool, sum(mj)::bigint
 		FROM llmflow_energy_active WHERE ts_start >= $1 AND ts_start < $2
-		GROUP BY 1, org, lab, team, project, user_name, model, pool ORDER BY 1, org, team, project, user_name, model`, from, to)
+		GROUP BY 1, 2, org, lab, team, project, user_name, model, pool ORDER BY 1, 2, org, team, project, user_name, model`, from, to)
 	if err != nil {
 		return nil, nil, err
 	}
 	cells, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (EnergyCell, error) {
 		var c EnergyCell
-		err := r.Scan(&c.Day, &c.Org, &c.Lab, &c.Team, &c.Project, &c.User, &c.Model, &c.Pool, &c.MJ)
+		var h int
+		err := r.Scan(&c.Day, &h, &c.Org, &c.Lab, &c.Team, &c.Project, &c.User, &c.Model, &c.Pool, &c.MJ)
+		if hourly {
+			c.At = hourAt(c.Day, h)
+		}
 		return c, err
 	})
 	if err != nil {
 		return nil, nil, err
 	}
 	rows, err = p.pool.Query(ctx, `
-		SELECT to_char(ts_start AT TIME ZONE 'UTC', 'YYYY-MM-DD'), pool, sum(idle_mj)::bigint
-		FROM llmflow_energy_intervals WHERE ts_start >= $1 AND ts_start < $2 GROUP BY 1, pool ORDER BY 1, pool`, from, to)
+		SELECT to_char(ts_start AT TIME ZONE 'UTC', 'YYYY-MM-DD'), `+hourExpr+`, pool, sum(idle_mj)::bigint
+		FROM llmflow_energy_intervals WHERE ts_start >= $1 AND ts_start < $2 GROUP BY 1, 2, pool ORDER BY 1, 2, pool`, from, to)
 	if err != nil {
 		return nil, nil, err
 	}
 	idle, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (EnergyIdle, error) {
 		var i EnergyIdle
-		err := r.Scan(&i.Day, &i.Pool, &i.MJ)
+		var h int
+		err := r.Scan(&i.Day, &h, &i.Pool, &i.MJ)
+		if hourly {
+			i.At = hourAt(i.Day, h)
+		}
 		return i, err
 	})
 	return cells, idle, err
@@ -348,3 +413,89 @@ var (
 	_ EnergyStore = (*Memory)(nil)
 	_ EnergyStore = (*Postgres)(nil)
 )
+
+// hourAt is the instant of a UTC day's hour.
+func hourAt(day string, hour int) time.Time {
+	t, err := time.Parse("2006-01-02", day)
+	if err != nil {
+		return time.Time{}
+	}
+	return t.Add(time.Duration(hour) * time.Hour)
+}
+
+// PreemptionRow says how much of a month's measured energy was used in
+// intervals during which vLLM preempted requests (the recompute a preemption
+// causes is not billed to anyone: this is measured, to show whether it
+// matters). Intervals whose counter could not be read are not in Known.
+type PreemptionRow struct {
+	Month string
+	Pool  string
+	// Intervals is the number of intervals, Known those with a readable
+	// counter, WithPreemptions those that saw at least one preemption.
+	Intervals, Known, WithPreemptions int64
+	// Preemptions is the number of preemptions, TotalMJ the energy of every
+	// interval and PreemptedMJ the energy of the intervals with preemptions.
+	Preemptions, TotalMJ, PreemptedMJ int64
+}
+
+func (m *Memory) PreemptionBetween(ctx context.Context, from, to time.Time) ([]PreemptionRow, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.Fail != nil {
+		return nil, m.Fail
+	}
+	type k struct{ month, pool string }
+	agg := map[k]*PreemptionRow{}
+	for _, iv := range m.en.ivs {
+		if iv.Start.Before(from) || !iv.Start.Before(to) {
+			continue
+		}
+		key := k{iv.Start.UTC().Format("2006-01"), iv.Pool}
+		a := agg[key]
+		if a == nil {
+			a = &PreemptionRow{Month: key.month, Pool: key.pool}
+			agg[key] = a
+		}
+		a.Intervals++
+		a.TotalMJ += iv.TotalMJ
+		if iv.Preemptions >= 0 {
+			a.Known++
+		}
+		if iv.Preemptions > 0 {
+			a.WithPreemptions++
+			a.Preemptions += iv.Preemptions
+			a.PreemptedMJ += iv.TotalMJ
+		}
+	}
+	out := make([]PreemptionRow, 0, len(agg))
+	for _, a := range agg {
+		out = append(out, *a)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Month != out[j].Month {
+			return out[i].Month < out[j].Month
+		}
+		return out[i].Pool < out[j].Pool
+	})
+	return out, nil
+}
+
+func (p *Postgres) PreemptionBetween(ctx context.Context, from, to time.Time) ([]PreemptionRow, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT to_char(ts_start AT TIME ZONE 'UTC', 'YYYY-MM'), pool, count(*),
+		       count(*) FILTER (WHERE preemptions >= 0), count(*) FILTER (WHERE preemptions > 0),
+		       coalesce(sum(preemptions) FILTER (WHERE preemptions > 0), 0)::bigint,
+		       coalesce(sum(total_mj), 0)::bigint, coalesce(sum(total_mj) FILTER (WHERE preemptions > 0), 0)::bigint
+		FROM llmflow_energy_intervals WHERE ts_start >= $1 AND ts_start < $2 GROUP BY 1, pool ORDER BY 1, pool`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (PreemptionRow, error) {
+		var x PreemptionRow
+		err := r.Scan(&x.Month, &x.Pool, &x.Intervals, &x.Known, &x.WithPreemptions, &x.Preemptions, &x.TotalMJ, &x.PreemptedMJ)
+		return x, err
+	})
+}

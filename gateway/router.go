@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -331,10 +332,58 @@ func (s *Server) scrapeWaiting(ctx context.Context, u *upstream) int64 {
 	return parseWaiting(io.LimitReader(resp.Body, maxMetricsBody))
 }
 
+// preemptionMetrics are the names vLLM's cumulative preemption counter goes by
+// (vllm/v1/metrics/loggers.py names it vllm:num_preemptions; a Prometheus
+// counter is exposed with the _total suffix).
+var preemptionMetrics = []string{"vllm:num_preemptions_total", "vllm:num_preemptions"}
+
+// scrapeCounter reads a vLLM counter (summed over its label sets) from the
+// /metrics of an upstream; ok false when it cannot be read.
+func (s *Server) scrapeCounter(ctx context.Context, base string, names ...string) (float64, bool) {
+	ctx, cancel := context.WithTimeout(ctx, s.cfg.Health.Timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(base, "/")+"/metrics", nil)
+	if err != nil {
+		return 0, false
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, false
+	}
+	return parseMetricSum(io.LimitReader(resp.Body, maxMetricsBody), names...)
+}
+
 // parseWaiting sums the samples of vllm:num_requests_waiting in a Prometheus
 // text exposition; -1 when there is none.
 func parseWaiting(r io.Reader) int64 {
-	const name = "vllm:num_requests_waiting"
+	v, ok := parseMetricSum(r, "vllm:num_requests_waiting")
+	if !ok {
+		return -1
+	}
+	return int64(v)
+}
+
+// parseMetricSum sums the samples of the first of names that has any, in a
+// Prometheus text exposition (label sets added up; a negative, NaN or infinite
+// sample is skipped).
+func parseMetricSum(r io.Reader, names ...string) (float64, bool) {
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return 0, false
+	}
+	for _, name := range names {
+		if v, ok := sumSamples(bytes.NewReader(body), name); ok {
+			return v, true
+		}
+	}
+	return 0, false
+}
+
+func sumSamples(r io.Reader, name string) (float64, bool) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	var sum float64
@@ -363,9 +412,9 @@ func parseWaiting(r io.Reader) int64 {
 		found = true
 	}
 	if !found || sc.Err() != nil {
-		return -1
+		return 0, false
 	}
-	return int64(sum)
+	return sum, true
 }
 
 // redactURL keeps scheme and host only, for logs and metric labels.

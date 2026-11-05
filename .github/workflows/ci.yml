@@ -66,6 +66,9 @@ jobs:
           - { target: FuzzClientAddr, pkg: ./gateway }
           - { target: FuzzParseBillingMonth, pkg: ./gateway }
           - { target: FuzzFixedCostParts, pkg: ./gateway }
+          - { target: FuzzParseEnvironmentMetrics, pkg: ./redfish }
+          - { target: FuzzParsePowerConsumed, pkg: ./redfish }
+          - { target: FuzzParseHour, pkg: ./config }
           - { target: FuzzAnthropicHeaders, pkg: ./gateway }
           - { target: FuzzJWTBearer, pkg: ./gateway }
           - { target: FuzzSSOCallback, pkg: ./gateway }
