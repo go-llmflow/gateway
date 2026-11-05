@@ -85,3 +85,51 @@ func TestMultiIdPConfigErrors(t *testing.T) {
 		t.Fatalf("legacy forms: %+v %+v", c.JWT, c.SSO)
 	}
 }
+
+func TestDomainsConfig(t *testing.T) {
+	prov := func(name, issuer, body string) string {
+		return `provider "` + name + `" {
+  issuer    = "` + issuer + `"
+  client_id = "c"
+  orgs      = ["etabA"]
+  ` + body + `
+}
+`
+	}
+	sso := func(parts ...string) string {
+		return valid + "sso {\n  redirect_url = \"https://llm.example.org/admin/callback\"\n" + strings.Join(parts, "") + "}\n"
+	}
+	// Valid: one legacy domain, others by domains; the federation's accepted
+	// institutions are scopes too.
+	c, err := parse(sso(
+		prov("a", "https://a.example", `domain = "Univ-A.fr."`),
+		prov("b", "https://b.example", `domains = ["univ-b.fr", "univ-c.fr"]`),
+		prov("fed", "https://f.example", "accept {\n    claim = \"schac_home_organization\"\n    values = [\"Univ-D.fr\"]\n  }")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps := c.SSO.ProviderList()
+	if ps[0].Domain != "univ-a.fr" || !slices.Equal(ps[0].NameScopes(), []string{"univ-a.fr"}) {
+		t.Errorf("a: %q %v", ps[0].Domain, ps[0].NameScopes())
+	}
+	if ps[1].Domain != "" || !slices.Equal(ps[1].NameScopes(), []string{"univ-b.fr", "univ-c.fr"}) {
+		t.Errorf("b: %q %v", ps[1].Domain, ps[1].NameScopes())
+	}
+	if !slices.Equal(ps[2].NameScopes(), []string{"Univ-D.fr"}) { // compared without case by ScopedName
+		t.Errorf("fed: %v", ps[2].NameScopes())
+	}
+	for _, tc := range []struct{ name, src, want string }{
+		{"two legacy domains", sso(prov("a", "https://a.example", `domain = "univ-a.fr"`), prov("b", "https://b.example", `domain = "univ-b.fr"`)), "Second legacy domain"},
+		{"invalid domain", sso(prov("a", "https://a.example", `domain = "univ a.fr"`)), "Invalid domain"},
+		{"invalid in domains", sso(prov("a", "https://a.example", `domains = ["x@y"]`)), "Invalid domain"},
+		{"empty domain", sso(prov("a", "https://a.example", `domain = ""`)), "Invalid domain"},
+	} {
+		if _, err := parse(tc.src); err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "test.hcl:") {
+			t.Errorf("%s: %v", tc.name, err)
+		}
+	}
+	// The same issuer in sso and jwt may carry the same domain.
+	if _, err := parse(valid + jwtBlock("https://u.example", "a")[:len(jwtBlock("https://u.example", "a"))-2] + "  domain = \"univ-a.fr\"\n}\n" + ssoBlock("https://u.example", "https://llm.example.org/admin/callback", "domain = \"univ-a.fr\"")); err != nil {
+		t.Errorf("one issuer, one legacy domain: %v", err)
+	}
+}

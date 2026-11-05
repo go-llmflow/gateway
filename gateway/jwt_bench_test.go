@@ -17,7 +17,7 @@ import (
 func BenchmarkJWTLookup(b *testing.B) {
 	idp := newFakeIdP(b)
 	cfg := testConfig("http://127.0.0.1:1")
-	cfg.JWT = &config.JWT{Issuer: idp.srv.URL, Audience: "llmflow", ClockSkew: time.Minute, MinRefresh: time.Hour,
+	cfg.JWT = &config.JWT{Domain: "example.org", Issuer: idp.srv.URL, Audience: "llmflow", ClockSkew: time.Minute, MinRefresh: time.Hour,
 		Maps: []config.JWTMap{{Claim: "groups", Value: "lab-a", Team: "etabA"}}}
 	srv, err := New(cfg, store.NewMemory(), Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg), CacheSaltKey: testSaltKey})
 	if err != nil {

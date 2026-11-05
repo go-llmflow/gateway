@@ -340,9 +340,14 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request, provider st
 		fail(http.StatusForbidden, "institution not accepted", ref)
 		return
 	}
-	user := id.Username()
-	if user == "" || len(user) > 256 {
-		fail(http.StatusBadRequest, "no usable username in the ID token", nil)
+	user, err := s.scopedPerson(ctx, id, prov.cfg.NameScopes(), prov.cfg.Domain)
+	if errors.Is(err, errPersonStore) {
+		apiError(w, http.StatusServiceUnavailable, "service_unavailable", "user store unreachable")
+		return
+	}
+	if err != nil || len(user) > 256 {
+		shown = "your identity provider gave no name with an institution this gateway accepts for it"
+		fail(http.StatusForbidden, "no usable scoped username in the ID token", err)
 		return
 	}
 	subject := id.Subject()

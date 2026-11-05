@@ -331,6 +331,9 @@ type SSO struct {
 	// Roles map ID token claims to role bindings, added to the bindings
 	// the user has in the store.
 	Roles []SSORole
+	// Domain and Domains: as in SSOProvider, for the single issuer.
+	Domain  string
+	Domains []string
 	// Providers are the named provider blocks; when present the fields
 	// above that describe one issuer are empty and RedirectURL is the base
 	// of every provider's callback (/admin/callback/<name>).
@@ -377,6 +380,10 @@ type JWT struct {
 	Name   string
 	Orgs   []string
 	Accept []Accept
+	// Domain and Domains: the institutions' domains this issuer may assert
+	// names for; Domain also scopes legacy unscoped names (see SSOProvider).
+	Domain  string
+	Domains []string
 }
 
 // JWTMap maps a claim value to a team (and optionally a project).

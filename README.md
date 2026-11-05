@@ -1999,7 +1999,7 @@ jwt "partners" {                            # inference tokens, routed by iss
 - **Inference tokens**: each `jwt "<name>"` block has its own audience, JWKS,
   maps, `orgs` (a `map` to a team of another organisation is a configuration
   error) and `accept`. A token is routed to its block by its `iss`; an unknown
-  `iss` is a 401, and no other issuer's key set is tried. With one issuer the
+  `iss` is a 401, and no other issuer's key set is tried. **A person is `local@domain`** (v0.29.0; see "Names are scoped" below). With one issuer the
   path is unchanged: `BenchmarkJWTLookup` (`gateway/jwt_bench_test.go`, one
   issuer, Apple M4 Max, `GOMAXPROCS=1`, 8 rounds interleaved by `abbench
   --max-load 4`, compared with `benchstat`) against a clean clone of v0.25.2:
@@ -2008,6 +2008,27 @@ jwt "partners" {                            # inference tokens, routed by iss
   | --- | --- | --- | --- |
   | cache hit | 328.8 ns ± 7 %, 1 alloc, 640 B | 327.5 ns ± 4 %, 1 alloc, 640 B | ~ (p = 0.63) |
   | cache miss (signature, mapping) | 25.13 µs ± 1 %, 53 allocs, 4.59 kB | 25.23 µs ± 2 %, 53 allocs, 4.59 kB | ~ (p = 0.96) |
+- **Names are scoped** (v0.29.0). An account is relative to an institution's
+  domain; there is no global "alice". A person, whether an administrator who logs
+  in or a JWT's holder (SCIM-provisioned users follow in the next release), is
+  `local@domain`, and the
+  domain is **checked against what the issuer that vouched for them may assert**, as
+  a Shibboleth service checks a scope: the issuer's `domain` and `domains`, or, behind
+  a federation proxy, the institutions of its `accept` list on `schac_home_organization`.
+  A name whose scope the issuer may not assert is refused (a login is 403, a JWT is
+  attributed to the synthetic `jwt-…` key id of its issuer and subject), never trusted.
+  The claim that carries the name is the `username_claim` (`eduperson_principal_name`,
+  eduPersonPrincipalName: single-valued, `caseIgnoreMatch` in the eduPerson schema, the
+  scope being the administrative domain that issued it; or `voperson_id`); names are
+  compared in ASCII lower case, by go-authn/oidc v0.6.0 `ScopedName`.
+  **Migration.** Accounts that predate scoped names are unscoped (`alice`). The
+  institution they belong to sets `domain = "polytechnique.edu"` on its provider
+  (`sso`) and issuer (`jwt`): an unscoped `alice` is `alice@polytechnique.edu`, and a
+  stored user `alice` is that person and keeps their name (and their roles and tokens)
+  until renamed; only one issuer may carry `domain`, since unscoped names belong to one
+  institution. Without `domain` (or `domains`) an unscoped name is no identity: a login
+  is refused, a token is a synthetic person. **Upgrading a gateway that uses `sso` or
+  `jwt` without a domain therefore needs `domain` set.**
 - **In front of a SAML federation** ([go-authn/bridge](https://github.com/go-authn/bridge)):
   the bridge can already restrict who may log in, by IdP, with
   `saml { idps = ["<entityID>", ...] }` (README: "restrict; one entry skips the

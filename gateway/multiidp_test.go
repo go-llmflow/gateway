@@ -32,22 +32,24 @@ func newMultiEnv(t testing.TB) *multiEnv {
 	cfg := testConfig("http://127.0.0.1:1")
 	cfg.AuthFailuresPerMinute = 0
 	cfg.SSO = &config.SSO{RedirectURL: gwOrigin + "/admin/callback", SessionTTL: time.Hour}
-	mk := func(name string, orgs []string, accept []config.Accept, roles []config.SSORole) {
+	mk := func(name, domain string, domains []string, orgs []string, accept []config.Accept, roles []config.SSORole) {
 		cfg.SSO.Providers = append(cfg.SSO.Providers, config.SSOProvider{
 			Name: name, Issuer: m.idps[name].srv.URL, ClientID: "client-" + name, RedirectURL: gwOrigin + "/admin/callback/" + name,
-			Scopes: []string{"openid"}, Restricted: true, Orgs: orgs, Accept: accept, Roles: roles})
+			Scopes: []string{"openid"}, Restricted: true, Orgs: orgs, Accept: accept, Roles: roles, Domain: domain, Domains: domains})
 	}
-	mk("a", []string{"etabA"}, nil, []config.SSORole{
+	// a is the institution whose accounts predate scoped names (domain), b has
+	// accounts of univ-b.fr only, fed vouches for the institutions it accepts.
+	mk("a", "univ-a.fr", nil, []string{"etabA"}, nil, []config.SSORole{
 		{Claim: "groups", Value: "admins", Role: "org_admin", Org: "etabA"},
 		{Claim: "groups", Value: "evil", Role: "org_admin", Org: "etabB"},
 		{Claim: "groups", Value: "evil-team", Role: "team_admin", Team: "etabB"},
 		{Claim: "groups", Value: "root", Role: "proxy_admin"},
 	})
-	mk("b", []string{"etabB"}, nil, []config.SSORole{
+	mk("b", "", []string{"univ-b.fr"}, []string{"etabB"}, nil, []config.SSORole{
 		{Claim: "groups", Value: "admins", Role: "org_admin", Org: "etabB"},
 		{Claim: "groups", Value: "users", Role: "member", Team: "etabB"},
 	})
-	mk("fed", []string{"etabA", "etabB"}, []config.Accept{{Claim: "schac_home_organization", Values: []string{"univ-a.fr", "univ-b.fr"}}},
+	mk("fed", "", nil, []string{"etabA", "etabB"}, []config.Accept{{Claim: "schac_home_organization", Values: []string{"univ-a.fr", "univ-b.fr"}}},
 		[]config.SSORole{{Claim: "groups", Value: "users", Role: "member", Team: "etabA"}})
 	st := store.NewMemory()
 	srv, err := New(cfg, st, Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg), CacheSaltKey: testSaltKey})
@@ -80,6 +82,15 @@ func (m *multiEnv) req(method, path string, cookies map[string]string) *http.Res
 }
 
 func (m *multiEnv) claims(p, sub, user string, extra map[string]any) map[string]any {
+	// A person is local@domain: the names of b and fed carry their institution.
+	if !strings.Contains(user, "@") {
+		switch p {
+		case "b":
+			user += "@univ-b.fr"
+		case "fed":
+			user += "@univ-a.fr"
+		}
+	}
 	now := time.Now()
 	c := map[string]any{"iss": m.idps[p].srv.URL, "aud": "client-" + p, "sub": sub, "preferred_username": user,
 		"iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix()}
@@ -248,17 +259,29 @@ func TestMultiIdPOrgEscalation(t *testing.T) {
 func TestMultiIdPTakeover(t *testing.T) {
 	m := newMultiEnv(t)
 	ctx := context.Background()
-	if err := m.st.CreateUser(ctx, "alice"); err != nil {
+	// An account is relative to an institution's domain: alice of univ-a.fr.
+	if err := m.st.CreateUser(ctx, "alice@univ-a.fr"); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.st.Grant(ctx, store.Binding{User: "alice", Role: store.RoleProxyAdmin, Provenance: store.ProvProxyAdmin}); err != nil {
+	if err := m.st.Grant(ctx, store.Binding{User: "alice@univ-a.fr", Role: store.RoleProxyAdmin, Provenance: store.ProvProxyAdmin}); err != nil {
 		t.Fatal(err)
 	}
-	// B asserts alice before alice ever logged in: B is not the first
-	// provider and alice holds a proxy-wide role: refused, no link made.
-	code, _, _ := m.login("b", m.claims("b", "sb-evil", "alice", map[string]any{"groups": []string{"admins"}}))
+	// B may not assert univ-a.fr at all: the name is refused, never trusted.
+	code, _, _ := m.login("b", m.claims("b", "sb-evil", "alice@univ-a.fr", map[string]any{"groups": []string{"admins"}}))
 	if code != http.StatusForbidden {
-		t.Fatalf("takeover before the first login: %d", code)
+		t.Fatalf("b asserting a name of univ-a.fr: %d", code)
+	}
+	// B's own alice is alice@univ-b.fr, another person, with b's roles only.
+	code, _, sessB := m.login("b", m.claims("b", "sb-alice", "alice", map[string]any{"groups": []string{"admins"}}))
+	if code != http.StatusSeeOther {
+		t.Fatalf("alice of univ-b.fr: %d", code)
+	}
+	if rs := m.roles(sessB); len(rs) != 1 || rs[0].Org != "etabB" || rs[0].Role != store.RoleOrgAdmin {
+		t.Fatalf("alice of univ-b.fr has the roles of alice of univ-a.fr: %+v", rs)
+	}
+	// The federation may assert univ-a.fr, but may not adopt a proxy admin.
+	if code, _, _ = m.login("fed", m.claims("fed", "f-0", "alice", map[string]any{"groups": []string{"users"}, "schac_home_organization": "univ-a.fr"})); code != http.StatusForbidden {
+		t.Fatalf("federation adopting a proxy admin: %d", code)
 	}
 	// The real alice, at the first provider, which may vouch for proxy roles:
 	// linked, proxy admin.
@@ -270,18 +293,15 @@ func TestMultiIdPTakeover(t *testing.T) {
 	if rs := m.roles(sess); len(rs) != 1 || rs[0].Role != store.RoleProxyAdmin {
 		t.Fatalf("alice's roles: %+v", rs)
 	}
-	// Now B (with its own role mapping) and A with another subject.
-	if code, _, _ = m.login("b", m.claims("b", "sb-evil", "alice", map[string]any{"groups": []string{"admins"}})); code != http.StatusForbidden {
-		t.Fatalf("takeover through b: %d", code)
-	}
+	// Now A with another subject.
 	if code, _, _ = m.login("a", m.claims("a", "other-sub", "alice", map[string]any{"groups": []string{"admins"}})); code != http.StatusForbidden {
 		t.Fatalf("takeover with another subject: %d", code)
 	}
-	// The federation proxy, an accepted institution, same name: refused.
+	// The federation proxy, same name and institution, another subject: refused.
 	if code, _, _ = m.login("fed", m.claims("fed", "f-1", "alice", map[string]any{"groups": []string{"users"}, "schac_home_organization": "univ-a.fr"})); code != http.StatusForbidden {
 		t.Fatalf("takeover through the federation: %d", code)
 	}
-	if l, err := m.st.UserIdP(ctx, "alice"); err != nil || l != (store.IdPLink{Provider: "a", Subject: "sa-alice"}) {
+	if l, err := m.st.UserIdP(ctx, "alice@univ-a.fr"); err != nil || l != (store.IdPLink{Provider: "a", Subject: "sa-alice"}) {
 		t.Fatalf("link: %+v %v", l, err)
 	}
 }
@@ -291,10 +311,10 @@ func TestMultiIdPTakeover(t *testing.T) {
 func TestMultiIdPProvisionedUser(t *testing.T) {
 	m := newMultiEnv(t)
 	ctx := context.Background()
-	if err := m.st.CreateUser(ctx, "erin"); err != nil {
+	if err := m.st.CreateUser(ctx, "erin@univ-b.fr"); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.st.Grant(ctx, store.Binding{User: "erin", Role: store.RoleMember, Team: "etabB", Provenance: store.ProvSCIM}); err != nil {
+	if err := m.st.Grant(ctx, store.Binding{User: "erin@univ-b.fr", Role: store.RoleMember, Team: "etabB", Provenance: store.ProvSCIM}); err != nil {
 		t.Fatal(err)
 	}
 	// b is not the first provider, but erin's only role is inside etabB.
@@ -305,8 +325,8 @@ func TestMultiIdPProvisionedUser(t *testing.T) {
 	if rs := m.roles(sess); len(rs) != 1 || rs[0].Team != "etabB" {
 		t.Fatalf("roles: %+v", rs)
 	}
-	if code, _, _ := m.login("a", m.claims("a", "sa-erin", "erin", map[string]any{"groups": []string{"admins"}})); code != http.StatusForbidden {
-		t.Fatalf("erin at a after being linked to b: %d", code)
+	if code, _, _ := m.login("a", m.claims("a", "sa-erin", "erin@univ-b.fr", map[string]any{"groups": []string{"admins"}})); code != http.StatusForbidden {
+		t.Fatalf("erin of univ-b.fr at a: %d", code)
 	}
 }
 
@@ -331,8 +351,8 @@ func TestMultiIdPAccept(t *testing.T) {
 		{"wrong value", with(map[string]any{"schac_home_organization": "univ-z.fr"}), 403, `institution \"univ-z.fr\" is not accepted`},
 		{"right value", with(map[string]any{"schac_home_organization": "univ-a.fr"}), 303, ""},
 		{"domain compared without case", with(map[string]any{"schac_home_organization": "UNIV-B.FR"}), 303, ""},
-		{"multi-valued, one accepted", with(map[string]any{"schac_home_organization": []string{"univ-z.fr", "univ-b.fr"}}), 303, ""},
-		{"multi-valued, none accepted", with(map[string]any{"schac_home_organization": []string{"univ-y.fr", "univ-z.fr"}}), 403, `institution \"univ-y.fr\"`},
+		{"multi-valued with one accepted", with(map[string]any{"schac_home_organization": []string{"univ-z.fr", "univ-b.fr"}}), 303, ""},
+		{"multi-valued with none accepted", with(map[string]any{"schac_home_organization": []string{"univ-y.fr", "univ-z.fr"}}), 403, `institution \"univ-y.fr\"`},
 		{"suffix is not a match", with(map[string]any{"schac_home_organization": "evil-univ-a.fr"}), 403, "not accepted"},
 		{"hostile value is shown safely", with(map[string]any{"schac_home_organization": "x\r\n<script>"}), 403, "not accepted"},
 	} {
@@ -442,7 +462,9 @@ func TestMultiIdPAdoptionNeedsOrgs(t *testing.T) {
 	if code, _, _ := m.login("a", m.claims("a", "s-n", "nobody", adm)); code != http.StatusSeeOther {
 		t.Fatalf("adopt = true: %d", code)
 	}
-	// The real owner of erin's account is still free to log in at b.
+	// The real owner of an etabB account is still free to log in at b.
+	must(m.st.CreateUser(ctx, "erin@univ-b.fr"))
+	must(m.st.Grant(ctx, store.Binding{User: "erin@univ-b.fr", Role: store.RoleMember, Team: "etabB", Provenance: store.ProvSCIM}))
 	if code, _, _ := m.login("b", m.claims("b", "sb-erin", "erin", nil)); code != http.StatusSeeOther {
 		t.Fatalf("erin at b: %d", code)
 	}
@@ -462,16 +484,16 @@ func TestMultiIdPSessionBeforeUser(t *testing.T) {
 		CSRF string `json:"csrf_token"`
 	}
 	_ = json.Unmarshal([]byte(readAll(t, resp)), &info)
-	if err := m.st.CreateUser(ctx, "frank"); err != nil {
+	if err := m.st.CreateUser(ctx, "frank@univ-b.fr"); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.st.Grant(ctx, store.Binding{User: "frank", Role: store.RoleOrgAdmin, Org: "etabA", Provenance: store.ProvProxyAdmin}); err != nil {
+	if err := m.st.Grant(ctx, store.Binding{User: "frank@univ-b.fr", Role: store.RoleOrgAdmin, Org: "etabA", Provenance: store.ProvProxyAdmin}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.st.LinkUserIdP(ctx, "frank", store.IdPLink{Provider: "a", Subject: "sa-frank"}); err != nil {
+	if _, err := m.st.LinkUserIdP(ctx, "frank@univ-b.fr", store.IdPLink{Provider: "a", Subject: "sa-frank"}); err != nil {
 		t.Fatal(err)
 	}
-	r, _ := http.NewRequest("POST", m.gw.URL+"/admin/users/frank/tokens", nil)
+	r, _ := http.NewRequest("POST", m.gw.URL+"/admin/users/frank@univ-b.fr/tokens", nil)
 	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: sess})
 	r.Header.Set(csrfHeader, info.CSRF)
 	r.Header.Set("Origin", gwOrigin)

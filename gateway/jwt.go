@@ -90,9 +90,19 @@ func (s *Server) jwtIdentity(ctx context.Context, j *config.JWT, tok *oidc.Token
 		// A stable key ID per (issuer, subject): budgets, limits, allowlists
 		// and reports see one key per person.
 		sum := sha256.Sum256([]byte(tok.Issuer() + "\x00" + tok.Subject()))
+		id := "jwt-" + base64.RawURLEncoding.EncodeToString(sum[:16])
+		// The person is (issuer, subject), never a name alone (OpenID Connect
+		// Core §2: sub is unique within its issuer; a username claim is not,
+		// and an issuer's users may choose it). The synthetic key id stands
+		// for them, unless a stored user of that name is linked to exactly
+		// this issuer and subject.
+		owner, err := s.jwtPerson(ctx, j, tok, id)
+		if err != nil {
+			return store.Key{}, fmt.Errorf("%w: %v", errAuthUnavailable, err)
+		}
 		return store.Key{
-			ID: "jwt-" + base64.RawURLEncoding.EncodeToString(sum[:16]), Org: t.Org, Team: t.Name, Project: m.Project,
-			Owner: tok.Username(), Name: tok.Username(), RPM: j.RPM, TPM: j.TPM, MaxInFlight: j.MaxInFlight,
+			ID: id, Org: t.Org, Team: t.Name, Project: m.Project,
+			Owner: owner, Name: tok.Username(), RPM: j.RPM, TPM: j.TPM, MaxInFlight: j.MaxInFlight,
 		}, nil
 	}
 	return store.Key{}, errJWTUnmapped
@@ -151,4 +161,20 @@ func looksLikeJWT(s string) bool {
 // and key sets (except loopback) and checks every redirect.
 func defaultJWTClient() *http.Client {
 	return &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: nil}}
+}
+
+// jwtPerson is the person a verified token is attributed to: its scoped name
+// (local@domain, the scope checked against what this issuer may assert, see
+// scopedPerson), or, when it has none this issuer may assert, the synthetic key
+// id (iss, sub). A bare username claim is never a person: two issuers, or two
+// institutions behind one federation proxy, each have an "alice".
+func (s *Server) jwtPerson(ctx context.Context, j *config.JWT, tok *oidc.Token, id string) (string, error) {
+	name, err := s.scopedPerson(ctx, tok, j.NameScopes(), j.Domain)
+	switch {
+	case err == nil:
+		return name, nil
+	case errors.Is(err, errPersonStore):
+		return "", err
+	}
+	return id, nil
 }

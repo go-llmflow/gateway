@@ -360,6 +360,10 @@ type ssoProviderHCL struct {
 	Orgs             []string     `hcl:"orgs"`
 	OrgsRange        hcl.Range    `hcl:"orgs,attr_value_range"`
 	AllowProxyRoles  *bool        `hcl:"allow_proxy_roles,optional"`
+	Domain           *string      `hcl:"domain,optional"`
+	Domains          []string     `hcl:"domains,optional"`
+	DomainsRange     hcl.Range    `hcl:"domains,attr_value_range"`
+	DomainRange      hcl.Range    `hcl:"domain,attr_value_range"`
 	Adopt            *bool        `hcl:"adopt,optional"`
 	Accepts          []acceptHCL  `hcl:"accept,block"`
 	Roles            []ssoRoleHCL `hcl:"role,block"`
@@ -375,6 +379,10 @@ type acceptHCL struct {
 
 type ssoHCL struct {
 	Providers        []ssoProviderHCL `hcl:"provider,block"`
+	Domain           *string          `hcl:"domain,optional"`
+	Domains          []string         `hcl:"domains,optional"`
+	DomainsRange     hcl.Range        `hcl:"domains,attr_value_range"`
+	DomainRange      hcl.Range        `hcl:"domain,attr_value_range"`
 	DefRange         hcl.Range        `hcl:",def_range"`
 	Issuer           string           `hcl:"issuer,optional"`
 	IssuerRange      hcl.Range        `hcl:"issuer,attr_value_range"`
@@ -423,6 +431,10 @@ type jwtHCL struct {
 	// Name is the block's label; the loader gives an unnamed jwt block the
 	// label legacyJWTLabel so that both forms decode into one type.
 	Name            string      `hcl:"name,label"`
+	Domain          *string     `hcl:"domain,optional"`
+	Domains         []string    `hcl:"domains,optional"`
+	DomainsRange    hcl.Range   `hcl:"domains,attr_value_range"`
+	DomainRange     hcl.Range   `hcl:"domain,attr_value_range"`
 	Orgs            []string    `hcl:"orgs,optional"`
 	OrgsRange       hcl.Range   `hcl:"orgs,attr_value_range"`
 	Accepts         []acceptHCL `hcl:"accept,block"`
@@ -1319,6 +1331,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		set(rt.Metrics, &c.Routes.Metrics, "routes.metrics.allow")
 		set(rt.Healthz, &c.Routes.Healthz, "routes.healthz.allow")
 	}
+	domainOwner := map[string]string{} // legacy-scoping domain -> issuer
 	jwtNames, jwtIssuers := map[string]bool{}, map[string]string{}
 	for ji := range raw.JWT {
 		j := &raw.JWT[ji]
@@ -1397,6 +1410,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			c.JWTs = append(c.JWTs, cj)
 		}
 		cj.Accept = v.accepts(j.Accepts, "jwt "+strconv.Quote(j.Name))
+		cj.Domain, cj.Domains = v.domains(j.Domain, j.Domains, j.DomainRange, j.DomainsRange, "jwt "+strconv.Quote(j.Name), j.Issuer, domainOwner)
 		iss := strings.TrimSuffix(j.Issuer, "/")
 		if other, dup := jwtIssuers[iss]; dup {
 			v.errf(j.IssuerRange, "Duplicate issuer", "issuer %q is already used by jwt %q: a token is routed to its verifier by iss", j.Issuer, other)
@@ -1448,6 +1462,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			}
 			cs.Roles = append(cs.Roles, cr)
 		}
+		cs.Domain, cs.Domains = v.domains(o.Domain, o.Domains, o.DomainRange, o.DomainsRange, "sso", o.Issuer, domainOwner)
 		pNames, pIssuers := map[string]bool{}, map[string]string{}
 		for pi := range o.Providers {
 			p := &o.Providers[pi]
@@ -1489,6 +1504,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 				v.known(orgs, og, p.OrgsRange, "organisation", where+" orgs")
 			}
 			cp.Accept = v.accepts(p.Accepts, where)
+			cp.Domain, cp.Domains = v.domains(p.Domain, p.Domains, p.DomainRange, p.DomainsRange, where, p.Issuer, domainOwner)
 			for _, r := range p.Roles {
 				cr := SSORole{Claim: strOr(r.Claim, "groups"), Value: r.Value, Role: r.Role, Org: strOr(r.Org, ""), Team: strOr(r.Team, "")}
 				if r.Value == "" || !validRoleScope(cr.Role, cr.Org, cr.Team) {
