@@ -33,7 +33,32 @@ ALTER TABLE llmflow_keys ADD COLUMN IF NOT EXISTS owner text NOT NULL DEFAULT ''
 -- v0.18.2 (#104): who created a binding. Rows stored before it keep '' (unknown),
 -- which is treated as legitimate.
 ALTER TABLE llmflow_bindings ADD COLUMN IF NOT EXISTS provenance text NOT NULL DEFAULT '';
+-- v0.27.0: the identity provider and subject a user logged in with. Users stored
+-- before it have no row (no link; the first provider adopts them).
+CREATE TABLE IF NOT EXISTS llmflow_user_idps (
+	username text PRIMARY KEY,
+	provider text NOT NULL,
+	subject  text NOT NULL
+);
 `
+
+func (p *Postgres) LinkUserIdP(ctx context.Context, user string, l IdPLink) (IdPLink, error) {
+	var out IdPLink
+	err := p.pool.QueryRow(ctx, `
+		INSERT INTO llmflow_user_idps (username, provider, subject) VALUES ($1, $2, $3)
+		ON CONFLICT (username) DO UPDATE SET username = llmflow_user_idps.username
+		RETURNING provider, subject`, user, l.Provider, l.Subject).Scan(&out.Provider, &out.Subject)
+	return out, err
+}
+
+func (p *Postgres) UserIdP(ctx context.Context, user string) (IdPLink, error) {
+	var l IdPLink
+	err := p.pool.QueryRow(ctx, `SELECT provider, subject FROM llmflow_user_idps WHERE username = $1`, user).Scan(&l.Provider, &l.Subject)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return IdPLink{}, ErrNotFound
+	}
+	return l, err
+}
 
 func (p *Postgres) CreateUser(ctx context.Context, name string) error {
 	tag, err := p.pool.Exec(ctx, `

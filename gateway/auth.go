@@ -264,7 +264,7 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (store.Key
 	if secret == "" {
 		return fail(http.StatusUnauthorized, "authentication_error", "missing bearer token")
 	}
-	isJWT := s.jwt != nil && looksLikeJWT(secret)
+	isJWT := s.jwtSet != nil && looksLikeJWT(secret)
 	if haveNet && s.authFails.blocked(cn) {
 		var k store.Key
 		var found, cached bool

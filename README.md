@@ -1757,6 +1757,113 @@ sso {
   they are sealed in PostgreSQL and shared (see
   [High availability](#high-availability-several-replicas-since-v0140)).
 
+### Several identity providers, and federations
+
+Since v0.27.0 the `sso` block takes several `provider "<name>"` blocks (one
+institution, one OpenID provider, when there is no federation), and both the
+`sso` and the `jwt` blocks can filter users by institution behind a
+federation proxy (eduGAIN through MyAccessID, eduTEAMS, Renater, a Keycloak
+broker). The single-issuer forms above stay valid and mean one provider
+(`examples/federation.hcl` is a complete, tested example).
+
+```hcl
+sso {
+  redirect_url = "https://llm.example.org/admin/callback"   # base of every callback
+  provider "univ-a" {
+    issuer = "https://sso.univ-a.example"
+    client_id = "llmflow-admin"
+    client_secret_file = "vault:secret/llmflow#sso-univ-a"
+    orgs = ["univ-a"]                       # what this provider may vouch for
+    role { value = "llm-admins" role = "org_admin" org = "univ-a" }
+  }
+  provider "partners" {                     # a federation proxy
+    issuer = "https://proxy.federation.example"
+    client_id = "llmflow-admin"
+    orgs = ["partners"]
+    accept { claim = "schac_home_organization" values = ["univ-c.example", "univ-d.example"] }
+    role { claim = "schac_home_organization" value = "univ-c.example" role = "member" team = "lab-partners" }
+  }
+}
+jwt "partners" {                            # inference tokens, routed by iss
+  issuer = "https://proxy.federation.example"
+  audience = "llmflow-api"
+  orgs = ["partners"]
+  accept { claim = "schac_home_organization" values = ["univ-c.example", "univ-d.example"] }
+  map { value = "llm-users" team = "lab-partners" }
+}
+```
+
+- **One callback per provider**: `/admin/callback/<name>` (register that
+  redirect URI at that provider; RFC 9700 §4.4.2.2). `GET /admin/login` lists
+  the providers on a server-rendered page without JavaScript (with a single
+  provider it redirects, as before); `GET /admin/login/<name>` starts a login.
+  A login is bound to the provider it was sent to: the answer of provider A
+  delivered to B's callback is refused (mix-up, RFC 9700 §4.4), an `iss`
+  response parameter that is not the provider's issuer is refused (RFC 9207
+  §2.4; an absent one is accepted, the bound state already names the provider),
+  and the ID token's `iss` is verified against that provider only.
+- **`orgs`**: a role a provider's `role` block would grant on an organisation
+  (or a team of one) outside `orgs` is a `check-config` error, and refused and
+  logged at run time; a proxy-wide role (`proxy_admin`, `proxy_viewer`,
+  `finance_viewer`) needs `allow_proxy_roles = true` on the provider. An
+  institution's provider can therefore never make anybody administrator of
+  another institution.
+- **Identity is (provider, subject)** (OpenID Connect Core §2: `sub` is
+  unique only within its issuer). A stored user is linked, at the first login,
+  to the provider and `sub` that vouched for them (`llmflow_user_idps`;
+  nothing to migrate); a login of the same name through another provider, or
+  with another `sub`, is refused, and a session never inherits the stored
+  roles of a user linked to another identity: a session opened before the
+  user was stored, or by another identity, is dropped once the user exists.
+  A user without a link (created before v0.27.0, or provisioned and not yet
+  logged in) is adopted, at their first login, by the single unrestricted
+  `sso` issuer of earlier versions, or by a `provider` block only when its
+  `orgs` cover **every** role the user holds (proxy-wide roles need
+  `allow_proxy_roles`); a user with no role at all is adopted only by a
+  provider with `adopt = true`, and refused otherwise.
+- **`accept { claim, values }`**, one or more, all must hold, any value of a
+  multi-valued claim matches; otherwise the login is refused with
+  `institution "x" is not accepted by this gateway` (or that the provider did
+  not state the institution). Values are compared exactly, except for the
+  claims whose schema compares without case: `schac_home_organization`
+  (SCHAC 1.6.0: a domain name, `caseIgnoreMatch`), `eduperson_scoped_affiliation`
+  (eduPerson schema, `caseIgnoreMatch`) and `voperson_external_affiliation`
+  (scoped like it): those are compared in ASCII lower case (the Kelvin sign
+  U+212A is not a `k`). The matching, the routing of tokens by `iss` and the
+  mix-up defences are [go-authn/oidc](https://github.com/go-authn/oidc) v0.5.0
+  (`Set`, `Accept`) and [go-authn/rp](https://github.com/go-authn/rp) v0.3.0
+  (`Set`, `CheckIssuer`); the gateway keeps the organisation allow-list, the
+  role mapping, the adoption rule and the (provider, subject) link.
+  **The claim must be in the ID token**
+  (resp. in the access token for `jwt`): MyAccessID releases
+  `schac_home_organization` in userinfo only, and the gateway does not call
+  userinfo, so ask the proxy for it in the ID token (a Keycloak mapper, or
+  the proxy's scope) or filter on `eduperson_scoped_affiliation`.
+- **Inference tokens**: each `jwt "<name>"` block has its own audience, JWKS,
+  maps, `orgs` (a `map` to a team of another organisation is a configuration
+  error) and `accept`. A token is routed to its block by its `iss`; an unknown
+  `iss` is a 401, and no other issuer's key set is tried. With one issuer the
+  path is unchanged: `BenchmarkJWTLookup` (`gateway/jwt_bench_test.go`, one
+  issuer, Apple M4 Max, `GOMAXPROCS=1`, 8 rounds interleaved by `abbench
+  --max-load 4`, compared with `benchstat`) against a clean clone of v0.25.2:
+
+  | path | v0.25.2 | this release | |
+  | --- | --- | --- | --- |
+  | cache hit | 328.8 ns ± 7 %, 1 alloc, 640 B | 327.5 ns ± 4 %, 1 alloc, 640 B | ~ (p = 0.63) |
+  | cache miss (signature, mapping) | 25.13 µs ± 1 %, 53 allocs, 4.59 kB | 25.23 µs ± 2 %, 53 allocs, 4.59 kB | ~ (p = 0.96) |
+- **In front of a SAML federation** ([go-authn/bridge](https://github.com/go-authn/bridge)):
+  the bridge can already restrict who may log in, by IdP, with
+  `saml { idps = ["<entityID>", ...] }` (README: "restrict; one entry skips the
+  choice"), and disable one institution's IdP at run time. That is a filter by
+  entityID at the bridge. The gateway's `accept` filters by the institution
+  claim whatever the proxy, and needs the claim in the ID token: the bridge's
+  ID tokens carry nothing about the person unless the client sets
+  `id_token_claims = true`, and `schac_home_organization` comes with its
+  `eduperson` scope.
+- `check-config` validates it all with `file:line`: duplicate names and
+  issuers, unknown organisations, empty `orgs` or `accept` lists, roles
+  outside `orgs`, an unnamed `jwt` block next to named ones.
+
 ### Admin web UI
 
 With an `sso` block, `/ui/` serves a web console for administrators

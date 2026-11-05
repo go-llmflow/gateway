@@ -8,14 +8,17 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"html/template"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/go-authn/oidc"
 	"github.com/go-authn/rp"
+	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/store"
 )
 
@@ -49,20 +52,43 @@ type session struct {
 	bindings []store.Binding // from the ID token's claims, at login
 	csrf     string
 	expires  time.Time
+	// provider and subject are the identity the session was opened with
+	// (OpenID Connect Core §2: sub is unique within its issuer only).
+	provider, subject string
 }
 
 type pendingLogin struct {
-	flow    rp.Flow
-	browser [32]byte // SHA-256 of the login cookie
-	expires time.Time
-	net     netip.Prefix
+	// provider is the provider this login was sent to: its callback, and only
+	// its callback, may finish it (RFC 9700 §4.4.2).
+	provider string
+	flow     rp.Flow
+	browser  [32]byte // SHA-256 of the login cookie
+	expires  time.Time
+	net      netip.Prefix
 	// ui: after the login, go to the admin UI (?next=ui). A fixed
 	// destination, never a URL from the request: no open redirect.
 	ui bool
 }
 
-type ssoState struct {
+// ssoProvider is one configured OpenID provider and its client.
+type ssoProvider struct {
+	cfg    config.SSOProvider
 	client *rp.Client
+}
+
+// rpKey is the name a provider has in the rp.Set: the single sso issuer of
+// earlier versions has none in the configuration.
+func rpKey(name string) string {
+	if name == "" {
+		return "default"
+	}
+	return name
+}
+
+type ssoState struct {
+	set       *rp.Set                 // the providers, with the mix-up defences of go-authn/rp
+	providers map[string]*ssoProvider // by name ("" for the single sso issuer)
+	order     []*ssoProvider
 
 	mu       sync.Mutex
 	sessions map[[32]byte]*session // by SHA-256 of the cookie value
@@ -89,16 +115,29 @@ func (s *Server) startSSO(ctx context.Context) error {
 	if c == nil {
 		return nil
 	}
-	p, err := rp.Discover(ctx, s.jwtClient, c.Issuer)
-	if err != nil {
-		return fmt.Errorf("gateway: sso: %w", err)
+	st := &ssoState{set: rp.NewSet(), providers: map[string]*ssoProvider{}, sessions: map[[32]byte]*session{}, logins: map[string]pendingLogin{}, perNet: map[netip.Prefix]int{}}
+	for _, pc := range c.ProviderList() {
+		p, err := rp.Discover(ctx, s.jwtClient, pc.Issuer)
+		if err != nil {
+			return fmt.Errorf("gateway: sso provider %q: %w", pc.Name, err)
+		}
+		secret := s.secrets.SSOClientSecret
+		if pc.Name != "" {
+			secret = s.secrets.SSOClientSecrets[pc.Name]
+		}
+		cl, err := rp.NewClient(ctx, p, rp.Config{ClientID: pc.ClientID, Secret: secret, RedirectURI: pc.RedirectURL,
+			Scopes: pc.Scopes, MinRefresh: pc.MinRefresh})
+		if err != nil {
+			return fmt.Errorf("gateway: sso provider %q: %w", pc.Name, err)
+		}
+		if err := st.set.Add(rpKey(pc.Name), cl); err != nil {
+			return fmt.Errorf("gateway: sso provider %q: %w", pc.Name, err)
+		}
+		sp := &ssoProvider{cfg: pc, client: cl}
+		st.providers[pc.Name] = sp
+		st.order = append(st.order, sp)
 	}
-	cl, err := rp.NewClient(ctx, p, rp.Config{ClientID: c.ClientID, Secret: s.secrets.SSOClientSecret, RedirectURI: c.RedirectURL,
-		Scopes: c.Scopes, MinRefresh: c.MinRefresh})
-	if err != nil {
-		return fmt.Errorf("gateway: sso: %w", err)
-	}
-	s.sso = &ssoState{client: cl, sessions: map[[32]byte]*session{}, logins: map[string]pendingLogin{}, perNet: map[netip.Prefix]int{}}
+	s.sso = st
 	if s.shared != nil {
 		// Several replicas: a login started on one finishes on another, a
 		// session outlives the replica that created it.
@@ -113,8 +152,44 @@ func (s *Server) startSSO(ctx context.Context) error {
 
 func (s *Server) ssoRoutes(mux *http.ServeMux) {
 	wrap := func(f http.HandlerFunc) http.Handler { return s.withClientAddr(s.cfg.Routes.Admin, f) }
-	mux.Handle("GET /admin/login", wrap(s.ssoLogin))
-	mux.Handle("GET /admin/callback", wrap(s.ssoCallback))
+	mux.Handle("GET /admin/login", wrap(s.ssoLoginPage))
+	mux.Handle("GET /admin/login/{provider}", wrap(func(w http.ResponseWriter, r *http.Request) { s.ssoLogin(w, r, r.PathValue("provider")) }))
+	// The single sso issuer of earlier versions keeps /admin/callback; a
+	// provider block has its own callback, a distinct redirect URI per
+	// issuer (RFC 9700 §4.4.2.2).
+	mux.Handle("GET /admin/callback", wrap(func(w http.ResponseWriter, r *http.Request) { s.ssoCallback(w, r, "") }))
+	mux.Handle("GET /admin/callback/{provider}", wrap(func(w http.ResponseWriter, r *http.Request) { s.ssoCallback(w, r, r.PathValue("provider")) }))
+}
+
+var loginPage = template.Must(template.New("login").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Sign in</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body><h1>Sign in</h1><p>Choose your institution's identity provider.</p>
+<ul>{{range .}}<li><a href="{{.URL}}">{{.Name}}</a></li>{{end}}</ul></body></html>
+`))
+
+// ssoLoginPage starts the login at the one provider, or lists them: a
+// server-rendered page, no script.
+func (s *Server) ssoLoginPage(w http.ResponseWriter, r *http.Request) {
+	if s.sso == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if len(s.sso.order) == 1 {
+		s.ssoLogin(w, r, s.sso.order[0].cfg.Name)
+		return
+	}
+	type entry struct{ Name, URL string }
+	var es []entry
+	for _, p := range s.sso.order {
+		u := "/admin/login/" + url.PathEscape(p.cfg.Name)
+		if r.URL.Query().Get("next") == "ui" {
+			u += "?next=ui"
+		}
+		es = append(es, entry{p.cfg.Name, u})
+	}
+	uiHeaders(w)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = loginPage.Execute(w, es)
 }
 
 func setCookie(w http.ResponseWriter, name, value string, maxAge int) {
@@ -148,17 +223,25 @@ func (st *ssoState) purgeLocked(now time.Time) {
 
 // ssoLogin starts a login: a fresh flow, bound to this browser by a
 // random cookie, and a redirect to the provider.
-func (s *Server) ssoLogin(w http.ResponseWriter, r *http.Request) {
+func (s *Server) ssoLogin(w http.ResponseWriter, r *http.Request, provider string) {
 	if s.sso == nil {
 		http.NotFound(w, r)
 		return
 	}
-	f := rp.NewFlow()
+	prov := s.sso.providers[provider]
+	if prov == nil {
+		http.NotFound(w, r)
+		return
+	}
+	f, err := s.sso.set.NewFlow(rpKey(provider))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
 	browser := randomToken()
 	now := s.now()
 	cn, _ := clientNet(r)
-	st := s.sso
-	err := s.putLogin(r.Context(), f.State, pendingLogin{flow: f, browser: sha256.Sum256([]byte(browser)), expires: now.Add(loginTTL), net: cn,
+	err = s.putLogin(r.Context(), f.State, pendingLogin{provider: provider, flow: f, browser: sha256.Sum256([]byte(browser)), expires: now.Add(loginTTL), net: cn,
 		ui: r.URL.Query().Get("next") == "ui"})
 	if err != nil {
 		s.log.Warn("sso: login refused", "reason", err)
@@ -171,16 +254,22 @@ func (s *Server) ssoLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	setCookie(w, loginCookie, browser, int(loginTTL/time.Second))
 	w.Header().Set("Cache-Control", "no-store")
-	http.Redirect(w, r, st.client.AuthCodeURL(f, nil), http.StatusFound)
+	http.Redirect(w, r, prov.client.AuthCodeURL(f, nil), http.StatusFound)
 }
 
 // ssoCallback finishes a login. Every failure is the same 400 to the
 // browser; the reason goes to the log.
-func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request) {
+func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request, provider string) {
 	if s.sso == nil {
 		http.NotFound(w, r)
 		return
 	}
+	prov := s.sso.providers[provider]
+	if prov == nil {
+		http.NotFound(w, r)
+		return
+	}
+	var shown string // what the browser is told, when it is more than "login failed"
 	cn, haveNet := clientNet(r)
 	if haveNet && s.authFails.blocked(cn) {
 		apiError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "too many failed authentications from this address")
@@ -196,6 +285,9 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request) {
 		if status == http.StatusForbidden {
 			msg = "no administrative role for this account"
 		}
+		if shown != "" {
+			msg = shown
+		}
 		apiError(w, status, "authentication_error", msg)
 	}
 	q := r.URL.Query()
@@ -208,7 +300,6 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusBadRequest, "missing or oversized state or code", nil)
 		return
 	}
-	st := s.sso
 	pl, ok, err := s.takeLogin(r.Context(), state) // one use, whatever happens next
 	if err != nil {
 		s.log.Error("sso: login store unreachable", "err", err)
@@ -230,9 +321,23 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	_, id, err := st.client.Exchange(ctx, code, pl.flow)
+	// go-authn/rp: the login went to one provider and only that provider's
+	// callback finishes it; an iss response parameter must be its issuer
+	// (RFC 9700 §4.4.2, RFC 9207 §2.4); the ID token's iss is verified against
+	// this provider by go-authn/oidc.
+	_, id, err := s.sso.set.Exchange(ctx, rpKey(provider), code, pl.flow, q)
 	if err != nil {
-		fail(http.StatusBadRequest, "code exchange", err)
+		reason := "code exchange"
+		if errors.Is(err, rp.ErrMixUp) {
+			reason = "mix-up"
+		}
+		fail(http.StatusBadRequest, reason, err)
+		return
+	}
+	// The institution filter comes before anything else.
+	if ref := oidc.Check(prov.cfg.Accept, id); ref != nil {
+		shown = acceptMessage(ref)
+		fail(http.StatusForbidden, "institution not accepted", ref)
 		return
 	}
 	user := id.Username()
@@ -240,7 +345,12 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusBadRequest, "no usable username in the ID token", nil)
 		return
 	}
-	bindings := s.ssoBindings(id, user)
+	subject := id.Subject()
+	if subject == "" || len(subject) > 256 {
+		fail(http.StatusBadRequest, "no usable subject in the ID token", nil)
+		return
+	}
+	bindings := s.ssoBindings(prov, id, user)
 	u, err := s.st.GetUser(ctx, user)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -255,10 +365,25 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request) {
 	case u.Disabled:
 		fail(http.StatusForbidden, "user disabled", nil)
 		return
+	default:
+		// An identity is (provider, subject): a stored user belongs to the
+		// provider that first vouched for them, so another provider asserting
+		// the same name is refused, whatever it says.
+		ok, err := s.bindIdentity(ctx, prov, user, subject)
+		if err != nil {
+			s.log.Error("sso: identity link failed", "err", err)
+			apiError(w, http.StatusServiceUnavailable, "service_unavailable", "user store unreachable")
+			return
+		}
+		if !ok {
+			fail(http.StatusForbidden, "identity: user is bound to another provider or subject", fmt.Errorf("user %q, provider %q, sub %q", user, provider, truncate(subject, 64)))
+			return
+		}
 	}
 	value := randomToken()
 	now := s.now()
-	if err := s.putSession(ctx, sha256.Sum256([]byte(value)), session{user: user, bindings: bindings, csrf: randomToken(), expires: now.Add(s.cfg.SSO.SessionTTL)}); err != nil {
+	if err := s.putSession(ctx, sha256.Sum256([]byte(value)), session{user: user, bindings: bindings, csrf: randomToken(), expires: now.Add(s.cfg.SSO.SessionTTL),
+		provider: provider, subject: subject}); err != nil {
 		s.log.Warn("sso: session refused", "reason", err)
 		msg := "too many sessions"
 		if !errors.Is(err, errSessionsFull) {
@@ -278,15 +403,68 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/session", http.StatusSeeOther)
 }
 
-// ssoBindings maps the ID token's claims to role bindings.
-func (s *Server) ssoBindings(id *oidc.Token, user string) []store.Binding {
+// ssoBindings maps the ID token's claims to role bindings, through the
+// provider's role blocks. A role outside the organisations the provider may
+// vouch for is refused and logged: an institution's provider never makes
+// anyone an administrator of another institution.
+func (s *Server) ssoBindings(p *ssoProvider, id *oidc.Token, user string) []store.Binding {
 	var out []store.Binding
-	for _, m := range s.cfg.SSO.Roles {
-		if slices.Contains(claimValues(id, m.Claim), m.Value) {
-			out = append(out, store.Binding{User: user, Role: store.Role(m.Role), Org: m.Org, Team: m.Team})
+	for _, m := range p.cfg.Roles {
+		if !slices.Contains(oidc.ClaimValues(id, m.Claim), m.Value) {
+			continue
 		}
+		if !p.cfg.MayGrant(s.cfg, m) {
+			s.log.Warn("sso: role refused, outside the provider's organisations", "provider", p.cfg.Name, "role", m.Role, "org", m.Org, "team", m.Team, "user", user)
+			continue
+		}
+		out = append(out, store.Binding{User: user, Role: store.Role(m.Role), Org: m.Org, Team: m.Team})
 	}
 	return out
+}
+
+// bindIdentity links a stored user to (provider, subject) the first time, and
+// afterwards accepts only that identity. A user without a link (stored before
+// v0.27.0, or provisioned and not logged in yet) is adopted by the single
+// unrestricted sso issuer of earlier versions, or by a provider block whose
+// organisations cover every role the user holds (a user with no role: only a
+// provider with adopt = true).
+func (s *Server) bindIdentity(ctx context.Context, p *ssoProvider, user, subject string) (bool, error) {
+	want := store.IdPLink{Provider: p.cfg.Name, Subject: subject}
+	cur, err := s.st.UserIdP(ctx, user)
+	switch {
+	case err == nil:
+		return cur == want, nil
+	case !errors.Is(err, store.ErrNotFound):
+		return false, err
+	}
+	if p.cfg.Restricted {
+		// A provider block adopts a user only when it may vouch for every
+		// role they hold (proxy-wide roles need allow_proxy_roles), and a
+		// user with no role only with adopt = true.
+		bs, err := s.st.Bindings(ctx, user)
+		if err != nil {
+			return false, err
+		}
+		if len(bs) == 0 && !p.cfg.Adopt {
+			return false, nil
+		}
+		for _, b := range bs {
+			if !p.cfg.MayGrant(s.cfg, config.SSORole{Role: string(b.Role), Org: b.Org, Team: b.Team}) {
+				return false, nil
+			}
+		}
+	}
+	got, err := s.st.LinkUserIdP(ctx, user, want)
+	return got == want, err
+}
+
+// acceptMessage is what the person is told when an accept block refuses them:
+// the institution value (already cleaned by go-authn/oidc), no internals.
+func acceptMessage(r *oidc.Refusal) string {
+	if r.Value == "" {
+		return "your identity provider did not state your institution; login refused"
+	}
+	return fmt.Sprintf("institution %q is not accepted by this gateway", r.Value)
 }
 
 // sessionPrincipal authenticates an admin request by its session cookie.
@@ -321,6 +499,7 @@ func (s *Server) sessionPrincipal(w http.ResponseWriter, r *http.Request) (p *pr
 			return nil, "", true
 		}
 	}
+	linked := false
 	// Stored roles and the disabled flag are read on every request, so a
 	// revocation takes effect at once.
 	u, err := s.st.GetUser(r.Context(), cp.user)
@@ -336,12 +515,32 @@ func (s *Server) sessionPrincipal(w http.ResponseWriter, r *http.Request) (p *pr
 		apiError(w, http.StatusUnauthorized, "authentication_error", "user disabled")
 		return nil, "", true
 	default:
-		if stored, err = s.st.Bindings(r.Context(), cp.user); err != nil {
+		// The stored roles are the user's own, granted to the identity the
+		// user is linked to: a session opened by another provider (or
+		// another subject) does not inherit them.
+		link, lerr := s.st.UserIdP(r.Context(), cp.user)
+		switch {
+		case lerr != nil && !errors.Is(lerr, store.ErrNotFound):
 			apiError(w, http.StatusServiceUnavailable, "service_unavailable", "user store unreachable")
+			return nil, "", true
+		case lerr == nil && link == (store.IdPLink{Provider: cp.provider, Subject: cp.subject}):
+			linked = true
+			if stored, err = s.st.Bindings(r.Context(), cp.user); err != nil {
+				apiError(w, http.StatusServiceUnavailable, "service_unavailable", "user store unreachable")
+				return nil, "", true
+			}
+		default:
+			// The user exists now and is not (yet) bound to the identity this
+			// session was opened with: a session opened before the user was
+			// stored, or for another provider, must not become theirs. Log in
+			// again, which goes through the adoption rule.
+			s.dropSession(r.Context(), h)
+			setCookie(w, sessionCookie, "", -1)
+			apiError(w, http.StatusUnauthorized, "authentication_error", "session no longer valid; log in again at /admin/login")
 			return nil, "", true
 		}
 	}
-	return &principal{name: cp.user, bindings: append(slices.Clip(cp.bindings), stored...), session: h}, cp.csrf, true
+	return &principal{name: cp.user, bindings: append(slices.Clip(cp.bindings), stored...), session: h, provider: cp.provider, linked: linked}, cp.csrf, true
 }
 
 func unsafeMethod(m string) bool {
@@ -391,7 +590,11 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	s.dropSession(r.Context(), p.session)
 	s.audit("sso.logout", "by", p.name, "user", p.name)
 	setCookie(w, sessionCookie, "", -1)
-	writeJSON(w, http.StatusOK, map[string]any{"end_session_url": s.sso.client.EndSessionURL("")})
+	end := ""
+	if prov := s.sso.providers[p.provider]; prov != nil {
+		end = prov.client.EndSessionURL("")
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"end_session_url": end})
 }
 
 func truncate(s string, n int) string {

@@ -24,10 +24,10 @@ github.com/dop251/goja v0.0.0-20260926152631-39ec2650adc9 h1:Ksd3Vil12b/ykT5NjGz
 github.com/dop251/goja v0.0.0-20260926152631-39ec2650adc9/go.mod h1:u8yZRUavu+N4EnFFy6J5fVtjE7lEcZ2YyV2GcBXY9c8=
 github.com/evanw/esbuild v0.28.2 h1:A2uETn4jrQTcXaT/shwTDTYBxDjl7fV7nXmUrJxfA2w=
 github.com/evanw/esbuild v0.28.2/go.mod h1:D2vIQZqV/vIf/VRHtViaUtViZmG7o+kKmlBfVQuRi48=
-github.com/go-authn/oidc v0.4.3 h1:H2L1YtpwGQCMoc65vhH5wLPM+09Wygh/32hjtYI052k=
-github.com/go-authn/oidc v0.4.3/go.mod h1:H/Hodeu9kh/Xz3y51XfYu6MZdMJaNfXClyVH0GTUebE=
-github.com/go-authn/rp v0.2.0 h1:ZoEqikwX9SOi+fODnIxO76sFLKYl0g7mgEmjUg3m1Gw=
-github.com/go-authn/rp v0.2.0/go.mod h1:bTku1Ufwg5hoWlNHJnwxh9IATKYivxwly1qH+s5Ww+M=
+github.com/go-authn/oidc v0.5.0 h1:+g/VD4eTg7+4YV4CZ9t0RY1tf53B4CqqvVfWMroljfg=
+github.com/go-authn/oidc v0.5.0/go.mod h1:H/Hodeu9kh/Xz3y51XfYu6MZdMJaNfXClyVH0GTUebE=
+github.com/go-authn/rp v0.3.0 h1:pGL4aMhuS6Xf9eubA9GbZuj59L5Io5liN6kFc/0ICyc=
+github.com/go-authn/rp v0.3.0/go.mod h1:bTku1Ufwg5hoWlNHJnwxh9IATKYivxwly1qH+s5Ww+M=
 github.com/go-authn/scim v0.1.1 h1:8KDNxAFKeRIIHf/UmJMOUp0Vr92ELAwYWDSig5Zjjn8=
 github.com/go-authn/scim v0.1.1/go.mod h1:wWUCIIKdegRh4Y16bT/Dy0NiOZugMnSGxoGeupyPmrg=
 github.com/go-browserhttp/browserhttp v0.2.0 h1:3RcjOQVHgqhSOmI5cfsURpexw/vetoDUoLXKzgTCSac=

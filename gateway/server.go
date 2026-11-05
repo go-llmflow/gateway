@@ -49,6 +49,8 @@ type Secrets struct {
 	// SSOClientSecret is the admin login client's secret (empty: a public
 	// client).
 	SSOClientSecret string
+	// SSOClientSecrets are the secrets of the provider blocks, by name.
+	SSOClientSecrets map[string]string
 	// SCIMToken is the bearer token of the provisioning client.
 	SCIMToken string
 	// AuditKey is the audit checkpoint signing key (an Ed25519 seed, base64
@@ -133,7 +135,9 @@ type Server struct {
 	alerts      *alerter
 	// jwt verifies OpenID Connect access tokens (nil: virtual keys only);
 	// jwtCache keeps verified tokens until their expiry or the key TTL.
-	jwt       *oidc.Verifier
+	jwtSet    *oidc.Set
+	jwtCfg    map[string]*config.JWT // by verified issuer
+	jwtOne    *config.JWT            // the only issuer's, when there is one
 	jwtCache  *keyCache
 	jwtClient *http.Client
 	// sso holds the admin login client, sessions and logins in progress.

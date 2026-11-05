@@ -696,7 +696,10 @@ func (s *Server) disableUser(w http.ResponseWriter, r *http.Request, p *principa
 
 // selfOrProxyAdmin guards a user's own tokens.
 func selfOrProxyAdmin(p *principal, user string) bool {
-	return p.proxyAdmin() || p.name == user && !p.master
+	// A session principal is the stored user of that name only when the
+	// session's identity is the user's linked one (a session opened before the
+	// user existed, or by another provider, is not).
+	return p.proxyAdmin() || p.name == user && !p.master && (p.session == [32]byte{} || p.linked)
 }
 
 func (s *Server) listTokens(w http.ResponseWriter, r *http.Request, p *principal) {

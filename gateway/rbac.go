@@ -23,6 +23,10 @@ type principal struct {
 	// session is the SHA-256 of the SSO session cookie, when the principal
 	// comes from one.
 	session [32]byte
+	// provider is the SSO provider that opened the session.
+	provider string
+	// linked: the session's identity is the one its stored user is bound to.
+	linked bool
 }
 
 func (p *principal) has(role store.Role, org, team string) bool {

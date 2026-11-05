@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-authn/oidc"
+	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/store"
 )
 
@@ -22,50 +23,49 @@ import (
 
 var errJWTUnmapped = errors.New("token verified, but no jwt map block matches it")
 
-// startJWT builds the verifier. Discovery happens here, at start-up: a
-// gateway that cannot reach its issuer cannot authenticate anybody and
-// should say so before it listens.
+// startJWT builds the verifiers, one per issuer, into a go-authn/oidc Set that
+// routes a token by its iss. Discovery happens here, at start-up: a gateway
+// that cannot reach its issuer cannot authenticate anybody and should say so
+// before it listens.
 func (s *Server) startJWT(ctx context.Context) error {
-	j := s.cfg.JWT
-	if j == nil {
+	var vs []*oidc.Verifier
+	s.jwtCfg = map[string]*config.JWT{}
+	for _, j := range s.cfg.JWTIssuers() {
+		v, err := oidc.New(ctx, oidc.Config{
+			Issuer: j.Issuer, Audience: j.Audience, JWKSURL: j.JWKSURL, Type: j.Type,
+			UsernameClaim: j.UsernameClaim, GroupsClaim: j.GroupsClaim,
+			ClockSkew: j.ClockSkew, MinRefresh: j.MinRefresh, Client: s.jwtClient, Now: s.now,
+		})
+		if err != nil {
+			return fmt.Errorf("gateway: jwt issuer %s: %w", j.Issuer, err)
+		}
+		vs = append(vs, v)
+		s.jwtCfg[v.Issuer()] = j
+	}
+	if len(vs) == 0 {
 		return nil
 	}
-	v, err := oidc.New(ctx, oidc.Config{
-		Issuer: j.Issuer, Audience: j.Audience, JWKSURL: j.JWKSURL, Type: j.Type,
-		UsernameClaim: j.UsernameClaim, GroupsClaim: j.GroupsClaim,
-		ClockSkew: j.ClockSkew, MinRefresh: j.MinRefresh, Client: s.jwtClient, Now: s.now,
-	})
+	set, err := oidc.NewSet(vs...)
 	if err != nil {
-		return fmt.Errorf("gateway: jwt issuer %s: %w", j.Issuer, err)
+		return fmt.Errorf("gateway: jwt: %w", err)
 	}
-	s.jwt = v
-	return nil
-}
-
-// claimValues reads a claim as strings: a string, or a list of strings.
-func claimValues(tok *oidc.Token, name string) []string {
-	if name == "groups" || name == "" {
-		return tok.Groups()
-	}
-	var one string
-	if err := tok.Claim(name, &one); err == nil {
-		return []string{one}
-	}
-	var many []string
-	if err := tok.Claim(name, &many); err == nil {
-		return many
+	s.jwtSet = set
+	if len(vs) == 1 {
+		s.jwtOne = s.jwtCfg[vs[0].Issuer()]
 	}
 	return nil
 }
 
 // jwtIdentity maps a verified token onto a team through the ordered map
 // blocks: the first block whose claim holds its value wins.
-func (s *Server) jwtIdentity(ctx context.Context, tok *oidc.Token) (store.Key, error) {
+func (s *Server) jwtIdentity(ctx context.Context, j *config.JWT, tok *oidc.Token) (store.Key, error) {
 	ctx, cancel := context.WithTimeout(ctx, storeTimeout)
 	defer cancel()
-	j := s.cfg.JWT
+	if ref := oidc.Check(j.Accept, tok); ref != nil {
+		return store.Key{}, fmt.Errorf("%w: %v", errJWTUnmapped, ref)
+	}
 	for _, m := range j.Maps {
-		if !slices.Contains(claimValues(tok, m.Claim), m.Value) {
+		if !slices.Contains(oidc.ClaimValues(tok, m.Claim), m.Value) {
 			continue
 		}
 		t, err := s.st.GetTeam(ctx, m.Team)
@@ -105,11 +105,22 @@ func (s *Server) lookupJWT(ctx context.Context, raw string) (store.Key, error) {
 	if k, found, cached := s.jwtCache.get(h); cached && found {
 		return k, nil
 	}
-	tok, err := s.jwt.Verify(ctx, raw)
+	// Routed by iss to one issuer's verifier (an unknown iss is refused with
+	// no network access), then verified there.
+	tok, err := s.jwtSet.Verify(ctx, raw)
 	if err != nil {
 		return store.Key{}, err
 	}
-	k, err := s.jwtIdentity(ctx, tok)
+	// With one issuer there is nothing to look up (reading the issuer from the
+	// token would cost an allocation on every verification).
+	jc := s.jwtOne
+	if jc == nil {
+		jc = s.jwtCfg[tok.Issuer()]
+	}
+	if jc == nil {
+		return store.Key{}, errJWTUnmapped
+	}
+	k, err := s.jwtIdentity(ctx, jc, tok)
 	if err != nil {
 		return store.Key{}, err
 	}

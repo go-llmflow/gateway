@@ -61,7 +61,7 @@ type fileHCL struct {
 	TrustedProxies       []string        `hcl:"trusted_proxies,optional"`
 	TrustedProxiesRange  hcl.Range       `hcl:"trusted_proxies,attr_value_range"`
 	Routes               *routesHCL      `hcl:"routes,block"`
-	JWT                  *jwtHCL         `hcl:"jwt,block"`
+	JWT                  []jwtHCL        `hcl:"jwt,block"`
 	SSO                  *ssoHCL         `hcl:"sso,block"`
 	KeyRotation          *rotHCL         `hcl:"key_rotation,block"`
 	SCIM                 *scimHCL        `hcl:"scim,block"`
@@ -344,21 +344,52 @@ type rotHCL struct {
 	CheckIntervalRange hcl.Range `hcl:"check_interval,attr_value_range"`
 }
 
-type ssoHCL struct {
+// ssoProviderHCL is sso { provider "<name>" { ... } }.
+type ssoProviderHCL struct {
+	Name             string       `hcl:"name,label"`
+	DefRange         hcl.Range    `hcl:",def_range"`
 	Issuer           string       `hcl:"issuer"`
 	IssuerRange      hcl.Range    `hcl:"issuer,attr_value_range"`
 	ClientID         string       `hcl:"client_id"`
 	ClientIDRange    hcl.Range    `hcl:"client_id,attr_value_range"`
 	ClientSecretFile *string      `hcl:"client_secret_file,optional"`
-	RedirectURL      string       `hcl:"redirect_url"`
-	RedirectRange    hcl.Range    `hcl:"redirect_url,attr_value_range"`
 	Scopes           []string     `hcl:"scopes,optional"`
 	ScopesRange      hcl.Range    `hcl:"scopes,attr_value_range"`
-	SessionTTL       *string      `hcl:"session_ttl,optional"`
-	SessionTTLRange  hcl.Range    `hcl:"session_ttl,attr_value_range"`
 	MinRefresh       *string      `hcl:"min_refresh,optional"`
 	MinRefreshRange  hcl.Range    `hcl:"min_refresh,attr_value_range"`
+	Orgs             []string     `hcl:"orgs"`
+	OrgsRange        hcl.Range    `hcl:"orgs,attr_value_range"`
+	AllowProxyRoles  *bool        `hcl:"allow_proxy_roles,optional"`
+	Adopt            *bool        `hcl:"adopt,optional"`
+	Accepts          []acceptHCL  `hcl:"accept,block"`
 	Roles            []ssoRoleHCL `hcl:"role,block"`
+}
+
+// acceptHCL is accept { claim = "...", values = [...] }.
+type acceptHCL struct {
+	Claim       string    `hcl:"claim"`
+	ClaimRange  hcl.Range `hcl:"claim,attr_value_range"`
+	Values      []string  `hcl:"values"`
+	ValuesRange hcl.Range `hcl:"values,attr_value_range"`
+}
+
+type ssoHCL struct {
+	Providers        []ssoProviderHCL `hcl:"provider,block"`
+	DefRange         hcl.Range        `hcl:",def_range"`
+	Issuer           string           `hcl:"issuer,optional"`
+	IssuerRange      hcl.Range        `hcl:"issuer,attr_value_range"`
+	ClientID         string           `hcl:"client_id,optional"`
+	ClientIDRange    hcl.Range        `hcl:"client_id,attr_value_range"`
+	ClientSecretFile *string          `hcl:"client_secret_file,optional"`
+	RedirectURL      string           `hcl:"redirect_url"`
+	RedirectRange    hcl.Range        `hcl:"redirect_url,attr_value_range"`
+	Scopes           []string         `hcl:"scopes,optional"`
+	ScopesRange      hcl.Range        `hcl:"scopes,attr_value_range"`
+	SessionTTL       *string          `hcl:"session_ttl,optional"`
+	SessionTTLRange  hcl.Range        `hcl:"session_ttl,attr_value_range"`
+	MinRefresh       *string          `hcl:"min_refresh,optional"`
+	MinRefreshRange  hcl.Range        `hcl:"min_refresh,attr_value_range"`
+	Roles            []ssoRoleHCL     `hcl:"role,block"`
 }
 
 type ssoRoleHCL struct {
@@ -389,6 +420,12 @@ func validRoleScope(role, org, team string) bool {
 }
 
 type jwtHCL struct {
+	// Name is the block's label; the loader gives an unnamed jwt block the
+	// label legacyJWTLabel so that both forms decode into one type.
+	Name            string      `hcl:"name,label"`
+	Orgs            []string    `hcl:"orgs,optional"`
+	OrgsRange       hcl.Range   `hcl:"orgs,attr_value_range"`
+	Accepts         []acceptHCL `hcl:"accept,block"`
 	Issuer          string      `hcl:"issuer"`
 	IssuerRange     hcl.Range   `hcl:"issuer,attr_value_range"`
 	Audience        string      `hcl:"audience"`
@@ -417,6 +454,8 @@ type jwtMapHCL struct {
 	Project   *string   `hcl:"project,optional"`
 	DefRange  hcl.Range `hcl:",def_range"`
 }
+
+const legacyJWTLabel = "\x00"
 
 // validIssuer accepts https URLs (http only to loopback, for tests).
 func validIssuer(raw string) bool {
@@ -725,6 +764,16 @@ func Parse(src []byte, filename string) (*Config, error) {
 	f, diags := hclsyntax.ParseConfig(src, filename, hcl.InitialPos)
 	if diags.HasErrors() {
 		return nil, &Error{diags}
+	}
+	// jwt { } (one issuer, as before v0.27.0) and jwt "<name>" { } decode into
+	// one type: the unnamed block receives a placeholder label.
+	if body, ok := f.Body.(*hclsyntax.Body); ok {
+		for _, b := range body.Blocks {
+			if b.Type == "jwt" && len(b.Labels) == 0 {
+				b.Labels = []string{legacyJWTLabel}
+				b.LabelRanges = []hcl.Range{b.TypeRange}
+			}
+		}
 	}
 	var raw fileHCL
 	diags = append(diags, gohcl.DecodeBody(f.Body, nil, &raw)...)
@@ -1258,8 +1307,11 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		set(rt.Metrics, &c.Routes.Metrics, "routes.metrics.allow")
 		set(rt.Healthz, &c.Routes.Healthz, "routes.healthz.allow")
 	}
-	if j := raw.JWT; j != nil {
-		cj := &JWT{Issuer: j.Issuer, Audience: j.Audience, JWKSURL: strOr(j.JWKSURL, ""), Type: strOr(j.Type, ""),
+	jwtNames, jwtIssuers := map[string]bool{}, map[string]string{}
+	for ji := range raw.JWT {
+		j := &raw.JWT[ji]
+		legacy := j.Name == legacyJWTLabel
+		cj := &JWT{Name: j.Name, Issuer: j.Issuer, Audience: j.Audience, JWKSURL: strOr(j.JWKSURL, ""), Type: strOr(j.Type, ""),
 			UsernameClaim: strOr(j.UsernameClaim, ""), GroupsClaim: strOr(j.GroupsClaim, ""),
 			ClockSkew:  v.dur(j.ClockSkew, j.ClockSkewRange, "clock_skew", time.Minute),
 			MinRefresh: v.dur(j.MinRefresh, j.MinRefreshRange, "min_refresh", time.Minute)}
@@ -1303,8 +1355,41 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 				v.known(teams, m.Team, m.TeamRange, "team", "jwt map "+strconv.Quote(m.Value))
 			}
 			cj.Maps = append(cj.Maps, cm)
+			if !legacy && m.Team != "" && teams[m.Team] {
+				if o := c.OrgOfTeam(m.Team); !slices.Contains(j.Orgs, o) {
+					v.errf(m.TeamRange, "Map outside the issuer's organisations", "jwt %q may vouch for %v only, but team %q belongs to organisation %q", j.Name, j.Orgs, m.Team, o)
+				}
+			}
 		}
-		c.JWT = cj
+		if legacy {
+			cj.Name = ""
+			if len(raw.JWT) > 1 {
+				v.errf(j.LimitsRange, "Unnamed jwt block among several", "with several issuers every jwt block needs a name: jwt \"<name>\" { ... }")
+			}
+			c.JWT = cj
+		} else {
+			if !ValidName(j.Name) {
+				v.errf(j.LimitsRange, "Invalid jwt name", "%q: want [A-Za-z0-9_.-]{1,64}", j.Name)
+			}
+			if jwtNames[j.Name] {
+				v.errf(j.LimitsRange, "Duplicate jwt block", "jwt %q is declared twice", j.Name)
+			}
+			jwtNames[j.Name] = true
+			if len(j.Orgs) == 0 {
+				v.errf(j.LimitsRange, "Missing orgs", "jwt %q needs orgs = [...]: the organisations this issuer may vouch for", j.Name)
+			}
+			for _, o := range j.Orgs {
+				v.known(orgs, o, j.OrgsRange, "organisation", "jwt "+strconv.Quote(j.Name)+" orgs")
+			}
+			cj.Orgs = j.Orgs
+			c.JWTs = append(c.JWTs, cj)
+		}
+		cj.Accept = v.accepts(j.Accepts, "jwt "+strconv.Quote(j.Name))
+		iss := strings.TrimSuffix(j.Issuer, "/")
+		if other, dup := jwtIssuers[iss]; dup {
+			v.errf(j.IssuerRange, "Duplicate issuer", "issuer %q is already used by jwt %q: a token is routed to its verifier by iss", j.Issuer, other)
+		}
+		jwtIssuers[iss] = j.Name
 	}
 	if o := raw.SSO; o != nil {
 		cs := &SSO{Issuer: o.Issuer, ClientID: o.ClientID, ClientSecretFile: strOr(o.ClientSecretFile, ""),
@@ -1317,11 +1402,15 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		if len(cs.Scopes) == 0 {
 			cs.Scopes = []string{"openid", "profile", "email"}
 		}
-		if !validIssuer(o.Issuer) {
+		legacy := len(o.Providers) == 0
+		if legacy && !validIssuer(o.Issuer) {
 			v.errf(o.IssuerRange, "Invalid issuer", "issuer %q: want an https URL", o.Issuer)
 		}
-		if o.ClientID == "" {
+		if legacy && o.ClientID == "" {
 			v.errf(o.ClientIDRange, "Missing client_id", "the client registered at the provider")
+		}
+		if !legacy && (o.Issuer != "" || o.ClientID != "" || o.ClientSecretFile != nil || len(o.Roles) > 0 || len(o.Scopes) > 0) {
+			v.errf(o.DefRange, "Provider blocks and a single issuer", "an sso block with provider blocks keeps issuer, client_id, client_secret_file, scopes and role inside each provider block")
 		}
 		if u, err := url.Parse(o.RedirectURL); err != nil || !validIssuer(o.RedirectURL) || u.Path != "/admin/callback" {
 			v.errf(o.RedirectRange, "Invalid redirect_url", "redirect_url %q: want https://<this gateway>/admin/callback", o.RedirectURL)
@@ -1346,6 +1435,71 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 				}
 			}
 			cs.Roles = append(cs.Roles, cr)
+		}
+		pNames, pIssuers := map[string]bool{}, map[string]string{}
+		for pi := range o.Providers {
+			p := &o.Providers[pi]
+			cp := SSOProvider{Name: p.Name, Issuer: p.Issuer, ClientID: p.ClientID, ClientSecretFile: strOr(p.ClientSecretFile, ""),
+				Scopes: p.Scopes, Restricted: true, Orgs: p.Orgs, AllowProxyRoles: p.AllowProxyRoles != nil && *p.AllowProxyRoles, Adopt: p.Adopt != nil && *p.Adopt,
+				MinRefresh: v.dur(p.MinRefresh, p.MinRefreshRange, "min_refresh", time.Minute)}
+			where := "sso provider " + strconv.Quote(p.Name)
+			if !ValidName(p.Name) {
+				v.errf(p.DefRange, "Invalid provider name", "%q: want [A-Za-z0-9_.-]{1,64} (it ends the callback path /admin/callback/<name>)", p.Name)
+			}
+			if pNames[p.Name] {
+				v.errf(p.DefRange, "Duplicate provider", "%s is declared twice", where)
+			}
+			pNames[p.Name] = true
+			cp.RedirectURL = strings.TrimSuffix(o.RedirectURL, "/") + "/" + p.Name
+			if !validIssuer(p.Issuer) {
+				v.errf(p.IssuerRange, "Invalid issuer", "issuer %q: want an https URL", p.Issuer)
+			}
+			if other, dup := pIssuers[strings.TrimSuffix(p.Issuer, "/")]; dup {
+				v.errf(p.IssuerRange, "Duplicate issuer", "issuer %q is already used by sso provider %q: an identity is (provider, subject), one provider per issuer", p.Issuer, other)
+			}
+			pIssuers[strings.TrimSuffix(p.Issuer, "/")] = p.Name
+			if p.ClientID == "" {
+				v.errf(p.ClientIDRange, "Missing client_id", "the client registered at the provider")
+			}
+			if len(cp.Scopes) == 0 {
+				cp.Scopes = []string{"openid", "profile", "email"}
+			}
+			if !slices.Contains(cp.Scopes, "openid") {
+				v.errf(p.ScopesRange, "Invalid scopes", "scopes must include openid")
+			}
+			if cp.MinRefresh < MinKeySetRefresh {
+				v.errf(p.MinRefreshRange, "Key set refresh too short", "min_refresh %v: at least %v", cp.MinRefresh, MinKeySetRefresh)
+			}
+			if len(p.Orgs) == 0 {
+				v.errf(p.OrgsRange, "Empty orgs", "%s needs orgs = [...]: the organisations this provider may vouch for", where)
+			}
+			for _, og := range p.Orgs {
+				v.known(orgs, og, p.OrgsRange, "organisation", where+" orgs")
+			}
+			cp.Accept = v.accepts(p.Accepts, where)
+			for _, r := range p.Roles {
+				cr := SSORole{Claim: strOr(r.Claim, "groups"), Value: r.Value, Role: r.Role, Org: strOr(r.Org, ""), Team: strOr(r.Team, "")}
+				if r.Value == "" || !validRoleScope(cr.Role, cr.Org, cr.Team) {
+					v.errf(r.DefRange, "Invalid role", "role %q needs a value and its scope (proxy roles: none; org_admin: org; team_admin, member: team; viewer: org or team)", r.Role)
+				} else {
+					rw := where + " role " + strconv.Quote(r.Value)
+					if cr.Org != "" {
+						v.known(orgs, cr.Org, r.OrgRange, "organisation", rw)
+					}
+					if cr.Team != "" {
+						v.known(teams, cr.Team, r.TeamRange, "team", rw)
+					}
+					if !cp.MayGrant(c, cr) {
+						if cr.Org == "" && cr.Team == "" {
+							v.errf(r.DefRange, "Proxy-wide role not allowed", "%s grants %s on the whole proxy: add allow_proxy_roles = true to the provider if it is meant to", rw, cr.Role)
+						} else {
+							v.errf(r.DefRange, "Role outside the provider's organisations", "%s grants %s on organisation %q, which is not in orgs %v", rw, cr.Role, firstNonEmpty(cr.Org, c.OrgOfTeam(cr.Team)), p.Orgs)
+						}
+					}
+				}
+				cp.Roles = append(cp.Roles, cr)
+			}
+			cs.Providers = append(cs.Providers, cp)
 		}
 		c.SSO = cs
 	}
@@ -1607,6 +1761,9 @@ func (c *Config) SecretRefs() []string {
 	add(c.Alerts.WebhookTokenFile)
 	if c.SSO != nil {
 		add(c.SSO.ClientSecretFile)
+		for _, p := range c.SSO.Providers {
+			add(p.ClientSecretFile)
+		}
 	}
 	if c.SCIM != nil {
 		add(c.SCIM.TokenFile)

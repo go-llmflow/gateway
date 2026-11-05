@@ -10,6 +10,7 @@ type memUsers struct {
 	tokens      map[string]*UserToken
 	tokenByHash map[[32]byte]string
 	bindings    map[Binding]Provenance // keyed by Binding.Key()
+	idps        map[string]IdPLink     // by user
 }
 
 func (m *Memory) usersInit() {
@@ -49,6 +50,36 @@ func (m *Memory) GetUser(_ context.Context, name string) (User, error) {
 		return User{}, ErrNotFound
 	}
 	return *u, nil
+}
+
+func (m *Memory) LinkUserIdP(_ context.Context, user string, l IdPLink) (IdPLink, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Fail != nil {
+		return IdPLink{}, m.Fail
+	}
+	m.usersInit()
+	if m.u.idps == nil {
+		m.u.idps = map[string]IdPLink{}
+	}
+	if cur, ok := m.u.idps[user]; ok {
+		return cur, nil
+	}
+	m.u.idps[user] = l
+	return l, nil
+}
+
+func (m *Memory) UserIdP(_ context.Context, user string) (IdPLink, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Fail != nil {
+		return IdPLink{}, m.Fail
+	}
+	m.usersInit()
+	if l, ok := m.u.idps[user]; ok {
+		return l, nil
+	}
+	return IdPLink{}, ErrNotFound
 }
 
 func (m *Memory) ListUsers(context.Context) ([]User, error) {

@@ -119,6 +119,12 @@ type User struct {
 	Disabled  bool      `json:"disabled"`
 }
 
+// IdPLink is the identity provider (by its configured name) and the subject
+// at that provider a user is bound to.
+type IdPLink struct {
+	Provider, Subject string
+}
+
 // UserToken is an admin API credential of a user; only its hash is kept.
 type UserToken struct {
 	ID        string    `json:"id"`

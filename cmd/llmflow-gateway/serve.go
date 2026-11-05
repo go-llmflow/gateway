@@ -91,6 +91,16 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 		if err := get("sso client_secret_file", c.SSO.ClientSecretFile, &s.SSOClientSecret); err != nil {
 			return s, err
 		}
+		for _, p := range c.SSO.Providers {
+			var sec string
+			if err := get("sso provider "+p.Name+" client_secret_file", p.ClientSecretFile, &sec); err != nil {
+				return s, err
+			}
+			if s.SSOClientSecrets == nil {
+				s.SSOClientSecrets = map[string]string{}
+			}
+			s.SSOClientSecrets[p.Name] = sec
+		}
 	}
 	if c.SCIM != nil {
 		if err := get("scim token_file", c.SCIM.TokenFile, &s.SCIMToken); err != nil {

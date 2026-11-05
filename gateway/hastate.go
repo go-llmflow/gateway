@@ -81,6 +81,7 @@ const (
 
 // The sealed forms.
 type sealedLogin struct {
+	Provider               string
 	State, Nonce, Verifier string
 	Browser                [32]byte
 	UI                     bool
@@ -91,13 +92,15 @@ type sealedSession struct {
 	User     string
 	Bindings []store.Binding
 	CSRF     string
+	Provider string
+	Subject  string
 }
 
 func (s *Server) putLogin(ctx context.Context, state string, pl pendingLogin) error {
 	st := s.sso
 	if sh := st.shared; sh != nil {
 		id := sha256.Sum256([]byte(state))
-		b, err := sh.sealer.seal(kindLogin, id, sealedLogin{State: pl.flow.State, Nonce: pl.flow.Nonce, Verifier: pl.flow.Verifier,
+		b, err := sh.sealer.seal(kindLogin, id, sealedLogin{Provider: pl.provider, State: pl.flow.State, Nonce: pl.flow.Nonce, Verifier: pl.flow.Verifier,
 			Browser: pl.browser, UI: pl.ui, Net: pl.net.String()})
 		if err != nil {
 			return err
@@ -139,7 +142,7 @@ func (s *Server) takeLogin(ctx context.Context, state string) (pendingLogin, boo
 			return pendingLogin{}, false, err
 		}
 		net, _ := netip.ParsePrefix(sl.Net)
-		return pendingLogin{flow: rp.Flow{State: sl.State, Nonce: sl.Nonce, Verifier: sl.Verifier}, browser: sl.Browser,
+		return pendingLogin{provider: sl.Provider, flow: rp.Flow{State: sl.State, Nonce: sl.Nonce, Verifier: sl.Verifier, Provider: rpKey(sl.Provider)}, browser: sl.Browser,
 			ui: sl.UI, net: net, expires: s.now().Add(time.Minute)}, true, nil
 	}
 	st.mu.Lock()
@@ -155,7 +158,7 @@ func (s *Server) takeLogin(ctx context.Context, state string) (pendingLogin, boo
 func (s *Server) putSession(ctx context.Context, h [32]byte, se session) error {
 	st := s.sso
 	if sh := st.shared; sh != nil {
-		b, err := sh.sealer.seal(kindSession, h, sealedSession{User: se.user, Bindings: se.bindings, CSRF: se.csrf})
+		b, err := sh.sealer.seal(kindSession, h, sealedSession{User: se.user, Bindings: se.bindings, CSRF: se.csrf, Provider: se.provider, Subject: se.subject})
 		if err != nil {
 			return err
 		}
@@ -191,7 +194,7 @@ func (s *Server) getSession(ctx context.Context, h [32]byte) (session, bool, err
 		if err := sh.sealer.open(kindSession, h, b, &ss); err != nil {
 			return session{}, false, err
 		}
-		return session{user: ss.User, bindings: ss.Bindings, csrf: ss.CSRF}, true, nil
+		return session{user: ss.User, bindings: ss.Bindings, csrf: ss.CSRF, provider: ss.Provider, subject: ss.Subject}, true, nil
 	}
 	now := s.now()
 	st.mu.Lock()
