@@ -215,10 +215,14 @@ func (b *scimBackend) retire(ctx context.Context, name string) error {
 			}
 		}
 	}
-	if err := b.s.st.DisableUser(ctx, name); err != nil && !errors.Is(err, store.ErrNotFound) {
+	// Only a user SCIM provisioned is disabled: a user created by hand, a
+	// proxy admin included, is not SCIM's to retire (it is ErrNotFound here).
+	switch err := b.s.st.DisableSCIMUser(ctx, name); {
+	case err == nil:
+		b.s.audit("scim.user_retired", "user", name)
+	case !errors.Is(err, store.ErrNotFound):
 		return err
 	}
-	b.s.audit("scim.user_retired", "user", name)
 	return nil
 }
 
@@ -360,25 +364,32 @@ func (b *scimBackend) reconcile(ctx context.Context) error {
 		provisioned[u.UserName] = true
 		gu, err := b.s.st.GetUser(ctx, u.UserName)
 		switch {
-		case errors.Is(err, store.ErrNotFound) || err == nil && gu.Disabled:
+		case errors.Is(err, store.ErrNotFound):
+			// SCIM provisions the user (origin "scim"), disabled when inactive.
+			if err := b.s.st.CreateSCIMUser(ctx, u.UserName); err != nil && !errors.Is(err, store.ErrExists) {
+				return err
+			}
 			if u.Enabled() {
-				if err := b.s.st.CreateUser(ctx, u.UserName); err != nil && !errors.Is(err, store.ErrExists) {
-					return err
-				}
 				b.s.audit("scim.user_enabled", "user", u.UserName)
-			} else if errors.Is(err, store.ErrNotFound) {
-				// Known, but inactive: a disabled gateway user.
-				if err := b.s.st.CreateUser(ctx, u.UserName); err != nil && !errors.Is(err, store.ErrExists) {
-					return err
-				}
-				if err := b.s.st.DisableUser(ctx, u.UserName); err != nil {
-					return err
-				}
+			} else if err := b.s.st.DisableSCIMUser(ctx, u.UserName); err != nil {
+				return err
 			}
 		case err != nil:
 			return err
-		case !u.Enabled():
-			if err := b.s.st.DisableUser(ctx, u.UserName); err != nil {
+		case gu.Origin != "scim":
+			// A user created by hand (a proxy admin, say) is not SCIM's to
+			// enable or disable, whatever the SCIM client says about the name.
+		case gu.Disabled && u.Enabled():
+			// Re-enabled only when SCIM disabled it: a user a proxy admin
+			// disabled stays disabled (CreateSCIMUser says ErrExists).
+			switch err := b.s.st.CreateSCIMUser(ctx, u.UserName); {
+			case err == nil:
+				b.s.audit("scim.user_enabled", "user", u.UserName)
+			case !errors.Is(err, store.ErrExists):
+				return err
+			}
+		case !gu.Disabled && !u.Enabled():
+			if err := b.s.st.DisableSCIMUser(ctx, u.UserName); err != nil {
 				return err
 			}
 			b.s.audit("scim.user_disabled", "user", u.UserName)
@@ -463,4 +474,37 @@ func (s *Server) scimHandler() http.Handler {
 		}
 		h.ServeHTTP(w, r)
 	}))
+}
+
+// claimLegacy marks as SCIM's the users, stored before users had an origin
+// (v0.28.2), that hold at least one binding provisioning granted and no other:
+// a user with a role anyone else granted (a proxy admin, an org admin) is never
+// claimed, whatever the SCIM client names.
+func (b *scimBackend) claimLegacy(ctx context.Context) error {
+	us, err := b.users(ctx, "")
+	if err != nil {
+		return err
+	}
+	for _, u := range us {
+		gu, err := b.s.st.GetUser(ctx, u.UserName)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if gu.Origin != "" {
+			continue
+		}
+		bs, err := b.s.st.Bindings(ctx, u.UserName)
+		if err != nil {
+			return err
+		}
+		if len(bs) > 0 && !slices.ContainsFunc(bs, func(bd store.Binding) bool { return bd.Provenance != store.ProvSCIM }) {
+			if err := b.s.st.MarkSCIMOrigin(ctx, u.UserName); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

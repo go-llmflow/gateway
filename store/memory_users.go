@@ -29,7 +29,7 @@ func (m *Memory) CreateUser(_ context.Context, name string) error {
 	m.usersInit()
 	if u, ok := m.u.users[name]; ok {
 		if u.Disabled {
-			u.Disabled = false
+			u.Disabled, u.DisabledBy = false, ""
 			return nil
 		}
 		return ErrExists
@@ -108,7 +108,7 @@ func (m *Memory) DisableUser(_ context.Context, name string) error {
 	if !ok {
 		return ErrNotFound
 	}
-	u.Disabled = true
+	u.Disabled, u.DisabledBy = true, "admin"
 	for _, t := range m.u.tokens {
 		if t.User == name {
 			t.Revoked = true
@@ -257,4 +257,53 @@ func (m *Memory) Bindings(_ context.Context, user string) ([]Binding, error) {
 		return a.Team < c.Team
 	})
 	return out, nil
+}
+
+func (m *Memory) CreateSCIMUser(_ context.Context, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Fail != nil {
+		return m.Fail
+	}
+	m.usersInit()
+	u, ok := m.u.users[name]
+	switch {
+	case !ok:
+		m.u.users[name] = &User{Name: name, CreatedAt: now(), Origin: "scim"}
+		return nil
+	case u.Origin == "scim" && u.Disabled && u.DisabledBy == "scim":
+		u.Disabled, u.DisabledBy = false, ""
+		return nil
+	}
+	return ErrExists
+}
+
+func (m *Memory) DisableSCIMUser(_ context.Context, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Fail != nil {
+		return m.Fail
+	}
+	m.usersInit()
+	u, ok := m.u.users[name]
+	if !ok || u.Origin != "scim" {
+		return ErrNotFound
+	}
+	u.Disabled, u.DisabledBy = true, "scim"
+	for _, t := range m.u.tokens {
+		if t.User == name {
+			t.Revoked = true
+		}
+	}
+	return nil
+}
+
+func (m *Memory) MarkSCIMOrigin(_ context.Context, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.usersInit()
+	if u, ok := m.u.users[name]; ok && u.Origin == "" {
+		u.Origin = "scim"
+	}
+	return nil
 }

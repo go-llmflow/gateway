@@ -35,6 +35,11 @@ ALTER TABLE llmflow_keys ADD COLUMN IF NOT EXISTS owner text NOT NULL DEFAULT ''
 ALTER TABLE llmflow_bindings ADD COLUMN IF NOT EXISTS provenance text NOT NULL DEFAULT '';
 -- v0.27.0: the identity provider and subject a user logged in with. Users stored
 -- before it have no row (no link; the first provider adopts them).
+-- v0.28.2: who created a user ('scim': provisioned, the only users SCIM may enable,
+-- disable or retire) and who disabled one ('admin', 'scim'; '' for a user disabled
+-- before: SCIM never re-enables it).
+ALTER TABLE llmflow_users ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT '';
+ALTER TABLE llmflow_users ADD COLUMN IF NOT EXISTS disabled_by text NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS llmflow_user_idps (
 	username text PRIMARY KEY,
 	provider text NOT NULL,
@@ -63,7 +68,7 @@ func (p *Postgres) UserIdP(ctx context.Context, user string) (IdPLink, error) {
 func (p *Postgres) CreateUser(ctx context.Context, name string) error {
 	tag, err := p.pool.Exec(ctx, `
 		INSERT INTO llmflow_users (name) VALUES ($1)
-		ON CONFLICT (name) DO UPDATE SET disabled = false WHERE llmflow_users.disabled`, name)
+		ON CONFLICT (name) DO UPDATE SET disabled = false, disabled_by = '' WHERE llmflow_users.disabled`, name)
 	if err != nil {
 		return err
 	}
@@ -75,8 +80,8 @@ func (p *Postgres) CreateUser(ctx context.Context, name string) error {
 
 func (p *Postgres) GetUser(ctx context.Context, name string) (User, error) {
 	var u User
-	err := p.pool.QueryRow(ctx, `SELECT name, created_at, disabled FROM llmflow_users WHERE name = $1`, name).
-		Scan(&u.Name, &u.CreatedAt, &u.Disabled)
+	err := p.pool.QueryRow(ctx, `SELECT name, created_at, disabled, origin, disabled_by FROM llmflow_users WHERE name = $1`, name).
+		Scan(&u.Name, &u.CreatedAt, &u.Disabled, &u.Origin, &u.DisabledBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
@@ -84,20 +89,20 @@ func (p *Postgres) GetUser(ctx context.Context, name string) (User, error) {
 }
 
 func (p *Postgres) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := p.pool.Query(ctx, `SELECT name, created_at, disabled FROM llmflow_users ORDER BY name`)
+	rows, err := p.pool.Query(ctx, `SELECT name, created_at, disabled, origin, disabled_by FROM llmflow_users ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (User, error) {
 		var u User
-		err := r.Scan(&u.Name, &u.CreatedAt, &u.Disabled)
+		err := r.Scan(&u.Name, &u.CreatedAt, &u.Disabled, &u.Origin, &u.DisabledBy)
 		return u, err
 	})
 }
 
 func (p *Postgres) DisableUser(ctx context.Context, name string) error {
 	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
-		if err := affected(tx.Exec(ctx, `UPDATE llmflow_users SET disabled = true WHERE name = $1`, name)); err != nil {
+		if err := affected(tx.Exec(ctx, `UPDATE llmflow_users SET disabled = true, disabled_by = 'admin' WHERE name = $1`, name)); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `UPDATE llmflow_user_tokens SET revoked = true WHERE username = $1`, name)
@@ -207,4 +212,40 @@ func (p *Postgres) Bindings(ctx context.Context, user string) ([]Binding, error)
 		b.Role, b.Provenance = Role(role), Provenance(prov)
 		return b, err
 	})
+}
+
+// CreateSCIMUser provisions a user: created with origin "scim", or, when it
+// exists, re-enabled only if it is a SCIM user that SCIM itself disabled.
+// Any other existing user is ErrExists and left as it is.
+func (p *Postgres) CreateSCIMUser(ctx context.Context, name string) error {
+	tag, err := p.pool.Exec(ctx, `
+		INSERT INTO llmflow_users (name, origin) VALUES ($1, 'scim')
+		ON CONFLICT (name) DO UPDATE SET disabled = false, disabled_by = ''
+		WHERE llmflow_users.origin = 'scim' AND llmflow_users.disabled AND llmflow_users.disabled_by = 'scim'`, name)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrExists
+	}
+	return nil
+}
+
+// DisableSCIMUser disables a user SCIM provisioned (and revokes their admin
+// tokens); any other user is ErrNotFound for this call and left alone.
+func (p *Postgres) DisableSCIMUser(ctx context.Context, name string) error {
+	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		if err := affected(tx.Exec(ctx, `UPDATE llmflow_users SET disabled = true, disabled_by = 'scim' WHERE name = $1 AND origin = 'scim'`, name)); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE llmflow_user_tokens SET revoked = true WHERE username = $1`, name)
+		return err
+	})
+}
+
+// MarkSCIMOrigin records that a user stored before origins existed was
+// provisioned by SCIM. Used once, at start-up, for users SCIM holds a record of.
+func (p *Postgres) MarkSCIMOrigin(ctx context.Context, name string) error {
+	_, err := p.pool.Exec(ctx, `UPDATE llmflow_users SET origin = 'scim' WHERE name = $1 AND origin = ''`, name)
+	return err
 }
