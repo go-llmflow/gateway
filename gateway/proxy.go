@@ -513,7 +513,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				// Network: the body forwarded to the upstream, and what was
 				// handed to the client (a stream cut short counts what it
 				// delivered).
-				BytesIn: int64(len(out)), BytesOut: st.Bytes,
+				BytesIn: int64(len(out)) + audioBytes(audio), BytesOut: st.Bytes,
 			}
 			s.recordHolds(&rec, adm, costNano)
 			s.rec.record(rec)
@@ -559,7 +559,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		for {
 			if ferr := sendOnce(); ferr != nil {
 				status = http.StatusBadRequest
-				apiError(w, status, "invalid_request_error", ferr.Error())
+				st.Bytes += int64(apiError(w, status, "invalid_request_error", ferr.Error()))
 				return
 			}
 			saturated := err == nil && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable ||
@@ -596,7 +596,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				// The released grant stays the one the deferred accounting
 				// releases again (a no-op).
 				status = http.StatusServiceUnavailable
-				apiError(w, status, "service_unavailable", errNoOwner.Error())
+				st.Bytes += int64(apiError(w, status, "service_unavailable", errNoOwner.Error()))
 				return
 			}
 			grant = ng
@@ -622,15 +622,15 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				w.Header().Set("Retry-After", strconv.Itoa(int((d+time.Second-1)/time.Second)))
 				status = http.StatusTooManyRequests
 				s.met.denied.add(1, key.Team, "provider_backoff")
-				apiError(w, status, "rate_limit_exceeded", "the provider asked to wait before the next request (retry-after)")
+				st.Bytes += int64(apiError(w, status, "rate_limit_exceeded", "the provider asked to wait before the next request (retry-after)"))
 				return
 			case errors.Is(err, errSharedWorkspace):
 				status = http.StatusServiceUnavailable
-				apiError(w, status, "service_unavailable", err.Error())
+				st.Bytes += int64(apiError(w, status, "service_unavailable", err.Error()))
 				return
 			}
 			status = http.StatusBadGateway
-			apiError(w, status, "upstream_error", "no upstream could serve the request")
+			st.Bytes += int64(apiError(w, status, "upstream_error", "no upstream could serve the request"))
 			return
 		}
 		defer u.inflight.Add(-1)
@@ -742,7 +742,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			} else {
 				worked = false
 			}
-			apiError(w, status, "upstream_error", "upstream response unreadable or too large")
+			st.Bytes += int64(apiError(w, status, "upstream_error", "upstream response unreadable or too large"))
 			return
 		}
 		if resp.StatusCode >= 300 && g.ext != nil && g.ext.bedrock != nil {
@@ -756,7 +756,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				tb, cu, ok := translateConverse(data, g.cfg.Name, rid, s.now())
 				if !ok {
 					billW, status = true, http.StatusBadGateway
-					apiError(w, status, "upstream_error", "the provider's answer could not be read")
+					st.Bytes += int64(apiError(w, status, "upstream_error", "the provider's answer could not be read"))
 					return
 				}
 				data, usage, haveUsage = tb, cu, true
@@ -770,7 +770,9 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				// The work is done and charged whatever the guards say.
 				guarded, gerr := s.post(r.Context(), rq, data)
 				if gerr != nil {
-					status = s.guardRefusal(w, gerr)
+					var gn int
+					status, gn = s.guardRefusalN(w, gerr)
+					st.Bytes += int64(gn)
 					return
 				}
 				data = guarded
@@ -781,7 +783,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				text, ok := openai.TranscriptText(data)
 				if !ok {
 					status = http.StatusBadGateway
-					apiError(w, status, "upstream_error", "the transcription answer has no text")
+					st.Bytes += int64(apiError(w, status, "upstream_error", "the transcription answer has no text"))
 					return
 				}
 				data = []byte(text)

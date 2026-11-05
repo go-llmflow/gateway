@@ -310,13 +310,13 @@ func (s *Server) chargebackReport(w http.ResponseWriter, r *http.Request, p *pri
 		storeError(w, err)
 		return
 	}
-	s.stampMethod(w, view)
+	s.stampMethod(w, view, p)
 	if format == FormatJSON {
 		if rows == nil {
 			rows = []ChargebackRow{}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"from": from.UTC(), "to": to.UTC(), "rows": rows, "method": s.billingMethod(), "closed_months": view.closed})
+		_ = json.NewEncoder(w).Encode(map[string]any{"from": from.UTC(), "to": to.UTC(), "rows": rows, "method": s.methodFor(p), "closed_months": closedFor(p, view.closed)})
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")

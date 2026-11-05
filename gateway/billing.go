@@ -77,7 +77,7 @@ type fixedMethod struct {
 // every report and stored with every closed month.
 type billingMethod struct {
 	MethodVersion    int                     `json:"method_version"`
-	GatewayVersion   string                  `json:"gateway_version"`
+	GatewayVersion   string                  `json:"gateway_version,omitempty"`
 	Currency         string                  `json:"currency"`
 	CurrencyDecimals int                     `json:"currency_decimals"`
 	PUE              float64                 `json:"pue"`
@@ -714,16 +714,55 @@ func (s *Server) billingClosed(w http.ResponseWriter, r *http.Request, p *princi
 	writeJSON(w, http.StatusOK, map[string]any{"closed": out})
 }
 
-// stampMethod writes the method of a report in its headers (a CSV has no room
-// for it in the body): the version, and the parameters as compact JSON.
-func (s *Server) stampMethod(w http.ResponseWriter, v *billingView) {
+// methodFor is the method as a reader may see it: the markups of the
+// organisations it may read only (a markup is the commercial term of one
+// partner's agreement), and the gateway version only for the proxy roles.
+func (s *Server) methodFor(p *principal) billingMethod {
 	m := s.billingMethod()
+	if len(m.Markups) > 0 {
+		kept := map[string]float64{}
+		for o, v := range m.Markups {
+			if p.reportView() || p.orgView(o) {
+				kept[o] = v
+			}
+		}
+		m.Markups = nil
+		if len(kept) > 0 {
+			m.Markups = kept
+		}
+	}
+	if !p.proxyView() {
+		m.GatewayVersion = ""
+	}
+	return m
+}
+
+// closedFor is the closed months a reader read, without the gateway version
+// for a reader that is not a proxy role.
+func closedFor(p *principal, in []closedRef) []closedRef {
+	out := make([]closedRef, len(in))
+	copy(out, in)
+	if !p.proxyView() {
+		for i := range out {
+			out[i].GatewayVersion = ""
+		}
+	}
+	return out
+}
+
+// stampMethod writes the method of a report in its headers (a CSV has no room
+// for it in the body): the version, and the parameters as compact JSON, as the
+// reader may see them (methodFor).
+func (s *Server) stampMethod(w http.ResponseWriter, v *billingView, p *principal) {
+	m := s.methodFor(p)
 	b, _ := json.Marshal(m)
 	w.Header().Set("X-Llmflow-Method-Version", fmt.Sprint(m.MethodVersion))
-	w.Header().Set("X-Llmflow-Gateway-Version", m.GatewayVersion)
+	if m.GatewayVersion != "" {
+		w.Header().Set("X-Llmflow-Gateway-Version", m.GatewayVersion)
+	}
 	w.Header().Set("X-Llmflow-Method", string(b))
 	if v != nil && len(v.closed) > 0 {
-		cb, _ := json.Marshal(v.closed)
+		cb, _ := json.Marshal(closedFor(p, v.closed))
 		w.Header().Set("X-Llmflow-Closed-Months", string(cb))
 	}
 }

@@ -44,7 +44,11 @@ type requestLogger struct {
 	// to meter (nil: not metered).
 	orgBytes map[string]int64
 	meter    func(day, org string, n int64)
+	wg       sync.WaitGroup // the meter calls in flight
 }
+
+// waitMeter waits for the storage meter calls started by flushes.
+func (l *requestLogger) waitMeter() { l.wg.Wait() }
 
 // requestLogRecord is one line of a request log.
 type requestLogRecord struct {
@@ -124,7 +128,12 @@ func (l *requestLogger) meterBatch(day string, size int64) {
 		for i, o := range orgs {
 			if parts[i] > 0 && o != "" {
 				// Off the request path: a store write must not hold the batch.
-				go l.meter(day, o, parts[i])
+				// Close waits for them (waitMeter).
+				l.wg.Add(1)
+				go func(org string, n int64) {
+					defer l.wg.Done()
+					l.meter(day, org, n)
+				}(o, parts[i])
 			}
 		}
 	}
