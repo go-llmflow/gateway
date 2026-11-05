@@ -45,6 +45,10 @@ sso {
     client_id          = "llmflow-admin"
     client_secret_file = "vault:secret/llmflow#sso-univ-a"
     orgs               = ["univ-a"]
+    # A person is local@domain. This institution's accounts predate scoped
+    # names: "alice" becomes alice@univ-a.example, and a stored user "alice"
+    # is that person. Only one issuer may carry domain.
+    domain = "univ-a.example"
     role {
       claim = "groups"
       value = "llm-admins"
@@ -64,6 +68,7 @@ sso {
     client_id          = "llmflow-admin"
     client_secret_file = "vault:secret/llmflow#sso-univ-b"
     orgs               = ["univ-b"]
+    domains            = ["univ-b.example"] # names must be local@univ-b.example
     role {
       claim = "groups"
       value = "llm-admins"
@@ -101,6 +106,7 @@ jwt "univ-a" {
   issuer   = "https://sso.univ-a.example"
   audience = "llmflow"
   orgs     = ["univ-a"]
+  domain   = "univ-a.example"
   map {
     claim = "groups"
     value = "physics"

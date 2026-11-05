@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/go-authn/oidc"
+	"github.com/hashicorp/hcl/v2"
 )
 
 // Several identity providers (v0.27.0).
@@ -43,6 +44,12 @@ type SSOProvider struct {
 	Accept []Accept
 	// Roles map claims to role bindings.
 	Roles []SSORole
+	// Domain and Domains are the institutions' domains this provider may
+	// assert names for (a name is local@domain). Domain also scopes the
+	// unscoped names of institutions whose accounts predate scoped names:
+	// "alice" is "alice@Domain", and a stored user named "alice" is that person.
+	Domain  string
+	Domains []string
 }
 
 // ProviderList returns the providers of an sso block: its provider blocks, or
@@ -52,7 +59,7 @@ func (s *SSO) ProviderList() []SSOProvider {
 		return s.Providers
 	}
 	return []SSOProvider{{Issuer: s.Issuer, ClientID: s.ClientID, ClientSecretFile: s.ClientSecretFile,
-		RedirectURL: s.RedirectURL, Scopes: s.Scopes, MinRefresh: s.MinRefresh, Roles: s.Roles}}
+		RedirectURL: s.RedirectURL, Scopes: s.Scopes, MinRefresh: s.MinRefresh, Roles: s.Roles, Domain: s.Domain, Domains: s.Domains}}
 }
 
 // JWTIssuers returns every issuer of inference access tokens: the jwt blocks,
@@ -128,3 +135,75 @@ func (v *validator) accepts(in []acceptHCL, where string) []Accept {
 // is refused unless the claim holds one of Values; several must all hold. The
 // case rules (SCHAC, eduPerson) and the matching are the library's.
 type Accept = oidc.Accept
+
+// domains validates the domain and domains attributes of an issuer: DNS names
+// (RFC 1035 letters, digits, dots and hyphens), lower-cased. The one domain
+// that scopes legacy unscoped names (domain) is declared by one issuer only: two
+// issuers doing so would make "alice" two people. domains lists the institutions a
+// federation issuer may assert names for; domain is included.
+func (v *validator) domains(domain *string, domains []string, r, rs hcl.Range, where, issuer string, owner map[string]string) (string, []string) {
+	ok := func(d string) bool {
+		if d == "" || len(d) > 253 {
+			return false
+		}
+		for _, c := range d {
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '-') {
+				return false
+			}
+		}
+		return !strings.HasPrefix(d, ".") && !strings.Contains(d, "..")
+	}
+	one := ""
+	var out []string
+	if domain != nil {
+		one = strings.ToLower(strings.TrimSuffix(*domain, "."))
+		if !ok(one) {
+			v.errf(r, "Invalid domain", "%s: domain %q: want a DNS name such as polytechnique.edu", where, *domain)
+			one = ""
+		} else {
+			// The unscoped names of the old single-issuer setups belong to ONE
+			// institution: a second issuer with a domain would claim the same
+			// "alice". Other issuers list their institutions in domains.
+			iss := strings.TrimRight(issuer, "/")
+			if other, dup := owner[""]; dup && other != iss {
+				v.errf(r, "Second legacy domain", "%s: domain %q would scope unscoped names for a second issuer (%q already does): unscoped names belong to one institution; list this one's domains in domains = [...] instead", where, one, other)
+			}
+			owner[""] = iss
+			out = append(out, one)
+		}
+	}
+	for _, d := range domains {
+		n := strings.ToLower(strings.TrimSuffix(d, "."))
+		if !ok(n) {
+			v.errf(rs, "Invalid domain", "%s: domains entry %q: want a DNS name", where, d)
+			continue
+		}
+		if !slices.Contains(out, n) {
+			out = append(out, n)
+		}
+	}
+	return one, out
+}
+
+// scopes are the domains the issuer may assert names for: domain, domains, and
+// the institutions of a federation it serves (the values of its accept blocks
+// on schac_home_organization).
+func scopes(domain string, domains []string, accept []Accept) []string {
+	var out []string
+	out = append(out, domains...)
+	if domain != "" && !slices.Contains(out, domain) {
+		out = append(out, domain)
+	}
+	for _, a := range accept {
+		if strings.EqualFold(a.Claim, "schac_home_organization") || strings.EqualFold(a.Claim, "schacHomeOrganization") {
+			out = append(out, a.Values...)
+		}
+	}
+	return out
+}
+
+// NameScopes of the provider: see scopes.
+func (p *SSOProvider) NameScopes() []string { return scopes(p.Domain, p.Domains, p.Accept) }
+
+// NameScopes of the issuer: see scopes.
+func (j *JWT) NameScopes() []string { return scopes(j.Domain, j.Domains, j.Accept) }

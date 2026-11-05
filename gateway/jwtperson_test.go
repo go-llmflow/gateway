@@ -12,9 +12,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/go-llmflow/gateway/config"
-	"github.com/go-llmflow/gateway/store"
 )
 
 func TestJWTPersonIsIssuerAndSubjectNotName(t *testing.T) {
@@ -68,37 +65,45 @@ func TestJWTPersonIsIssuerAndSubjectNotName(t *testing.T) {
 	}
 }
 
-// A stored user linked to exactly this issuer and subject keeps their name;
-// the same name from another subject, or from an issuer with no sso provider,
-// is a synthetic person.
-func TestJWTPersonKeepsTheNameOfALinkedUser(t *testing.T) {
+// A person is local@domain, the domain being one the issuer may assert: the
+// name of a legacy account is scoped by the issuer's domain, another scope is
+// refused (the person is then the synthetic key id), an unscoped name with no
+// domain to scope it is no name.
+func TestJWTPersonIsScopedAndTheScopeChecked(t *testing.T) {
 	a, b := newFakeIdP(t), newFakeIdP(t)
 	now := time.Now()
 	e := multiJWTEnv(t, a, b, func() time.Time { return now }, nil)
-	e.cfg.SSO = &config.SSO{Providers: []config.SSOProvider{{Name: "pa", Issuer: a.srv.URL, Restricted: true, Orgs: []string{"etabA"}}}}
+	e.cfg.JWTs[0].Domain = "univ-a.fr"            // the institution whose accounts predate scoped names
+	e.cfg.JWTs[1].Domains = []string{"univ-b.fr"} // accounts of univ-b.fr, always scoped
 	ctx := context.Background()
-	if err := e.st.CreateUser(ctx, "alice"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.st.LinkUserIdP(ctx, "alice", store.IdPLink{Provider: "pa", Subject: "a-alice"}); err != nil {
+	if err := e.st.CreateUser(ctx, "legacy"); err != nil {
 		t.Fatal(err)
 	}
 	rs := map[string]any{"alg": "RS256", "kid": "k1", "typ": "JWT"}
 	lab := []string{"lab"}
-	owner := func(raw string) string {
-		k, err := e.srv.lookupJWT(ctx, raw)
+	owner := func(p *fakeIdP, extra map[string]any) string {
+		extra["groups"] = lab
+		k, err := e.srv.lookupJWT(ctx, p.sign(t, rs, p.claims(now, extra)))
 		if err != nil {
 			t.Fatal(err)
 		}
 		return k.Owner
 	}
-	if got := owner(a.sign(t, rs, a.claims(now, map[string]any{"sub": "a-alice", "preferred_username": "alice", "groups": lab}))); got != "alice" {
-		t.Errorf("the linked user: %q", got)
-	}
-	if got := owner(a.sign(t, rs, a.claims(now, map[string]any{"sub": "a-other", "preferred_username": "alice", "groups": lab}))); !strings.HasPrefix(got, "jwt-") {
-		t.Errorf("another subject of the same issuer: %q", got)
-	}
-	if got := owner(b.sign(t, rs, b.claims(now, map[string]any{"sub": "b-1", "preferred_username": "alice", "aud": "other-aud", "groups": lab}))); !strings.HasPrefix(got, "jwt-") {
-		t.Errorf("another issuer: %q", got)
+	bAud := func(m map[string]any) map[string]any { m["aud"] = "other-aud"; return m }
+	for _, tc := range []struct {
+		name, got, want string // want "" is the synthetic jwt-... person
+	}{
+		{"unscoped, scoped by the issuer's domain", owner(a, map[string]any{"sub": "1", "preferred_username": "alice"}), "alice@univ-a.fr"},
+		{"unscoped legacy user of the issuer's domain", owner(a, map[string]any{"sub": "2", "preferred_username": "legacy"}), "legacy"},
+		{"scoped, allowed", owner(a, map[string]any{"sub": "3", "preferred_username": "Alice@UNIV-A.fr"}), "alice@univ-a.fr"},
+		{"another institution's scope", owner(a, map[string]any{"sub": "4", "preferred_username": "alice@univ-b.fr"}), ""},
+		{"b: unscoped, no domain", owner(b, bAud(map[string]any{"sub": "5", "preferred_username": "alice"})), ""},
+		{"b: its own scope", owner(b, bAud(map[string]any{"sub": "6", "preferred_username": "alice@univ-b.fr"})), "alice@univ-b.fr"},
+		{"b: the other institution's scope", owner(b, bAud(map[string]any{"sub": "7", "preferred_username": "alice@univ-a.fr"})), ""},
+		{"b: the legacy name of the other institution", owner(b, bAud(map[string]any{"sub": "8", "preferred_username": "legacy"})), ""},
+	} {
+		if tc.want == "" && !strings.HasPrefix(tc.got, "jwt-") || tc.want != "" && tc.got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, tc.got, tc.want)
+		}
 	}
 }

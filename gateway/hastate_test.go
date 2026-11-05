@@ -81,7 +81,7 @@ func TestChaosHASSOSessionSurvives(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:1")
 	cfg.AuthFailuresPerMinute = 0
 	cfg.SSO = &config.SSO{
-		Issuer: idp.srv.URL, ClientID: "llmflow-admin", RedirectURL: gwOrigin + "/admin/callback",
+		Domain: "example.org", Issuer: idp.srv.URL, ClientID: "llmflow-admin", RedirectURL: gwOrigin + "/admin/callback",
 		Scopes: []string{"openid", "profile"}, SessionTTL: time.Hour,
 		Roles: []config.SSORole{{Claim: "groups", Value: "llm-admins", Role: "proxy_admin"}},
 	}

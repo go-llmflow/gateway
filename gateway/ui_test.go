@@ -100,7 +100,7 @@ func TestUIKeysAndCSRF(t *testing.T) {
 	es, _ := e.st.AuditRange(t.Context(), 1, 100)
 	actions := map[string]bool{}
 	for _, a := range es {
-		if a.Actor == "alice" {
+		if a.Actor == "alice@example.org" { // a person is local@domain
 			actions[a.Action] = true
 		}
 	}
