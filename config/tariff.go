@@ -58,6 +58,10 @@ type tariffHCL struct {
 
 var weekdays = map[string]time.Weekday{"sun": time.Sunday, "mon": time.Monday, "tue": time.Tuesday, "wed": time.Wednesday, "thu": time.Thursday, "fri": time.Friday, "sat": time.Saturday}
 
+// WeekdayOf returns the weekday of a three-letter name (sun..sat); Sunday for
+// anything else.
+func WeekdayOf(s string) time.Weekday { return weekdays[strings.ToLower(s)] }
+
 // parseHour parses "HH:00" (0..24) into hours.
 func parseHour(s string) (int, error) {
 	var h, m int

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime/debug"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/go-llmflow/gateway/config"
@@ -64,6 +65,14 @@ type periodMethod struct {
 	PricePerGBMonth float64 `json:"price_per_gb_month,omitempty"`
 }
 
+type tariffMethod struct {
+	Name  string   `json:"name"`
+	Price float64  `json:"price_per_kwh"`
+	Days  []string `json:"days,omitempty"`
+	From  int      `json:"from"`
+	To    int      `json:"to"`
+}
+
 type fixedMethod struct {
 	Name    string             `json:"name"`
 	Pool    string             `json:"pool,omitempty"`
@@ -77,6 +86,9 @@ type fixedMethod struct {
 // every report and stored with every closed month.
 type billingMethod struct {
 	MethodVersion    int                     `json:"method_version"`
+	Timezone         string                  `json:"timezone,omitempty"`
+	Tariff           []tariffMethod          `json:"tariff,omitempty"`
+	NodeOverhead     float64                 `json:"node_overhead_factor,omitempty"`
 	GatewayVersion   string                  `json:"gateway_version,omitempty"`
 	Currency         string                  `json:"currency"`
 	CurrencyDecimals int                     `json:"currency_decimals"`
@@ -102,6 +114,19 @@ func (s *Server) billingMethod() billingMethod {
 	m.Currency, m.CurrencyDecimals, m.PUE, m.PricePerKWh = f.Currency, f.CurrencyDecimals, f.PUE, f.PricePerKWh
 	m.PricePerGB, m.PricePerGBMonth, m.IdleEnergy = f.PricePerGB, f.PricePerGBMonth, f.IdleEnergy
 	m.WPrefill, m.WDecode, m.IdleWatts = f.WPrefill, f.WDecode, f.IdleWatts
+	if f.NodeOverheadFactor > 1 {
+		m.NodeOverhead = f.NodeOverheadFactor
+	}
+	if len(f.Tariff) > 0 {
+		m.Timezone = f.Location.String()
+		for _, t := range f.Tariff {
+			tm := tariffMethod{Name: t.Name, Price: t.Price, From: t.From, To: t.To}
+			for _, d := range t.Days {
+				tm.Days = append(tm.Days, strings.ToLower(d.String()[:3]))
+			}
+			m.Tariff = append(m.Tariff, tm)
+		}
+	}
 	if len(f.Periods) > 0 {
 		m.Periods = map[string]periodMethod{}
 		for k, p := range f.Periods {
@@ -140,10 +165,18 @@ type cellSnap struct {
 	NetIn           int64  `json:"net_in,omitempty"`
 	NetOut          int64  `json:"net_out,omitempty"`
 	StorageByteDays int64  `json:"storage_byte_days,omitempty"`
+	At              string `json:"at,omitempty"`
+	// Bands is the idle energy of the cell by tariff band, in millijoules.
+	Bands map[string]int64 `json:"bands,omitempty"`
 }
 
 func toSnap(c fluidsCell) cellSnap {
-	return cellSnap{c.Day, c.Org, c.Lab, c.Team, c.Project, c.User, c.Model, c.Pool, c.ActiveMJ, c.IdleMJ, c.FixedMinor, c.CreditMinor, c.NetIn, c.NetOut, c.StorageByteDays}
+	s := cellSnap{Day: c.Day, Org: c.Org, Lab: c.Lab, Team: c.Team, Project: c.Project, User: c.User, Model: c.Model, Pool: c.Pool, ActiveMJ: c.ActiveMJ, IdleMJ: c.IdleMJ,
+		FixedMinor: c.FixedMinor, CreditMinor: c.CreditMinor, NetIn: c.NetIn, NetOut: c.NetOut, StorageByteDays: c.StorageByteDays, Bands: c.bands}
+	if !c.At.IsZero() {
+		s.At = c.At.UTC().Format(time.RFC3339)
+	}
+	return s
 }
 
 // terms rebuilds the price terms a closed month was billed with.
@@ -153,12 +186,26 @@ func (m billingMethod) terms() *cellTerms {
 	for k, p := range m.Periods {
 		f.Periods[k] = config.FluidsPeriod{PUE: p.PUE, PricePerKWh: p.PricePerKWh, PricePerGB: p.PricePerGB, PricePerGBMonth: p.PricePerGBMonth}
 	}
+	if len(m.Tariff) > 0 {
+		f.Location = time.UTC
+		if loc, err := time.LoadLocation(m.Timezone); err == nil {
+			f.Location = loc
+		}
+		for _, t := range m.Tariff {
+			band := config.TariffBand{Name: t.Name, Price: t.Price, From: t.From, To: t.To}
+			for _, d := range t.Days {
+				band.Days = append(band.Days, config.WeekdayOf(d))
+			}
+			f.Tariff = append(f.Tariff, band)
+		}
+	}
 	markups := m.Markups
 	return &cellTerms{f: f, markup: func(org string) float64 { return markups[org] }}
 }
 
 func (c cellSnap) cell(t *cellTerms) fluidsCell {
-	return fluidsCell{terms: t, Day: c.Day, Consumer: energy.Consumer{Org: c.Org, Lab: c.Lab, Team: c.Team, Project: c.Project, User: c.User, Model: c.Model, Pool: c.Pool},
+	at, _ := time.Parse(time.RFC3339, c.At)
+	return fluidsCell{terms: t, At: at, bands: c.Bands, Day: c.Day, Consumer: energy.Consumer{Org: c.Org, Lab: c.Lab, Team: c.Team, Project: c.Project, User: c.User, Model: c.Model, Pool: c.Pool},
 		ActiveMJ: c.ActiveMJ, IdleMJ: c.IdleMJ, FixedMinor: c.FixedMinor, CreditMinor: c.CreditMinor, NetIn: c.NetIn, NetOut: c.NetOut, StorageByteDays: c.StorageByteDays}
 }
 

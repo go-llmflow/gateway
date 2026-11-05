@@ -76,6 +76,11 @@ type fluidsCell struct {
 	// terms are the price terms of a cell read from a closed month: the ones
 	// the month was closed with, not today's (nil: today's).
 	terms *cellTerms
+	// With a time-of-use tariff: At is the UTC hour the cell's active energy
+	// was used in (zero for a day), and bands the idle energy it carries, in
+	// millijoules, by the band it was used in ("" outside every band).
+	At    time.Time
+	bands map[string]int64
 }
 
 // cellTerms are the prices and markups a closed month was billed with.
@@ -138,16 +143,26 @@ func allocateFluidsPools(cells []store.EnergyCell, idle []store.EnergyIdle, f *c
 	var out []fluidsCell
 	byMonth := map[string][]int{} // month → indices into out
 	for _, c := range cells {
-		out = append(out, fluidsCell{Day: c.Day, Consumer: c.Consumer, ActiveMJ: c.MJ})
+		out = append(out, fluidsCell{Day: c.Day, Consumer: c.Consumer, ActiveMJ: c.MJ, At: c.At})
 		if len(c.Day) >= 7 {
 			byMonth[c.Day[:7]] = append(byMonth[c.Day[:7]], len(out)-1)
 		}
 	}
 	type mp struct{ month, pool string }
 	idleOf := map[mp]int64{}
+	idleBands := map[mp]map[string]int64{} // the same energy by tariff band
 	for _, i := range idle {
 		if len(i.Day) >= 7 {
-			idleOf[mp{i.Day[:7], i.Pool}] += i.MJ
+			k := mp{i.Day[:7], i.Pool}
+			idleOf[k] += i.MJ
+			band := ""
+			if len(f.Tariff) > 0 && !i.At.IsZero() {
+				band, _, _ = f.TariffBandAt(i.At)
+			}
+			if idleBands[k] == nil {
+				idleBands[k] = map[string]int64{}
+			}
+			idleBands[k][band] += i.MJ
 		}
 	}
 	keys := make([]mp, 0, len(idleOf))
@@ -203,17 +218,49 @@ func allocateFluidsPools(cells []store.EnergyCell, idle []store.EnergyIdle, f *c
 					break
 				}
 			}
-			parts := energy.Apportion(alloc[o], ws)
-			if parts == nil { // the organisation did nothing this month: its idle energy has no row yet
-				name := o
-				if o == "" {
-					name = Unallocated
-				}
-				out = append(out, fluidsCell{Day: m + "-01", Consumer: energy.Consumer{Org: name, Pool: pool}, IdleMJ: alloc[o]})
-				continue
+			// The organisation's idle energy, split by the band it was used in
+			// in the proportion of the pool's idle energy of each band (one
+			// band, "", without a tariff), then spread over its cells.
+			bandNames := make([]string, 0, len(idleBands[k]))
+			for b := range idleBands[k] {
+				bandNames = append(bandNames, b)
 			}
-			for j, i := range idx {
-				out[i].IdleMJ += parts[j]
+			sort.Strings(bandNames)
+			bw := make([]float64, len(bandNames))
+			for bi, b := range bandNames {
+				bw[bi] = float64(idleBands[k][b])
+			}
+			bandParts := energy.Apportion(alloc[o], bw)
+			if bandParts == nil {
+				bandNames, bandParts = []string{""}, []int64{alloc[o]}
+			}
+			for bi, b := range bandNames {
+				if bandParts[bi] == 0 {
+					continue
+				}
+				track := len(f.Tariff) > 0
+				parts := energy.Apportion(bandParts[bi], ws)
+				if parts == nil { // the organisation did nothing this month: its idle energy has no row yet
+					name := o
+					if o == "" {
+						name = Unallocated
+					}
+					nc := fluidsCell{Day: m + "-01", Consumer: energy.Consumer{Org: name, Pool: pool}, IdleMJ: bandParts[bi]}
+					if track {
+						nc.bands = map[string]int64{b: bandParts[bi]}
+					}
+					out = append(out, nc)
+					continue
+				}
+				for j, i := range idx {
+					out[i].IdleMJ += parts[j]
+					if track && parts[j] != 0 {
+						if out[i].bands == nil {
+							out[i].bands = map[string]int64{}
+						}
+						out[i].bands[b] += parts[j]
+					}
+				}
 			}
 		}
 	}
@@ -274,12 +321,41 @@ func daysIn(month string) float64 {
 	return float64(t.AddDate(0, 1, 0).Sub(t) / (24 * time.Hour))
 }
 
+// tariffCost prices a cell's energy at its time-of-use bands: its active
+// energy at the band of its hour, its idle energy at the bands it was used in.
+func tariffCost(c fluidsCell, f *config.Fluids, month string) float64 {
+	at := func(name string, mj int64) float64 {
+		p := f.Params(month)
+		p.PricePerKWh = f.BandPrice(name, month)
+		return p.Cost(mj)
+	}
+	band := ""
+	if !c.At.IsZero() {
+		band, _, _ = f.TariffBandAt(c.At)
+	}
+	cost := at(band, c.ActiveMJ)
+	var banded int64
+	names := make([]string, 0, len(c.bands))
+	for b := range c.bands {
+		names = append(names, b)
+	}
+	sort.Strings(names)
+	for _, b := range names {
+		cost += at(b, c.bands[b])
+		banded += c.bands[b]
+	}
+	return cost + at("", c.IdleMJ-banded)
+}
+
 func priceCell(c fluidsCell, f *config.Fluids, markup func(org string) float64) cellMoney {
 	if c.terms != nil {
 		f, markup = c.terms.f, c.terms.markup
 	}
 	month := c.month()
 	m := cellMoney{fluids: f.Params(month).Cost(c.ActiveMJ + c.IdleMJ)}
+	if len(f.Tariff) > 0 {
+		m.fluids = tariffCost(c, f, month)
+	}
 	perGB, perGBMonth := f.NetworkStoragePrices(month)
 	m.network = float64(c.NetIn+c.NetOut) / 1e9 * perGB
 	m.storage = float64(c.StorageByteDays) / 1e9 / daysIn(month) * perGBMonth
@@ -409,7 +485,11 @@ func (s *Server) allocatedEnergy(ctx context.Context, es store.EnergyStore, from
 // share.
 func (s *Server) allocatedEnergyBasis(ctx context.Context, es store.EnergyStore, from, to time.Time) ([]fluidsCell, map[string]map[string]map[string]float64, error) {
 	f := s.cfg.Fluids
-	cells, idle, err := es.EnergyBetween(ctx, from, to)
+	read := es.EnergyBetween
+	if len(f.Tariff) > 0 {
+		read = es.EnergyHourly // each hour is priced at its band
+	}
+	cells, idle, err := read(ctx, from, to)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -567,6 +647,15 @@ func (s *Server) fluidsReport(w http.ResponseWriter, r *http.Request, p *princip
 		return
 	}
 	s.stampMethod(w, view, p)
+	var meterRows []MeterVarianceRow
+	var preempt []PreemptionOut
+	if format == FormatJSON {
+		meterRows = s.meterVariance(view, p)
+		if preempt, err = s.preemptions(r.Context(), p, from, to); err != nil {
+			storeError(w, err)
+			return
+		}
+	}
 	if format == FormatCSV {
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		cw := csv.NewWriter(w)
@@ -586,5 +675,6 @@ func (s *Server) fluidsReport(w http.ResponseWriter, r *http.Request, p *princip
 		"from": from.UTC(), "to": to.UTC(), "group_by": dims, "idle_energy": f.IdleEnergy,
 		"pue": f.PUE, "price_per_kwh": f.PricePerKWh, "currency": f.Currency, "rows": rows,
 		"method": s.methodFor(p), "closed_months": closedFor(p, view.closed),
+		"meter_variance": meterRows, "preemptions": preempt,
 	})
 }

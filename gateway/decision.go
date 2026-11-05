@@ -94,6 +94,8 @@ type decisionData struct {
 	// read from a closed snapshot.
 	Method billingMethod
 	Closed []closedRef
+	// MeterVariance is the sub-meter readings against the measured IT energy.
+	MeterVariance []MeterVarianceRow
 	// EnergyRecon compares Slurm's energy (sacct) with the DCGM energy
 	// attributed, per partner; ReconNote says why it is empty when the input
 	// is set and unreadable.
@@ -248,6 +250,7 @@ func (s *Server) buildDecision(r *http.Request, p *principal, from, to time.Time
 	d.Chargeback = cb
 	if view != nil {
 		d.Closed = closedFor(p, view.closed)
+		d.MeterVariance = s.meterVariance(view, p)
 	}
 	// Slurm's energy against the DCGM energy attributed (#97).
 	if s.cfg.Slurm.SacctFile != "" {
@@ -710,6 +713,14 @@ func (d *decisionData) view() decisionView {
 			Total: money(c.TotalCostMinor), Provider: prov})
 	}
 	v.Method = d.Method.lines(d.Closed)
+	for _, m := range d.MeterVariance {
+		pct := "n/a"
+		if m.DifferencePct != nil {
+			pct = strconv.FormatFloat(*m.DifferencePct, 'f', 1, 64) + " %"
+		}
+		v.Method = append(v.Method, [2]string{"Sub-meter " + m.Month + " " + poolOrAll(m.Pool), strconv.FormatFloat(m.MeterKWh, 'f', 1, 64) + " kWh read, " +
+			strconv.FormatFloat(m.MeasuredKWh, 'f', 1, 64) + " kWh measured (difference " + pct + "; a check, nothing is rescaled)"})
+	}
 	v.HasRecon, v.ReconNote, v.Recon, v.ReconAssumption = d.HasRecon, d.ReconNote, d.reconViews(), reconAssumption
 	v.Quota = d.Quotas.view()
 	v.HasVariance, v.Variance, v.VarianceNote = true, d.varianceViews(), varianceNote(d.VarianceLimit)
