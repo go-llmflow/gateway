@@ -509,6 +509,10 @@ type Org struct {
 	CostCenter        string
 	LabCostCenter     map[string]string
 	ProjectCostCenter map[[2]string]string
+	// Markup is the fraction added to the organisation's fluids and fixed costs
+	// (billing { markup = 0.15 }): a full-cost or market price for a third
+	// party. 0 by default.
+	Markup float64
 }
 
 // CostCenterOf resolves the cost centre of a consumer: the project's, else

@@ -248,7 +248,11 @@ func (s *Server) lendingReport(w http.ResponseWriter, r *http.Request, p *princi
 }
 
 func (s *Server) lending(r *http.Request, from, to time.Time, ls store.LendingStore) (*lending.Result, error) {
-	ctx, cancel := context.WithTimeout(r.Context(), ReportTimeout)
+	return s.lendingCtx(r.Context(), from, to, ls)
+}
+
+func (s *Server) lendingCtx(parent context.Context, from, to time.Time, ls store.LendingStore) (*lending.Result, error) {
+	ctx, cancel := context.WithTimeout(parent, ReportTimeout)
 	defer cancel()
 	pools, err := s.lendingPools(ctx, from, to)
 	if err != nil {

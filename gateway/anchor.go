@@ -259,6 +259,17 @@ func (s *Server) openExports(ctx context.Context) error {
 	s.requestLogs = map[string]*requestLogger{}
 	for _, lc := range s.cfg.Logging {
 		l := newRequestLogger(lc, s.exports[lc.Destination], s.now)
+		if ms, ok := s.st.(store.MeterStore); ok {
+			// What the log writes to the export is stored for the organisations
+			// it holds (storage metering): bytes, per organisation and day.
+			l.meter = func(day, org string, n int64) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := ms.AddStorage(ctx, day, org, n); err != nil {
+					s.log.Error("storage metering: the request log's bytes were not recorded", "org", org, "bytes", n, "err", err)
+				}
+			}
+		}
 		for _, t := range lc.Teams {
 			s.requestLogs[t] = l
 		}

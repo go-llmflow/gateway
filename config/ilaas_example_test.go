@@ -17,8 +17,12 @@ func TestILaaSExample(t *testing.T) {
 	if !c.PoolSpareOnly("b300", "tiers") || c.PoolSpareOnly("b300", "etabA") {
 		t.Fatal("tiers is the only spare-only organisation")
 	}
-	if c.Fluids != nil && (len(c.Fluids.FixedCosts) != 1 || c.Fluids.FixedCosts[0].MonthlyFor("2026-12") != 1950) {
+	if c.Fluids != nil && (len(c.Fluids.FixedCosts) != 4 || c.Fluids.FixedCosts[0].MonthlyFor("2026-12") != 1950 ||
+		c.Fluids.FixedCosts[1].Charge != ChargeNonShareholders || c.Fluids.FixedCosts[2].Basis != BasisStorageGBMonth || c.Fluids.FixedCosts[3].Basis != BasisNetworkBytes) {
 		t.Fatalf("fixed costs: %+v", c.Fluids.FixedCosts)
+	}
+	if c.MarkupOf("tiers") != 0.15 || c.Fluids.PricePerGB != 0.02 || c.Fluids.PricePerGBMonth != 0.05 {
+		t.Fatalf("markup %v prices %v %v", c.MarkupOf("tiers"), c.Fluids.PricePerGB, c.Fluids.PricePerGBMonth)
 	}
 	if c.Fluids == nil || c.Fluids.IdleEnergy != "by_usage" {
 		t.Fatalf("fluids: %+v", c.Fluids)

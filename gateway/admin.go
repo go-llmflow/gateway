@@ -82,6 +82,7 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	h("GET /admin/fairshare", s.fairshareState)
 	h("GET /admin/audit", s.listAudit)
 	h("POST /admin/audit/verify", s.verifyAudit)
+	s.billingRoutes(h)
 	s.profileRoutes(h)
 	s.softQuotaRoutes(h)
 	s.uiRoutes(mux)

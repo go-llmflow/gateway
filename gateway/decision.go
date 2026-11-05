@@ -90,6 +90,10 @@ type decisionData struct {
 	HasFluids                     bool
 	Adoption                      *store.Adoption
 	Chargeback                    []ChargebackRow
+	// Method is what the cost figures were computed with; Closed the months
+	// read from a closed snapshot.
+	Method billingMethod
+	Closed []closedRef
 	// EnergyRecon compares Slurm's energy (sacct) with the DCGM energy
 	// attributed, per partner; ReconNote says why it is empty when the input
 	// is set and unreadable.
@@ -108,7 +112,8 @@ type decisionData struct {
 
 // buildDecision gathers the figures from the reports p may read.
 func (s *Server) buildDecision(r *http.Request, p *principal, from, to time.Time) (*decisionData, error) {
-	d := &decisionData{From: from, To: to, PrevFrom: from.Add(-to.Sub(from)), Generated: s.now().UTC(), MinUsers: s.adoptionMin(), CurrencyDecimals: 2}
+	d := &decisionData{From: from, To: to, PrevFrom: from.Add(-to.Sub(from)), Generated: s.now().UTC(), MinUsers: s.adoptionMin(), CurrencyDecimals: 2,
+		Method: s.billingMethod()}
 	if s.cfg.Fluids != nil {
 		d.CurrencyDecimals = s.cfg.Fluids.CurrencyDecimals
 	}
@@ -224,7 +229,7 @@ func (s *Server) buildDecision(r *http.Request, p *principal, from, to time.Time
 	// Fluids.
 	if f := s.cfg.Fluids; f != nil {
 		d.HasFluids, d.Currency = true, f.Currency
-		rows, err := s.fluidsData(r, p, from, to, []string{"org"})
+		rows, _, err := s.fluidsData(r, p, from, to, []string{"org"})
 		if err != nil {
 			return nil, err
 		}
@@ -235,15 +240,14 @@ func (s *Server) buildDecision(r *http.Request, p *principal, from, to time.Time
 			y := get(x.Org)
 			y.KWh, y.KWhIdle, y.FluidsCost = x.KWh, x.KWhIdle, x.Cost
 		}
-		if cb, err := s.chargeback(r, p, from, to); err == nil {
-			d.Chargeback = cb
-		} else {
-			return nil, err
-		}
-	} else if cb, err := s.chargeback(r, p, from, to); err == nil {
-		d.Chargeback = cb
-	} else {
+	}
+	cb, view, err := s.chargebackView(r, p, from, to)
+	if err != nil {
 		return nil, err
+	}
+	d.Chargeback = cb
+	if view != nil {
+		d.Closed = view.closed
 	}
 	// Slurm's energy against the DCGM energy attributed (#97).
 	if s.cfg.Slurm.SacctFile != "" {
@@ -382,14 +386,27 @@ func writeDecisionXLSX(w io.Writer, d *decisionData) error {
 		}
 	}
 	cb, err := sheet("Chargeback", []float64{14, 14, 18}, "Period from", "Period to", "Cost centre", "GPU-hours", "Energy (kWh)",
-		"Fluids cost", "Fixed cost", "Fluids currency", "Provider cost", "Provider currency")
+		"Fluids cost", "Fixed cost", "Network cost", "Storage cost", "Markup", "Credit", "Adjustment", "Total cost", "Fluids currency", "Provider cost", "Provider currency")
 	if err != nil {
 		return err
 	}
 	for _, c := range d.Chargeback {
 		if err := cb.AppendRow(xlsx.String(c.From.UTC().Format("2006-01-02")), xlsx.String(c.To.UTC().Format("2006-01-02")), xlsx.String(c.CostCenter),
-			num(c.GPUHours), num(c.KWh), money(c.FluidsCostMinor, d.CurrencyDecimals), money(c.FixedCostMinor, d.CurrencyDecimals), xlsx.String(c.FluidsCurrency),
+			num(c.GPUHours), num(c.KWh), money(c.FluidsCostMinor, d.CurrencyDecimals), money(c.FixedCostMinor, d.CurrencyDecimals),
+			money(c.NetworkCostMinor, d.CurrencyDecimals), money(c.StorageCostMinor, d.CurrencyDecimals), money(c.MarkupMinor, d.CurrencyDecimals),
+			money(c.CreditMinor, d.CurrencyDecimals), money(c.AdjustmentMinor, d.CurrencyDecimals), money(c.TotalCostMinor, d.CurrencyDecimals), xlsx.String(c.FluidsCurrency),
 			money(c.ProviderCostMinor, ProviderDecimals), xlsx.String(c.ProviderCurrency)); err != nil {
+			return err
+		}
+	}
+	// The method: what the figures were computed with (version, parameters),
+	// and the months that were read from a closed snapshot.
+	mt, err := sheet("Method", []float64{30, 60}, "Parameter", "Value")
+	if err != nil {
+		return err
+	}
+	for _, kv := range d.Method.lines(d.Closed) {
+		if err := mt.AppendRow(xlsx.String(kv[0]), xlsx.String(kv[1])); err != nil {
 			return err
 		}
 	}
@@ -509,6 +526,7 @@ type decisionView struct {
 	HasAdoption              bool
 	MinUsers                 int
 	Chargeback               []chargebackView
+	Method                   [][2]string
 	HasRecon                 bool
 	ReconNote                string
 	ReconAssumption          string
@@ -568,7 +586,41 @@ func signed(v float64) string {
 
 type matrixView struct{ Lender, Borrower, GPUHours string }
 
-type chargebackView struct{ Period, CostCenter, GPUHours, KWh, Fluids, Fixed, Provider string }
+type chargebackView struct {
+	Period, CostCenter, GPUHours, KWh, Fluids, Fixed, Metered, Markup, Credit, Adjustment, Total, Provider string
+}
+
+// lines lists the method as parameter/value pairs, for the report's method
+// section and sheet.
+func (m billingMethod) lines(closed []closedRef) [][2]string {
+	f := func(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
+	out := [][2]string{{"Method version", strconv.Itoa(m.MethodVersion)}, {"Gateway version", m.GatewayVersion},
+		{"Currency", m.Currency}, {"PUE", f(m.PUE)}, {"Price per kWh", f(m.PricePerKWh)}, {"Idle energy allocation", m.IdleEnergy},
+		{"Token weights (prefill, decode)", f(m.WPrefill) + ", " + f(m.WDecode)}, {"Idle watts per GPU", f(m.IdleWatts)},
+		{"Price per GB of network", f(m.PricePerGB)}, {"Price per GB-month of storage", f(m.PricePerGBMonth)}}
+	for _, c := range m.FixedCosts {
+		out = append(out, [2]string{"Fixed cost " + c.Name, f(c.Monthly) + " per month, pool " + poolOrAll(c.Pool) + ", charge " + c.Charge + ", basis " + c.Basis})
+	}
+	orgs := make([]string, 0, len(m.Markups))
+	for o := range m.Markups {
+		orgs = append(orgs, o)
+	}
+	sort.Strings(orgs)
+	for _, o := range orgs {
+		out = append(out, [2]string{"Markup " + o, f(m.Markups[o])})
+	}
+	for _, c := range closed {
+		out = append(out, [2]string{"Closed month " + c.Month, "read from its snapshot of " + c.ClosedAt.UTC().Format("2006-01-02") + " (method " + strconv.Itoa(c.MethodVersion) + ", gateway " + c.GatewayVersion + ", checksum " + c.Checksum + ")"})
+	}
+	return out
+}
+
+func poolOrAll(s string) string {
+	if s == "" {
+		return "all"
+	}
+	return s
+}
 
 func pctS(v float64) string { return strconv.FormatFloat(100*v, 'f', 1, 64) + " %" }
 
@@ -643,8 +695,21 @@ func (d *decisionData) view() decisionView {
 		if c.FixedCostMinor != 0 {
 			fx = c.FixedCost + " " + c.FluidsCurrency
 		}
-		v.Chargeback = append(v.Chargeback, chargebackView{c.From.UTC().Format("2006-01"), c.CostCenter, fmtNum(c.GPUHours), fmtNum(c.KWh), fl, fx, prov})
+		metered := ""
+		if c.NetworkCostMinor != 0 || c.StorageCostMinor != 0 {
+			metered = formatMinor(c.NetworkCostMinor+c.StorageCostMinor, d.CurrencyDecimals) + " " + c.FluidsCurrency
+		}
+		money := func(minor int64) string {
+			if minor == 0 {
+				return ""
+			}
+			return formatMinor(minor, d.CurrencyDecimals) + " " + c.FluidsCurrency
+		}
+		v.Chargeback = append(v.Chargeback, chargebackView{Period: c.From.UTC().Format("2006-01"), CostCenter: c.CostCenter, GPUHours: fmtNum(c.GPUHours), KWh: fmtNum(c.KWh),
+			Fluids: fl, Fixed: fx, Metered: metered, Markup: money(c.MarkupMinor), Credit: money(c.CreditMinor), Adjustment: money(c.AdjustmentMinor),
+			Total: money(c.TotalCostMinor), Provider: prov})
 	}
+	v.Method = d.Method.lines(d.Closed)
 	v.HasRecon, v.ReconNote, v.Recon, v.ReconAssumption = d.HasRecon, d.ReconNote, d.reconViews(), reconAssumption
 	v.Quota = d.Quotas.view()
 	v.HasVariance, v.Variance, v.VarianceNote = true, d.varianceViews(), varianceNote(d.VarianceLimit)
@@ -760,9 +825,11 @@ a.toc::after { content: " … " target-counter(attr(href url), page) }
 {{range .Recon}}<tr><td>{{.Org}}</td><td class="n">{{.Slurm}}</td><td class="n">{{.DCGM}}</td><td class="n">{{.Diff}}</td><td class="n">{{.Pct}}</td></tr>
 {{end}}</table>{{end}}
 <h2 id="d-chargeback">Chargeback</h2>
-{{if .Chargeback}}<table><tr><th>Month</th><th>Cost centre</th><th class="n">GPU-hours</th><th class="n">kWh</th><th class="n">Fluids</th><th class="n">Fixed costs</th><th class="n">Provider spend</th></tr>
-{{range .Chargeback}}<tr><td>{{.Period}}</td><td>{{.CostCenter}}</td><td class="n">{{.GPUHours}}</td><td class="n">{{.KWh}}</td><td class="n">{{.Fluids}}</td><td class="n">{{.Fixed}}</td><td class="n">{{.Provider}}</td></tr>
+{{if .Chargeback}}<table><tr><th>Month</th><th>Cost centre</th><th class="n">GPU-hours</th><th class="n">kWh</th><th class="n">Fluids</th><th class="n">Fixed costs</th><th class="n">Network and storage</th><th class="n">Markup</th><th class="n">Credit</th><th class="n">Adjustment</th><th class="n">Total</th><th class="n">Provider spend</th></tr>
+{{range .Chargeback}}<tr><td>{{.Period}}</td><td>{{.CostCenter}}</td><td class="n">{{.GPUHours}}</td><td class="n">{{.KWh}}</td><td class="n">{{.Fluids}}</td><td class="n">{{.Fixed}}</td><td class="n">{{.Metered}}</td><td class="n">{{.Markup}}</td><td class="n">{{.Credit}}</td><td class="n">{{.Adjustment}}</td><td class="n">{{.Total}}</td><td class="n">{{.Provider}}</td></tr>
 {{end}}</table>{{else}}<p>No chargeback rows.</p>{{end}}
+<h2 id="d-method">Method</h2>
+<p class="note">{{range .Method}}{{index . 0}}: {{index . 1}}. {{end}}</p>
 <h2 id="d-variance">Budget against actual</h2>
 <p class="note">{{.VarianceNote}}</p>
 {{if .Variance}}<table><tr><th>Month</th><th>Cost centre</th><th>Unit</th><th class="n">Budgeted</th><th class="n">Estimated</th><th class="n">Actual</th><th class="n">Against budget</th><th class="n">Against estimate</th><th>Flag</th></tr>
