@@ -75,6 +75,34 @@ fluids {
   # metered per organisation.
   price_per_gb       = 0.02
   price_per_gb_month = 0.05
+
+  # Time-of-use tariff: each hour is priced at the band its LOCAL start falls
+  # in (DST days included: 23 and 25 local hours); the hours no band covers pay
+  # price_per_kwh.
+  timezone = "Europe/Paris"
+  tariff "peak" {
+    price_per_kwh = 0.25
+    days          = ["mon", "tue", "wed", "thu", "fri"]
+    from          = "07:00"
+    to            = "23:00"
+  }
+  tariff "night" {
+    price_per_kwh = 0.08
+    from          = "23:00"
+    to            = "07:00"
+  }
+
+  # The energy beyond the GPUs (CPUs, memory, NVSwitch, NICs, fans): the
+  # fallback ratio of a node's energy to its GPUs', used when no BMC can be
+  # read (a BMC is configured per node, on its upstream, below).
+  node_overhead_factor = 1.12
+
+  # The racks' sub-meter, read each month: shown against the measured IT energy
+  # as a variance, never used to rescale anything.
+  meter "2026-10" {
+    kwh  = 41250.5
+    pool = "b300"
+  }
 }
 
 org "etabA" {
@@ -112,5 +140,12 @@ model "llama-3.3-70b" {
   upstream "b300-01" {
     base_url = "http://10.0.0.11:8000"
     dcgm_url = "http://10.0.0.11:9400/metrics"
+    # The node's BMC: its Redfish EnvironmentMetrics energy counter (EnergykWh)
+    # minus the GPUs' is the node's overhead, split like the GPUs' energy.
+    # https only; the password is a secret reference.
+    redfish_url           = "https://bmc-b300-01.example.org"
+    redfish_user          = "llmflow-monitor"
+    redfish_password_file = "/etc/llmflow/bmc-b300-01.pw"
+    redfish_ca_file       = "/etc/llmflow/site-ca.pem"
   }
 }

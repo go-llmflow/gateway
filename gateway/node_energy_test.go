@@ -317,3 +317,28 @@ func TestRedfishScraper(t *testing.T) {
 		t.Fatal("http accepted")
 	}
 }
+
+// vLLM's preemption counter: its two names, label sets added up, a missing
+// metric read as unknown.
+func TestParseMetricSumReadsThePreemptionCounter(t *testing.T) {
+	text := "# TYPE vllm:num_preemptions_total counter\n" +
+		"vllm:num_preemptions_total{engine=\"0\",model_name=\"a\"} 3.0\n" +
+		"vllm:num_preemptions_total{engine=\"1\",model_name=\"a\"} 4\n" +
+		"vllm:num_preemptions_created{engine=\"0\"} 1.7e9\n" +
+		"vllm:num_requests_waiting 5\n"
+	v, ok := parseMetricSum(strings.NewReader(text), preemptionMetrics...)
+	if !ok || v != 7 {
+		t.Fatalf("%v %v", v, ok)
+	}
+	// The name without the suffix.
+	if v, ok := parseMetricSum(strings.NewReader("vllm:num_preemptions 9\n"), preemptionMetrics...); !ok || v != 9 {
+		t.Fatalf("%v %v", v, ok)
+	}
+	if _, ok := parseMetricSum(strings.NewReader("vllm:num_requests_waiting 5\n"), preemptionMetrics...); ok {
+		t.Fatal("a missing metric was read")
+	}
+	// The queue parser is unchanged.
+	if parseWaiting(strings.NewReader("vllm:num_requests_waiting{engine=\"0\"} 3.0\nvllm:num_requests_waiting_by_reason 9\n")) != 3 || parseWaiting(strings.NewReader("x 1\n")) != -1 {
+		t.Fatal("parseWaiting changed")
+	}
+}

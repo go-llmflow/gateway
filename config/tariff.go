@@ -62,14 +62,15 @@ var weekdays = map[string]time.Weekday{"sun": time.Sunday, "mon": time.Monday, "
 // anything else.
 func WeekdayOf(s string) time.Weekday { return weekdays[strings.ToLower(s)] }
 
-// parseHour parses "HH:00" (0..24) into hours.
+// parseHour parses "HH:00" (00:00 to 24:00) into hours, strictly: five ASCII
+// characters, two digits, a colon, two zeros.
 func parseHour(s string) (int, error) {
-	var h, m int
-	var rest string
-	if n, _ := fmt.Sscanf(s, "%d:%d%s", &h, &m, &rest); n != 2 || len(s) != 5 || s[2] != ':' {
-		return 0, fmt.Errorf("%q: want HH:00", s)
+	digit := func(c byte) bool { return c >= '0' && c <= '9' }
+	if len(s) != 5 || !digit(s[0]) || !digit(s[1]) || s[2] != ':' || s[3] != '0' || s[4] != '0' {
+		return 0, fmt.Errorf("%q: want HH:00, a whole hour from 00:00 to 24:00", s)
 	}
-	if m != 0 || h < 0 || h > 24 {
+	h := int(s[0]-'0')*10 + int(s[1]-'0')
+	if h > 24 {
 		return 0, fmt.Errorf("%q: want a whole hour, 00:00 to 24:00", s)
 	}
 	return h, nil

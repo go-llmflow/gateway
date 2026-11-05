@@ -129,3 +129,18 @@ func TestTariffValidation(t *testing.T) {
 		}
 	}
 }
+
+func FuzzParseHour(f *testing.F) {
+	for _, s := range []string{"07:00", "24:00", "00:00", "7:00", "07:30", "07:00x", "", "-1:00", "２:00", "07:00\n"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		h, err := parseHour(s)
+		if err != nil {
+			return
+		}
+		if h < 0 || h > 24 || len(s) != 5 || s[2] != ':' || s[3:] != "00" {
+			t.Fatalf("%q parsed to %d", s, h)
+		}
+	})
+}
