@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -241,7 +242,7 @@ func contractRenameUsers(t *testing.T, s Store) {
 
 	// A collision: mig-bob@x.org exists already, so the batch is refused whole.
 	must(s.CreateUser(ctx, "mig-bob@x.org"))
-	renames := []UserRename{{"mig-alice", "mig-alice@x.org"}, {"mig-bob", "mig-bob@x.org"}}
+	renames := []UserRename{{From: "mig-alice", To: "mig-alice@x.org"}, {From: "mig-bob", To: "mig-bob@x.org"}}
 	coll, err := s.RenameUsers(ctx, renames)
 	if err != nil || len(coll) != 1 || coll[0].From != "mig-bob" {
 		t.Fatalf("collision: %v %v", coll, err)
@@ -325,6 +326,87 @@ func contractRenameUsers(t *testing.T, s Store) {
 	}
 }
 
+// RecordOnlyUsers and the record-only renames, on a fixture with many records:
+// people who were never stored users (JWT-only callers) have only spend records
+// under a bare name. The plan is one grouped query; stored users and scoped
+// names are not in it; a collision refuses the batch whole; a second run is a
+// no-op.
+func contractRecordOnly(t *testing.T, s Store) {
+	ctx := context.Background()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	const people, perPerson = 300, 7
+	at := time.Now().UTC()
+	var recs []Record
+	for i := 0; i < people; i++ {
+		for j := 0; j < perPerson; j++ {
+			recs = append(recs, Record{ID: fmt.Sprintf("ro-%d-%d", i, j), Time: at, Org: "orgA", Team: "etabA", User: fmt.Sprintf("jwt%03d", i), Model: "m", Pool: "p", PromptTokens: 1, Cost: 1})
+		}
+	}
+	must(s.CreateUser(ctx, "ro-stored"))
+	must(s.CreateUser(ctx, "jwt007@x.org")) // a stored user holding a name a record-only rename would take
+	recs = append(recs,
+		Record{ID: "ro-stored-1", Time: at, Org: "orgA", Team: "etabA", User: "ro-stored", Model: "m", Pool: "p", Cost: 1},
+		Record{ID: "ro-scoped-1", Time: at, Org: "orgA", Team: "etabA", User: "someone@y.org", Model: "m", Pool: "p", Cost: 1},
+		Record{ID: "ro-empty-1", Time: at, Org: "orgA", Team: "etabA", User: "", Model: "m", Pool: "p", Cost: 1})
+	must(s.InsertRecords(ctx, recs))
+
+	names, err := s.RecordOnlyUsers(ctx)
+	must(err)
+	got := map[string]bool{}
+	for _, n := range names {
+		got[n] = true
+	}
+	if len(names) != people || got["ro-stored"] || got["someone@y.org"] || got[""] || !got["jwt000"] {
+		t.Fatalf("RecordOnlyUsers: %d names (want %d), stored=%v scoped=%v", len(names), people, got["ro-stored"], got["someone@y.org"])
+	}
+	var plan []UserRename
+	for _, n := range names {
+		plan = append(plan, UserRename{From: n, To: n + "@x.org", RecordsOnly: true})
+	}
+	// jwt007 -> jwt007@x.org is taken by a stored user: the batch is refused whole.
+	coll, err := s.RenameUsers(ctx, plan)
+	if err != nil || len(coll) != 1 || coll[0].From != "jwt007" {
+		t.Fatalf("collision: %v %v", coll, err)
+	}
+	if after, _ := s.RecordOnlyUsers(ctx); len(after) != people {
+		t.Fatalf("a refused batch renamed records: %d names left", len(after))
+	}
+	// Without the colliding rename it is made, in one go.
+	var ok []UserRename
+	for _, r := range plan {
+		if r.From != "jwt007" {
+			ok = append(ok, r)
+		}
+	}
+	if coll, err = s.RenameUsers(ctx, ok); err != nil || len(coll) != 0 {
+		t.Fatalf("rename: %v %v", coll, err)
+	}
+	rows, err := s.Report(ctx, at.Add(-time.Hour), at.Add(time.Hour), []string{"user"})
+	must(err)
+	spent := map[string]float64{}
+	for _, r := range rows {
+		spent[r.User] += r.Cost
+	}
+	if spent["jwt000@x.org"] != perPerson || spent["jwt299@x.org"] != perPerson || spent["jwt000"] != 0 || spent["jwt007"] != perPerson {
+		t.Errorf("spend by user: jwt000@=%v jwt299@=%v jwt000=%v jwt007=%v", spent["jwt000@x.org"], spent["jwt299@x.org"], spent["jwt000"], spent["jwt007"])
+	}
+	if spent["ro-stored"] != 1 || spent["someone@y.org"] != 1 {
+		t.Errorf("a stored or scoped user's records changed: %v %v", spent["ro-stored"], spent["someone@y.org"])
+	}
+	// A second run is a no-op, and the plan is empty now but for the refused one.
+	if coll, err = s.RenameUsers(ctx, ok); err != nil || len(coll) != 0 {
+		t.Fatalf("second run: %v %v", coll, err)
+	}
+	if left, _ := s.RecordOnlyUsers(ctx); len(left) != 1 || left[0] != "jwt007" {
+		t.Fatalf("left after the run: %v", left)
+	}
+}
+
 func TestRenameUsersMemory(t *testing.T) {
 	m := NewMemory()
 	ctx := context.Background()
@@ -335,6 +417,7 @@ func TestRenameUsersMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	contractRenameUsers(t, m)
+	contractRecordOnly(t, m)
 }
 
 func TestRenameUsersPostgres(t *testing.T) {
@@ -360,4 +443,5 @@ func TestRenameUsersPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	contractRenameUsers(t, p)
+	contractRecordOnly(t, p)
 }

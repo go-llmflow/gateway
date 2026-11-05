@@ -381,6 +381,9 @@ type Store interface {
 	// one transaction (rename.go): idempotent, and refused as a whole, with
 	// the colliding renames returned, when a new name is already in use.
 	RenameUsers(ctx context.Context, renames []UserRename) ([]UserRename, error)
+	// RecordOnlyUsers lists the bare names spend records carry that are not
+	// stored users (JWT-only callers), by one grouped query (rename.go).
+	RecordOnlyUsers(ctx context.Context) ([]string, error)
 	// DisableUser disables a user and revokes their admin tokens.
 	DisableUser(ctx context.Context, name string) error
 	// LinkUserIdP binds a user to the identity provider and subject that

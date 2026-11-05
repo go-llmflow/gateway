@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-llmflow/gateway/audit"
 	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/store"
 )
@@ -153,4 +154,107 @@ func TestLegacyNamesAliasIsOptIn(t *testing.T) {
 		t.Errorf("the alias: %q", got)
 	}
 	_ = http.StatusOK
+}
+
+// A person who was never a stored user (a JWT-only caller) has spend records,
+// and maybe a budget, under the bare name of before v0.29.0. migrate-users
+// brings them under the scoped name, so /v1/me/usage and the per-user report
+// show one person, not two; a second run is a no-op; the audit chain is not
+// touched.
+func TestMigrateUsersRenamesJWTOnlyHistory(t *testing.T) {
+	a := newFakeIdP(t)
+	up := newFakeVLLM(t)
+	cfg := testConfig(up.URL())
+	cfg.AuthFailuresPerMinute = 0
+	cfg.JWTs = []*config.JWT{{Name: "a", Issuer: a.srv.URL, Audience: "llmflow", ClockSkew: time.Minute, MinRefresh: time.Hour, Orgs: []string{"etabA"},
+		Domain: "univ-a.fr", Maps: []config.JWTMap{{Claim: "groups", Value: "lab", Team: "etabA"}}}}
+	st := store.NewMemory()
+	ctx := context.Background()
+	if err := st.SetBudget(ctx, store.Budget{BudgetKey: store.BudgetKey{Kind: store.ScopeUser, Name: "carol"}, Period: store.Month, MaxCost: 5}); err != nil {
+		t.Fatal(err)
+	}
+	var recs []store.Record
+	for i := 0; i < 50; i++ {
+		recs = append(recs, store.Record{ID: "c" + string(rune('A'+i/26)) + string(rune('a'+i%26)), Time: time.Now().UTC(), Org: "etabA", Team: "etabA", User: "carol", Model: "llama", Pool: "b300", PromptTokens: 10, Cost: 0.02})
+	}
+	if err := st.InsertRecords(ctx, recs); err != nil {
+		t.Fatal(err)
+	}
+	log := audit.New(st, nil, nil)
+	if _, err := log.Append(ctx, store.AuditEntry{Kind: "system", Actor: "t", Roles: "[]", Action: "before", Target: "x", Before: "null", After: "null"}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, coll, err := MigrateUsers(ctx, st, "univ-a.fr", false)
+	if err != nil || len(coll) != 0 || len(plan) != 1 || plan[0] != (store.UserRename{From: "carol", To: "carol@univ-a.fr", RecordsOnly: true}) {
+		t.Fatalf("dry run: %v %v %v", plan, coll, err)
+	}
+	if n, _ := st.RecordOnlyUsers(ctx); len(n) != 1 {
+		t.Fatalf("a dry run changed records: %v", n)
+	}
+	if _, coll, err := MigrateUsers(ctx, st, "univ-a.fr", true); err != nil || len(coll) != 0 {
+		t.Fatalf("migrate: %v %v", coll, err)
+	}
+	if plan, coll, err := MigrateUsers(ctx, st, "univ-a.fr", true); err != nil || len(plan) != 0 || len(coll) != 0 {
+		t.Fatalf("second run: %v %v %v", plan, coll, err)
+	}
+	if _, err := log.Append(ctx, store.AuditEntry{Kind: "system", Actor: "t", Roles: "[]", Action: "after", Target: "x", Before: "null", After: "null"}); err != nil {
+		t.Fatal(err)
+	}
+	if rep, err := audit.Verify(ctx, st, nil); err != nil || !rep.OK() {
+		t.Fatalf("the audit chain after the migration: %v %+v", err, rep.Problems)
+	}
+
+	srv, err := New(cfg, st, Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg), CacheSaltKey: testSaltKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	gw := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() { gw.Close(); srv.Close(ctx) })
+	e := &env{t: t, srv: srv, gw: gw, st: st, cfg: cfg}
+	rs := map[string]any{"alg": "RS256", "kid": "k1", "typ": "JWT"}
+	jwt := a.sign(t, rs, a.claims(time.Now(), map[string]any{"sub": "c-1", "preferred_username": "carol", "groups": []string{"lab"}}))
+	// /v1/me/usage: the caller is carol@univ-a.fr, and the budget of her history is hers.
+	me := readAll(t, e.do("GET", "/v1/me/usage", jwt, ""))
+	if !strings.Contains(me, `"user":"carol@univ-a.fr"`) || !strings.Contains(me, `"budgets":[{`) {
+		t.Errorf("/v1/me/usage after the migration: %s", me)
+	}
+	// The per-user report: one person.
+	from, to := time.Now().AddDate(0, 0, -1).Format("2006-01-02"), time.Now().AddDate(0, 0, 2).Format("2006-01-02")
+	rep := readAll(t, e.do("GET", "/admin/spend?from="+from+"&to="+to+"&group_by=user", master, ""))
+	if !strings.Contains(rep, `"user":"carol@univ-a.fr"`) || strings.Contains(rep, `"user":"carol"`) {
+		t.Errorf("the per-user report: %s", rep)
+	}
+}
+
+// A record-only rename onto a name already in use is refused and listed, and
+// nothing is changed.
+func TestMigrateUsersRefusesRecordOnlyCollisions(t *testing.T) {
+	st := store.NewMemory()
+	ctx := context.Background()
+	if err := st.CreateUser(ctx, "dave@univ-a.fr"); err != nil {
+		t.Fatal(err)
+	}
+	recs := []store.Record{
+		{ID: "d1", Time: time.Now().UTC(), Org: "etabA", Team: "etabA", User: "dave", Model: "llama", Pool: "b300", Cost: 1},
+		{ID: "e1", Time: time.Now().UTC(), Org: "etabA", Team: "etabA", User: "erin", Model: "llama", Pool: "b300", Cost: 1},
+	}
+	if err := st.InsertRecords(ctx, recs); err != nil {
+		t.Fatal(err)
+	}
+	plan, coll, err := MigrateUsers(ctx, st, "univ-a.fr", true)
+	if err != nil || len(plan) != 2 || len(coll) != 1 || coll[0].From != "dave" || !coll[0].RecordsOnly {
+		t.Fatalf("collision: %v %v %v", plan, coll, err)
+	}
+	for _, r := range st.Records() {
+		if strings.Contains(r.User, "@") {
+			t.Errorf("a refused migration renamed %q", r.User)
+		}
+	}
+	if _, coll, _ := MigrateUsers(ctx, st, "univ-a.fr", false); len(coll) != 1 {
+		t.Errorf("a dry run names the collision too: %v", coll)
+	}
 }

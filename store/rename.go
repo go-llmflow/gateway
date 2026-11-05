@@ -2,6 +2,9 @@ package store
 
 import (
 	"context"
+	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -11,8 +14,77 @@ import (
 // person's name has to follow, or their budgets, spend and keys stay under a
 // name nobody logs in with any more.
 
-// UserRename is one user's new name.
-type UserRename struct{ From, To string }
+// UserRename is one user's new name. RecordsOnly marks a person who was never a
+// stored user (a JWT-only caller): only their spend records carry the name, and
+// only those are renamed.
+type UserRename struct {
+	From, To    string
+	RecordsOnly bool
+}
+
+// MaxRecordOnlyUsers bounds the names RecordOnlyUsers returns: more is an error,
+// not a truncated plan.
+const MaxRecordOnlyUsers = 100000
+
+// RecordOnlyUsers lists the bare names (no "@") that spend records carry and
+// that are not stored users, sorted. PostgreSQL answers it with one grouped
+// query; the records are not loaded.
+func (m *Memory) RecordOnlyUsers(_ context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Fail != nil {
+		return nil, m.Fail
+	}
+	m.usersInit()
+	seen := map[string]bool{}
+	for i := range m.records {
+		n := m.records[i].User
+		if n == "" || strings.Contains(n, "@") || seen[n] {
+			continue
+		}
+		if _, stored := m.u.users[n]; !stored {
+			seen[n] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	slices.Sort(out)
+	if len(out) > MaxRecordOnlyUsers {
+		return nil, errTooManyRecordOnly
+	}
+	return out, nil
+}
+
+var errTooManyRecordOnly = fmt.Errorf("store: more than %d record-only user names", MaxRecordOnlyUsers)
+
+// RecordOnlyUsers: see Memory.RecordOnlyUsers.
+func (p *Postgres) RecordOnlyUsers(ctx context.Context) ([]string, error) {
+	rows, err := p.pool.Query(ctx, `SELECT u.user_name FROM llmflow_usage u
+		WHERE u.user_name <> '' AND position('@' in u.user_name) = 0
+		AND NOT EXISTS (SELECT 1 FROM llmflow_users s WHERE s.name = u.user_name)
+		GROUP BY u.user_name ORDER BY u.user_name LIMIT $1`, MaxRecordOnlyUsers+1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) > MaxRecordOnlyUsers {
+		return nil, errTooManyRecordOnly
+	}
+	return out, nil
+}
 
 // userScoped reports whether a budget scope's Name is a person's.
 func userScoped(k ScopeKind) bool { return k == ScopeUser || k.Profile() }
@@ -31,11 +103,26 @@ func (m *Memory) RenameUsers(_ context.Context, rs []UserRename) ([]UserRename, 
 	m.usersInit()
 	var todo, coll []UserRename
 	targets := map[string]bool{}
+	var present map[string]bool // names the records carry, read once for the record-only renames
 	for _, r := range rs {
 		if r.From == r.To {
 			continue
 		}
-		if _, ok := m.u.users[r.From]; !ok {
+		_, stored := m.u.users[r.From]
+		if r.RecordsOnly {
+			if stored { // the stored user's own rename covers the records
+				continue
+			}
+			if present == nil {
+				present = map[string]bool{}
+				for i := range m.records {
+					present[m.records[i].User] = true
+				}
+			}
+			if !present[r.From] {
+				continue
+			}
+		} else if !stored {
 			continue
 		}
 		if targets[r.To] || m.userNameTakenLocked(r.To) {
@@ -49,6 +136,10 @@ func (m *Memory) RenameUsers(_ context.Context, rs []UserRename) ([]UserRename, 
 		return coll, nil
 	}
 	for _, r := range todo {
+		if r.RecordsOnly {
+			m.renameKeyedLocked(r.From, r.To)
+			continue
+		}
 		m.renameLocked(r.From, r.To)
 	}
 	return nil, nil
@@ -116,6 +207,12 @@ func (m *Memory) renameLocked(from, to string) {
 			k.Owner = to
 		}
 	}
+	m.renameKeyedLocked(from, to)
+}
+
+// renameKeyedLocked renames what is keyed by a person's name without a stored
+// user row: spend records, budgets, the ledger, profile assignments, warnings.
+func (m *Memory) renameKeyedLocked(from, to string) {
 	for i := range m.records {
 		if m.records[i].User == from {
 			m.records[i].User = to
@@ -172,10 +269,14 @@ const userBudgetKinds = `('user', 'profile_week', 'profile_session', 'profile_ov
 func (p *Postgres) RenameUsers(ctx context.Context, rs []UserRename) ([]UserRename, error) {
 	var coll []UserRename
 	err := pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
-		var todo []UserRename
+		var todo, recOnly []UserRename
 		targets := map[string]bool{}
 		for _, r := range rs {
 			if r.From == r.To {
+				continue
+			}
+			if r.RecordsOnly {
+				recOnly = append(recOnly, r)
 				continue
 			}
 			var has bool
@@ -204,8 +305,70 @@ func (p *Postgres) RenameUsers(ctx context.Context, rs []UserRename) ([]UserRena
 			targets[r.To] = true
 			todo = append(todo, r)
 		}
+		// Record-only names: set-based, three queries whatever their number.
+		var recTodo []UserRename
+		if len(recOnly) > 0 {
+			var from, to []string
+			for _, r := range recOnly {
+				from, to = append(from, r.From), append(to, r.To)
+			}
+			stored, err := nameSet(ctx, tx, `SELECT name FROM llmflow_users WHERE name = ANY($1)`, from)
+			if err != nil {
+				return err
+			}
+			present, err := nameSet(ctx, tx, `SELECT user_name FROM llmflow_usage WHERE user_name = ANY($1) GROUP BY user_name`, from)
+			if err != nil {
+				return err
+			}
+			taken, err := nameSet(ctx, tx, `SELECT n FROM (
+				SELECT name AS n FROM llmflow_users WHERE name = ANY($1)
+				UNION SELECT username FROM llmflow_user_idps WHERE username = ANY($1)
+				UNION SELECT name FROM llmflow_budgets_v2 WHERE name = ANY($1) AND kind IN `+userBudgetKinds+`
+				UNION SELECT name FROM llmflow_budget_ledger WHERE name = ANY($1) AND kind IN `+userBudgetKinds+`
+				UNION SELECT name FROM llmflow_budget_grants WHERE name = ANY($1) AND kind IN `+userBudgetKinds+`
+				UNION SELECT name FROM llmflow_budget_arming WHERE name = ANY($1) AND kind IN `+userBudgetKinds+`
+				UNION SELECT name FROM llmflow_budget_buckets WHERE name = ANY($1) AND kind IN `+userBudgetKinds+`
+				UNION SELECT user_name FROM llmflow_profile_assignments WHERE user_name = ANY($1)
+				UNION SELECT user_name FROM llmflow_warn_marks WHERE user_name = ANY($1)) t`, to)
+			if err != nil {
+				return err
+			}
+			for _, r := range recOnly {
+				if stored[r.From] || !present[r.From] {
+					continue
+				}
+				if taken[r.To] || targets[r.To] {
+					coll = append(coll, r)
+					continue
+				}
+				targets[r.To] = true
+				recTodo = append(recTodo, r)
+			}
+		}
 		if len(coll) > 0 {
 			return nil // nothing is changed; the transaction commits nothing
+		}
+		if len(recTodo) > 0 {
+			var from, to []string
+			for _, r := range recTodo {
+				from, to = append(from, r.From), append(to, r.To)
+			}
+			// Everything keyed by the name but a stored user's own rows, set-based.
+			for _, q := range []string{
+				`UPDATE llmflow_usage SET user_name = m.t FROM unnest($1::text[], $2::text[]) AS m(f, t) WHERE user_name = m.f`,
+				`UPDATE llmflow_budgets_v2 SET name = m.t FROM unnest($1::text[], $2::text[]) AS m(f, t) WHERE name = m.f AND kind IN ` + userBudgetKinds,
+				`UPDATE llmflow_budget_ledger SET name = m.t FROM unnest($1::text[], $2::text[]) AS m(f, t) WHERE name = m.f AND kind IN ` + userBudgetKinds,
+				`UPDATE llmflow_budget_grants SET name = m.t FROM unnest($1::text[], $2::text[]) AS m(f, t) WHERE name = m.f AND kind IN ` + userBudgetKinds,
+				`UPDATE llmflow_budget_arming SET name = m.t FROM unnest($1::text[], $2::text[]) AS m(f, t) WHERE name = m.f AND kind IN ` + userBudgetKinds,
+				`UPDATE llmflow_budget_buckets SET name = m.t FROM unnest($1::text[], $2::text[]) AS m(f, t) WHERE name = m.f AND kind IN ` + userBudgetKinds,
+				`UPDATE llmflow_profile_assignments SET user_name = m.t FROM unnest($1::text[], $2::text[]) AS m(f, t) WHERE user_name = m.f`,
+				`UPDATE llmflow_warn_marks SET user_name = m.t FROM unnest($1::text[], $2::text[]) AS m(f, t) WHERE user_name = m.f`,
+				`UPDATE llmflow_warn_events SET user_name = m.t FROM unnest($1::text[], $2::text[]) AS m(f, t) WHERE user_name = m.f`,
+			} {
+				if _, err := tx.Exec(ctx, q, from, to); err != nil {
+					return err
+				}
+			}
 		}
 		for _, r := range todo {
 			if _, err := tx.Exec(ctx, `INSERT INTO llmflow_users (name, created_at, disabled, origin, disabled_by)
@@ -241,4 +404,22 @@ func (p *Postgres) RenameUsers(ctx context.Context, rs []UserRename) ([]UserRena
 		return nil, err
 	}
 	return coll, nil
+}
+
+// nameSet runs a query that returns one name per row for a list of names.
+func nameSet(ctx context.Context, tx pgx.Tx, q string, names []string) (map[string]bool, error) {
+	rows, err := tx.Query(ctx, q, names)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out[n] = true
+	}
+	return out, rows.Err()
 }
