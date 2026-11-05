@@ -656,7 +656,12 @@ func (s *Server) fluidsReport(w http.ResponseWriter, r *http.Request, p *princip
 	s.stampMethod(w, view, p)
 	var meterRows []MeterVarianceRow
 	var preempt []PreemptionOut
+	var overhead []NodeOverheadOut
 	if format == FormatJSON {
+		if overhead, err = s.nodeOverhead(r.Context(), p, from, to); err != nil {
+			storeError(w, err)
+			return
+		}
 		meterRows = s.meterVariance(view, p)
 		if preempt, err = s.preemptions(r.Context(), p, from, to); err != nil {
 			storeError(w, err)
@@ -682,6 +687,6 @@ func (s *Server) fluidsReport(w http.ResponseWriter, r *http.Request, p *princip
 		"from": from.UTC(), "to": to.UTC(), "group_by": dims, "idle_energy": f.IdleEnergy,
 		"pue": f.PUE, "price_per_kwh": f.PricePerKWh, "currency": f.Currency, "rows": rows,
 		"method": s.methodFor(p), "closed_months": closedFor(p, view.closed),
-		"meter_variance": meterRows, "preemptions": preempt,
+		"meter_variance": meterRows, "preemptions": preempt, "node_overhead": overhead,
 	})
 }

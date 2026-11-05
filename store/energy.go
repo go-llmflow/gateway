@@ -79,6 +79,9 @@ type EnergyStore interface {
 	// PreemptionBetween sums, per month and pool, the intervals that start in
 	// [from, to) and the vLLM preemptions they saw.
 	PreemptionBetween(ctx context.Context, from, to time.Time) ([]PreemptionRow, error)
+	// OverheadBetween sums, per month, pool and source, the energy beyond the
+	// GPUs of the intervals that start in [from, to).
+	OverheadBetween(ctx context.Context, from, to time.Time) ([]OverheadRow, error)
 	// LastEnergy is the end of the newest interval of an upstream (zero when none).
 	LastEnergy(ctx context.Context, upstream string) (time.Time, error)
 }
@@ -496,6 +499,70 @@ func (p *Postgres) PreemptionBetween(ctx context.Context, from, to time.Time) ([
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (PreemptionRow, error) {
 		var x PreemptionRow
 		err := r.Scan(&x.Month, &x.Pool, &x.Intervals, &x.Known, &x.WithPreemptions, &x.Preemptions, &x.TotalMJ, &x.PreemptedMJ)
+		return x, err
+	})
+}
+
+// OverheadRow is the energy beyond the GPUs of a month and pool, by where it
+// comes from (EnergyInterval.OverheadSource: "redfish", "redfish_power",
+// "factor"). Intervals with none are not in it.
+type OverheadRow struct {
+	Month, Pool, Source string
+	Intervals, MJ       int64
+}
+
+func (m *Memory) OverheadBetween(ctx context.Context, from, to time.Time) ([]OverheadRow, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.Fail != nil {
+		return nil, m.Fail
+	}
+	type k struct{ month, pool, src string }
+	agg := map[k]*OverheadRow{}
+	for _, iv := range m.en.ivs {
+		if iv.Start.Before(from) || !iv.Start.Before(to) || iv.OverheadMJ == 0 && iv.OverheadSource == "" {
+			continue
+		}
+		key := k{iv.Start.UTC().Format("2006-01"), iv.Pool, iv.OverheadSource}
+		a := agg[key]
+		if a == nil {
+			a = &OverheadRow{Month: key.month, Pool: key.pool, Source: key.src}
+			agg[key] = a
+		}
+		a.Intervals++
+		a.MJ += iv.OverheadMJ
+	}
+	out := make([]OverheadRow, 0, len(agg))
+	for _, a := range agg {
+		out = append(out, *a)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Month != b.Month {
+			return a.Month < b.Month
+		}
+		if a.Pool != b.Pool {
+			return a.Pool < b.Pool
+		}
+		return a.Source < b.Source
+	})
+	return out, nil
+}
+
+func (p *Postgres) OverheadBetween(ctx context.Context, from, to time.Time) ([]OverheadRow, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT to_char(ts_start AT TIME ZONE 'UTC', 'YYYY-MM'), pool, overhead_src, count(*), coalesce(sum(overhead_mj), 0)::bigint
+		FROM llmflow_energy_intervals WHERE ts_start >= $1 AND ts_start < $2 AND (overhead_mj <> 0 OR overhead_src <> '')
+		GROUP BY 1, pool, overhead_src ORDER BY 1, pool, overhead_src`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (OverheadRow, error) {
+		var x OverheadRow
+		err := r.Scan(&x.Month, &x.Pool, &x.Source, &x.Intervals, &x.MJ)
 		return x, err
 	})
 }

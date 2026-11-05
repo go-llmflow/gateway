@@ -76,13 +76,18 @@ func (sc *RedfishScraper) client() (*redfish.Client, error) {
 	return sc.rc, sc.err
 }
 
-// Scrape reads the BMC once.
-func (sc *RedfishScraper) Scrape(ctx context.Context, now time.Time) (Reading, error) {
+// Read reads the BMC once: its energy counter when it has one, else its power.
+func (sc *RedfishScraper) Read(ctx context.Context) (redfish.Reading, error) {
 	rc, err := sc.client()
 	if err != nil {
-		return Reading{}, err
+		return redfish.Reading{}, err
 	}
-	r, err := rc.Read(ctx)
+	return rc.Read(ctx)
+}
+
+// Scrape reads the BMC's energy counter once.
+func (sc *RedfishScraper) Scrape(ctx context.Context, now time.Time) (Reading, error) {
+	r, err := sc.Read(ctx)
 	if err != nil {
 		return Reading{}, err
 	}
