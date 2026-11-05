@@ -648,6 +648,17 @@ type Upstream struct {
 	// DcgmURL is the node's NVIDIA DCGM exporter, scraped for energy when a
 	// fluids block exists ("" for none).
 	DcgmURL string
+	// The node's BMC, for the energy beyond the GPUs (nodeenergy.go):
+	// RedfishURL is its Chassis EnvironmentMetrics resource, read with HTTP
+	// basic authentication (RedfishUser and the secret reference
+	// RedfishPasswordFile), over TLS verified against RedfishCAFile when set
+	// (else the system roots). NodeOverheadFactor, when > 0, overrides the
+	// fluids block's fallback for this node.
+	RedfishURL          string
+	RedfishUser         string
+	RedfishPasswordFile string
+	RedfishCAFile       string
+	NodeOverheadFactor  float64
 }
 
 // ModelGroup is a model name exposed to clients, served by one or more

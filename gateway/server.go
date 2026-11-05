@@ -38,6 +38,9 @@ type Secrets struct {
 	// UpstreamKeys maps an upstream key_file path to the vLLM --api-key
 	// it holds.
 	UpstreamKeys map[string]string
+	// RedfishPasswords maps a redfish_password_file reference to the BMC
+	// password it holds.
+	RedfishPasswords map[string]string
 	// MetricsToken, when set, is required as a bearer token on /metrics.
 	MetricsToken string
 	// CacheSaltKey is the HMAC key the per-tenant cache_salt values are
