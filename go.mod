@@ -14,6 +14,7 @@ require (
 	github.com/go-pdfkit/html2pdf v0.4.0
 	github.com/go-pdfkit/pdfkit v0.20.0
 	github.com/go-plot/plot v0.3.0
+	github.com/go-redfish/redfish v0.1.0
 	github.com/go-volumes/s3 v0.2.2
 	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/jackc/pgx/v5 v5.12.0
