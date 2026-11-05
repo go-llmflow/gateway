@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -145,6 +146,13 @@ func toolAllowed(patterns []string, full string) bool {
 		}
 	}
 	return false
+}
+
+// mcpOrgOK: the organisation may use this tool server at all (orgs of its
+// mcp_server block), whatever its teams' patterns say.
+func (s *Server) mcpOrgOK(server, org string) bool {
+	m := s.mcpServers[server]
+	return m != nil && slices.Contains(m.cfg.Orgs, org)
 }
 
 func serverAllowed(patterns []string, server string) bool {
@@ -362,7 +370,7 @@ func (s *Server) mcpListTools(ctx context.Context, q *mcpReq, key store.Key) {
 	}
 	out := []json.RawMessage{}
 	for _, name := range s.mcpOrder {
-		if !serverAllowed(patterns, name) {
+		if !s.mcpOrgOK(name, key.Org) || !serverAllowed(patterns, name) {
 			continue
 		}
 		srv := s.mcpServers[name]
@@ -432,7 +440,7 @@ func (s *Server) mcpCallTool(ctx context.Context, q *mcpReq, key store.Key, r *h
 	}
 	srvName, toolName, found := strings.Cut(name, ".")
 	srv := s.mcpServers[srvName]
-	if !found || srv == nil || !toolAllowed(patterns, name) {
+	if !found || srv == nil || !s.mcpOrgOK(srvName, key.Org) || !toolAllowed(patterns, name) {
 		s.met.toolCalls.add(1, key.Team, "", "denied")
 		unknown()
 		return
@@ -594,7 +602,12 @@ func (s *Server) getTeamTools(w http.ResponseWriter, r *http.Request, p *princip
 	if listed == nil {
 		listed = []string{}
 	}
-	servers := append([]string{}, s.mcpOrder...)
+	servers := []string{}
+	for _, n := range s.mcpOrder {
+		if s.mcpOrgOK(n, t.Org) {
+			servers = append(servers, n)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"team": t.Name, "tools": listed, "servers": servers})
 }
 
@@ -624,6 +637,14 @@ func (s *Server) setTeamTools(w http.ResponseWriter, r *http.Request, p *princip
 	if !p.orgAdmin(t.Org) {
 		forbidden(w)
 		return
+	}
+	// A pattern may name only tool servers the team's organisation may use
+	// ("*" is every one of them, no more).
+	for _, pat := range in.Tools {
+		if srv, _, ok := strings.Cut(pat, "."); ok && !s.mcpOrgOK(srv, t.Org) {
+			apiError(w, http.StatusBadRequest, "invalid_request_error", "tool pattern "+strconv.Quote(pat)+": the tool server is not available to organisation "+strconv.Quote(t.Org))
+			return
+		}
 	}
 	if err := s.st.SetTeamTools(r.Context(), t.Name, in.Tools); err != nil {
 		storeError(w, err)

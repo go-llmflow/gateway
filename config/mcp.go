@@ -25,6 +25,10 @@ type MCPServer struct {
 	Timeout  time.Duration
 	// MaxResponseBytes bounds one response of the server.
 	MaxResponseBytes int64
+	// Orgs are the organisations whose teams may be given this server's tools.
+	// The gateway calls the server with its own token: without this, an
+	// administrator of any organisation could reach every tool server.
+	Orgs []string
 }
 
 type mcpServerHCL struct {
@@ -40,6 +44,8 @@ type mcpServerHCL struct {
 	TimeoutRange   hcl.Range `hcl:"timeout,attr_value_range"`
 	MaxResponse    *int64    `hcl:"max_response_bytes,optional"`
 	MaxResponseRng hcl.Range `hcl:"max_response_bytes,attr_value_range"`
+	Orgs           []string  `hcl:"orgs"`
+	OrgsRange      hcl.Range `hcl:"orgs,attr_value_range"`
 }
 
 var mcpServerName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
@@ -50,7 +56,7 @@ var MCPProtocols = []string{"2026-07-28", "2025-11-25", "2025-06-18", "2025-03-2
 // MaxMCPServers bounds the mcp_server blocks.
 const MaxMCPServers = 64
 
-func (v *validator) mcpServers(raw []mcpServerHCL) []MCPServer {
+func (v *validator) mcpServers(raw []mcpServerHCL, orgs map[string]bool) []MCPServer {
 	var out []MCPServer
 	names := map[string]bool{}
 	if len(raw) > MaxMCPServers {
@@ -80,6 +86,13 @@ func (v *validator) mcpServers(raw []mcpServerHCL) []MCPServer {
 		}
 		if !known {
 			v.errf(m.ProtocolRange, "Invalid protocol", "%s: protocol %q: want one of %v", where, s.Protocol, MCPProtocols)
+		}
+		s.Orgs = m.Orgs
+		if len(m.Orgs) == 0 {
+			v.errf(m.OrgsRange, "Empty orgs", "%s: orgs = [...] names the organisations whose teams may use this tool server (the gateway calls it with its own token)", where)
+		}
+		for _, o := range m.Orgs {
+			v.known(orgs, o, m.OrgsRange, "organisation", where+" orgs")
 		}
 		if msg := mcpURLProblem(s.URL, s.TokenFile != ""); msg != "" {
 			v.errf(m.URLRange, "Invalid url", "%s: %s", where, msg)
