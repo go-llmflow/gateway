@@ -372,6 +372,11 @@ type Store interface {
 	CreateUser(ctx context.Context, name string) error
 	GetUser(ctx context.Context, name string) (User, error)
 	ListUsers(ctx context.Context) ([]User, error)
+	// CreateSCIMUser, DisableSCIMUser and MarkSCIMOrigin are the only ways SCIM
+	// creates, disables or claims a user: they act on users with Origin "scim".
+	CreateSCIMUser(ctx context.Context, name string) error
+	DisableSCIMUser(ctx context.Context, name string) error
+	MarkSCIMOrigin(ctx context.Context, name string) error
 	// DisableUser disables a user and revokes their admin tokens.
 	DisableUser(ctx context.Context, name string) error
 	// LinkUserIdP binds a user to the identity provider and subject that

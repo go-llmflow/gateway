@@ -117,6 +117,12 @@ type User struct {
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
 	Disabled  bool      `json:"disabled"`
+	// Origin is "scim" for a user SCIM provisioned (the only users it may
+	// enable, disable or retire), "" otherwise. DisabledBy is who disabled
+	// the user ("admin", "scim"; "" before v0.28.2): SCIM re-enables only
+	// what SCIM disabled.
+	Origin     string `json:"origin,omitempty"`
+	DisabledBy string `json:"-"`
 }
 
 // IdPLink is the identity provider (by its configured name) and the subject

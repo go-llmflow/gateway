@@ -266,6 +266,12 @@ type SCIM struct {
 	BaseURL string
 	// Groups maps a group's displayName (without case) to a team role.
 	Groups []SCIMGroup
+	// Domain and Domains: the institutions' domains this provisioning client
+	// may name users of. A provisioned user is local@domain; Domain also scopes
+	// the unscoped userNames of accounts that predate scoped names, and a stored
+	// user with that name is the same person.
+	Domain  string
+	Domains []string
 }
 
 // SCIMGroup gives the members of a provisioned group Role on Team.

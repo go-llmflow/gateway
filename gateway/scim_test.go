@@ -18,7 +18,7 @@ const scimToken = "scim-token-0123456789abcdef0123456789"
 func scimConfig(t *testing.T) *config.Config {
 	cfg := testConfig("http://127.0.0.1:1")
 	cfg.AuthFailuresPerMinute = 0
-	cfg.SCIM = &config.SCIM{BaseURL: "https://llm.example.org/scim/v2", Groups: []config.SCIMGroup{
+	cfg.SCIM = &config.SCIM{Domain: "example.org", BaseURL: "https://llm.example.org/scim/v2", Groups: []config.SCIMGroup{
 		{Name: "Lab Physics", Team: "etabA", Role: "member"},
 		{Name: "lab leads", Team: "etabA", Role: "team_admin"},
 		{Name: "Ghost Lab", Team: "no-such-team", Role: "member"},
@@ -119,7 +119,7 @@ func TestSCIMProvisioning(t *testing.T) {
 
 	alice := e.scimOK(201, "POST", "/Users", strings.Replace(userBody, "%s", "alice@example.org", 1))["id"].(string)
 	bob := e.scimOK(201, "POST", "/Users", strings.Replace(userBody, "%s", "bob", 1))["id"].(string)
-	if e.disabled("alice@example.org") || e.disabled("bob") {
+	if e.disabled("alice@example.org") || e.disabled("bob@example.org") {
 		t.Fatal("provisioned users are not enabled gateway users")
 	}
 	if got, m := e.scim("POST", "/Users", strings.Replace(userBody, "%s", "carol smith", 1)); got != 400 || m["scimType"] != "invalidValue" {
@@ -195,7 +195,7 @@ func TestSCIMProvisioning(t *testing.T) {
 	// Deleting a group removes its roles.
 	carol := e.scimOK(201, "POST", "/Users", strings.Replace(userBody, "%s", "carol", 1))["id"].(string)
 	e.scimOK(200, "PUT", "/Groups/"+g, `{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"Lab Physics","members":[{"value":"`+carol+`"}]}`)
-	cm := store.Binding{User: "carol", Role: store.RoleMember, Team: "etabA"}
+	cm := store.Binding{User: "carol@example.org", Role: store.RoleMember, Team: "etabA"}
 	if !e.hasBinding(cm) {
 		t.Fatal("PUT group gives no role")
 	}

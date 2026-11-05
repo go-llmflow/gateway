@@ -451,6 +451,12 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	if s.scimBackend != nil {
+		// Users stored before users had an origin (v0.30.0) that SCIM gave
+		// roles to, and no one else did, are SCIM's; any other stays out of
+		// its reach.
+		if err := s.scimBackend.claimLegacy(ctx); err != nil {
+			s.log.Error("scim: claiming provisioned users failed", "err", err)
+		}
 		// Repair what a change interrupted half-way left behind.
 		if err := s.scimBackend.reconcile(ctx); err != nil {
 			s.log.Error("scim: reconciliation at start failed", "err", err)

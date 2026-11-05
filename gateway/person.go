@@ -34,6 +34,14 @@ func (s *Server) scopedPerson(ctx context.Context, tok *oidc.Token, scopes []str
 	if !config.ValidUserName(name) {
 		return "", oidc.ErrBadName
 	}
+	return s.legacyAlias(ctx, name, domain)
+}
+
+// legacyAlias is name, or, when the issuer has a domain and name is local@domain,
+// the stored user with the unscoped name: the same person, created before scoped
+// names, who keeps their name until renamed. A user stored under the scoped
+// name wins.
+func (s *Server) legacyAlias(ctx context.Context, name, domain string) (string, error) {
 	if domain == "" || !strings.HasSuffix(name, "@"+domain) {
 		return name, nil
 	}

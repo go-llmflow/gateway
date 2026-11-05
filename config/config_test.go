@@ -320,6 +320,7 @@ vault {
 
 func TestParseSCIM(t *testing.T) {
 	c, err := parse(valid + `scim {
+  domain     = "example.org"
   token_file = "/etc/llmflow/scim.token"
   base_url   = "https://llm.example.org/scim/v2/"
   group "Lab Physics" { team = "etabA" }
