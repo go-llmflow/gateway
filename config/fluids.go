@@ -57,6 +57,17 @@ type Fluids struct {
 	// (hosting of the racks: space, power distribution, network). They are
 	// spread over the organisations on the basis of the idle energy.
 	FixedCosts []FixedCost
+	// Tariff is the time-of-use bands (tariff.go) in Location (UTC when no
+	// timezone is set); with none, Params' price applies to every hour.
+	Tariff   []TariffBand
+	Location *time.Location
+	// NodeOverheadFactor is the default ratio of a node's energy to its GPUs'
+	// (CPUs, memory, NVSwitch, NICs, fans), ≥ 1; used when no BMC reading is
+	// available. 1: the GPUs' energy is all that is metered.
+	NodeOverheadFactor float64
+	// Meters are the monthly readings of the racks' sub-meter, kept against
+	// the measured IT energy as a variance: never used to rescale anything.
+	Meters []SubMeter
 	// PricePerGB prices the network a request used (bytes in plus bytes out,
 	// 1 GB = 10^9 bytes) and PricePerGBMonth the storage the gateway keeps for
 	// an organisation (1 GB-month = 10^9 bytes kept for a whole month), in
@@ -190,6 +201,12 @@ type fluidsHCL struct {
 	GBMRange       hcl.Range         `hcl:"price_per_gb_month,attr_value_range"`
 	Periods        []fluidsPeriodHCL `hcl:"period,block"`
 	FixedCosts     []fixedCostHCL    `hcl:"fixed_cost,block"`
+	Timezone       *string           `hcl:"timezone,optional"`
+	TimezoneRange  hcl.Range         `hcl:"timezone,attr_value_range"`
+	Tariffs        []tariffHCL       `hcl:"tariff,block"`
+	NodeOverhead   *float64          `hcl:"node_overhead_factor,optional"`
+	NodeOverRange  hcl.Range         `hcl:"node_overhead_factor,attr_value_range"`
+	Meters         []subMeterHCL     `hcl:"meter,block"`
 	DefRange       hcl.Range         `hcl:",def_range"`
 }
 
@@ -250,6 +267,12 @@ func (v *validator) fluids(raw *fileHCL, c *Config) {
 				continue
 			}
 			g.Upstreams[j].DcgmURL = *u.DcgmURL
+		}
+		for j, u := range m.Upstreams {
+			if j >= len(g.Upstreams) {
+				break
+			}
+			v.upstreamNodeEnergy(u, &g.Upstreams[j])
 		}
 	}
 	f := raw.Fluids
@@ -331,6 +354,8 @@ func (v *validator) fluids(raw *fileHCL, c *Config) {
 		out.Periods[p.Month] = o
 	}
 	v.fixedCosts(f, out, c)
+	v.tariff(f, out)
+	v.nodeEnergy(f, out, c)
 	c.Fluids = out
 }
 

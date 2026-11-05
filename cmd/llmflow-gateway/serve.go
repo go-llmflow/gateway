@@ -187,6 +187,20 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 		}
 		s.UpstreamKeys[f] = k
 	}
+	// The BMC passwords of the nodes (redfish_password_file), by reference.
+	s.RedfishPasswords = map[string]string{}
+	for _, g := range c.ModelGroups {
+		for _, u := range g.Upstreams {
+			if u.RedfishPasswordFile == "" {
+				continue
+			}
+			var pw string
+			if err := get("redfish_password_file", u.RedfishPasswordFile, &pw); err != nil {
+				return s, err
+			}
+			s.RedfishPasswords[u.RedfishPasswordFile] = pw
+		}
+	}
 	// Amazon Bedrock credentials: a trial signature proves a key pair is well
 	// formed (the error names a model and an organisation, no value).
 	if err := gateway.CheckBedrockSecrets(c, s.UpstreamKeys); err != nil {
