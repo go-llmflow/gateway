@@ -1843,7 +1843,19 @@ jwt "partners" {                            # inference tokens, routed by iss
   maps, `orgs` (a `map` to a team of another organisation is a configuration
   error) and `accept`. A token is routed to its block by its `iss`; an unknown
   `iss` is a 401, and no other issuer's key set is tried. With one issuer the
-  path is unchanged (same allocations, measured below).
+  path is unchanged: `BenchmarkJWTLookup` (`gateway/jwt_bench_test.go`, one
+  issuer, Apple M4 Max, single run, `-benchmem`) against a clean clone of
+  v0.25.2:
+
+  | path | v0.25.2 | v0.27.0 |
+  | --- | --- | --- |
+  | cache hit | 1 alloc, 640 B | 1 alloc, 640 B |
+  | cache miss (signature, mapping) | 53 allocs, about 4.7 kB | 53 allocs, about 4.7 kB |
+
+  Allocation counts are exact; the times (about 0.38 µs and 27 µs, equal within
+  the noise) were taken at a 1-minute load of 8 to 12 and are **not** a
+  measurement: the interleaved `abbench` run with `--max-load 4` is still to be
+  made on a quiet machine.
 - **In front of a SAML federation** ([go-authn/bridge](https://github.com/go-authn/bridge)):
   the bridge can already restrict who may log in, by IdP, with
   `saml { idps = ["<entityID>", ...] }` (README: "restrict; one entry skips the

@@ -50,6 +50,9 @@ func (s *Server) startJWT(ctx context.Context) error {
 		return fmt.Errorf("gateway: jwt: %w", err)
 	}
 	s.jwtSet = set
+	if len(vs) == 1 {
+		s.jwtOne = s.jwtCfg[vs[0].Issuer()]
+	}
 	return nil
 }
 
@@ -108,7 +111,12 @@ func (s *Server) lookupJWT(ctx context.Context, raw string) (store.Key, error) {
 	if err != nil {
 		return store.Key{}, err
 	}
-	jc := s.jwtCfg[tok.Issuer()]
+	// With one issuer there is nothing to look up (reading the issuer from the
+	// token would cost an allocation on every verification).
+	jc := s.jwtOne
+	if jc == nil {
+		jc = s.jwtCfg[tok.Issuer()]
+	}
 	if jc == nil {
 		return store.Key{}, errJWTUnmapped
 	}

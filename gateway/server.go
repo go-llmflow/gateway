@@ -137,6 +137,7 @@ type Server struct {
 	// jwtCache keeps verified tokens until their expiry or the key TTL.
 	jwtSet    *oidc.Set
 	jwtCfg    map[string]*config.JWT // by verified issuer
+	jwtOne    *config.JWT            // the only issuer's, when there is one
 	jwtCache  *keyCache
 	jwtClient *http.Client
 	// sso holds the admin login client, sessions and logins in progress.
