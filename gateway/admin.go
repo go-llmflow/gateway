@@ -106,6 +106,8 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 
 func storeError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, errPeopleForbidden):
+		forbidden(w)
 	case errors.Is(err, store.ErrNotFound):
 		apiError(w, http.StatusNotFound, "not_found", "not found")
 	case errors.Is(err, store.ErrExists):

@@ -887,6 +887,11 @@ func ValidUserName(s string) bool {
 	if len(s) == 0 || len(s) > 128 {
 		return false
 	}
+	// A name is local or local@domain: one "@" at most, with something on each
+	// side. "a@b@c" has two scopes and no owner.
+	if n := strings.Count(s, "@"); n > 1 || n == 1 && (s[0] == '@' || s[len(s)-1] == '@') {
+		return false
+	}
 	for _, r := range s {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '.', r == '-', r == '@', r == '+':

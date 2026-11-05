@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -70,7 +71,11 @@ func (b *reportBundle) inferenceByOrg() map[string]float64 {
 
 func (s *Server) buildBundle(r *http.Request, p *principal, from, to time.Time) (*reportBundle, error) {
 	b := &reportBundle{From: from, To: to, PrevFrom: from.Add(-to.Sub(from)), Generated: s.now().UTC(), By: map[string][]store.ReportRow{}}
-	base, err := s.visibleReport(r, p, from, to, []string{"org", "lab", "team", "project", "user", "profile", "model", "pool"})
+	baseDims := []string{"org", "lab", "team", "project", "user", "profile", "model", "pool"}
+	if p.peopleBlind() { // a finance office's workbook has no person sheet
+		baseDims = slices.DeleteFunc(baseDims, peopleDim)
+	}
+	base, err := s.visibleReport(r, p, from, to, baseDims)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +83,7 @@ func (s *Server) buildBundle(r *http.Request, p *principal, from, to time.Time) 
 		return nil, errTooManyRows
 	}
 	for _, d := range exportDims {
-		if d != "tag" {
+		if d != "tag" && !(p.peopleBlind() && peopleDim(d)) {
 			b.By[d] = store.Regroup(base, []string{d})
 		}
 	}
@@ -175,10 +180,18 @@ func (s *Server) exportReport(w http.ResponseWriter, r *http.Request, p *princip
 		g := q.Get("group_by")
 		if g == "" {
 			g = "org,lab,team,project,user,model,pool"
+			if p.peopleBlind() {
+				g = "org,lab,team,project,model,pool" // a finance office's default has no person
+			}
 		}
 		dims, err := ParseGroupBy(g)
 		if err != nil {
 			fail(http.StatusBadRequest, err.Error())
+			return
+		}
+		if p.peopleBlind() && slices.ContainsFunc(dims, peopleDim) {
+			status = http.StatusForbidden
+			forbidden(w)
 			return
 		}
 		data, err := s.visibleReport(r, p, from, to, dims)

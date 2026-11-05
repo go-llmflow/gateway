@@ -58,6 +58,23 @@ func (s *Server) resolveProject(r *http.Request, k store.Key) (string, error) {
 
 func isJWTKey(k store.Key) bool { return len(k.ID) > 4 && k.ID[:4] == "jwt-" }
 
+// isSyntheticPerson reports whether a name is shaped like the person of a JWT
+// caller with no assertable name: "jwt-" and base64url characters (the hash of
+// (issuer, subject) makes 22 of them, jwt.go; the shape is read loosely, as
+// admin.go and profiles_api.go read it). Such a person belongs to no
+// institution's namespace: no migration scopes it.
+func isSyntheticPerson(name string) bool {
+	if len(name) <= 4 || name[:4] != "jwt-" {
+		return false
+	}
+	for _, c := range name[4:] {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 // recordUser is the user a record is attributed to: a gateway user name,
 // never a token. A key's owner is one; a JWT's username is kept when it is
 // a valid gateway user name, else the synthetic key id (stable per issuer

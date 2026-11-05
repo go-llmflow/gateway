@@ -633,6 +633,9 @@ func (s *Server) fluidsReport(w http.ResponseWriter, r *http.Request, p *princip
 		apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
+	if refusePeople(w, p, dims) {
+		return
+	}
 	format := q.Get("format")
 	if format == "" {
 		format = FormatJSON
