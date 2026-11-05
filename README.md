@@ -1313,8 +1313,18 @@ the tests.)
   Chassis, EnvironmentMetrics) or the path of the chassis' EnvironmentMetrics
   resource. The gateway reads its **`EnergykWh.Reading`** (DMTF
   EnvironmentMetrics v1.3.1: "the total energy, in kilowatt-hour units"), a
-  counter, so the energy of an interval is exact; a BMC that reports only a power
-  is not metered (the factor below applies). A node is a `dcgm_url`: its BMC and
+  counter, so the energy of an interval is exact. A BMC that reports only a power
+  (`PowerWatts`, else `PowerControl[].PowerConsumedWatts`) is metered by the
+  **trapezoid** of its samples, one per round, exact for a constant power and an
+  estimate between samples; two samples further apart than three rounds are not
+  joined (the power in between is unknown). A counter that goes down (a BMC
+  reboot) is never billed, as a negative energy or as its new value. In those
+  cases, and when a read was missed (the BMC's interval is then not the GPUs'),
+  the fallback factor applies to that interval. Each interval stores where its
+  overhead came from, and `/admin/fluids` (JSON, `node_overhead`) and the decision
+  report's Method section give, per month and pool, the kWh and intervals by
+  source: `redfish` (counter), `redfish_power` (integrated power) or `factor`.
+  A node is a `dcgm_url`: its BMC and
   its GPUs are read at the same instant, and the node's energy minus its GPUs' is
   the **overhead** of the interval. It is split like the GPUs' energy: in the
   proportion of their active and idle energy, the active part by the same weights

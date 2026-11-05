@@ -96,6 +96,8 @@ type decisionData struct {
 	Closed []closedRef
 	// MeterVariance is the sub-meter readings against the measured IT energy.
 	MeterVariance []MeterVarianceRow
+	// NodeOverhead says where the energy beyond the GPUs comes from.
+	NodeOverhead []NodeOverheadOut
 	// EnergyRecon compares Slurm's energy (sacct) with the DCGM energy
 	// attributed, per partner; ReconNote says why it is empty when the input
 	// is set and unreadable.
@@ -251,6 +253,9 @@ func (s *Server) buildDecision(r *http.Request, p *principal, from, to time.Time
 	if view != nil {
 		d.Closed = closedFor(p, view.closed)
 		d.MeterVariance = s.meterVariance(view, p)
+		if oh, err := s.nodeOverhead(r.Context(), p, from, to); err == nil {
+			d.NodeOverhead = oh
+		}
 	}
 	// Slurm's energy against the DCGM energy attributed (#97).
 	if s.cfg.Slurm.SacctFile != "" {
@@ -721,6 +726,10 @@ func (d *decisionData) view() decisionView {
 			Total: money(c.TotalCostMinor), Provider: prov})
 	}
 	v.Method = d.Method.lines(d.Closed)
+	for _, o := range d.NodeOverhead {
+		v.Method = append(v.Method, [2]string{"Node overhead " + o.Month + " " + poolOrAll(o.Pool), strconv.FormatFloat(o.KWh, 'f', 2, 64) + " kWh beyond the GPUs, from " + o.Source +
+			" (" + strconv.FormatInt(o.Intervals, 10) + " intervals)"})
+	}
 	for _, m := range d.MeterVariance {
 		pct := "n/a"
 		if m.DifferencePct != nil {

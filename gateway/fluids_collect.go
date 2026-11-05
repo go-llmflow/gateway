@@ -10,6 +10,7 @@ import (
 	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/energy"
 	"github.com/go-llmflow/gateway/store"
+	"github.com/go-redfish/redfish"
 )
 
 // Fluids collection (#97): the gateway scrapes the NVIDIA DCGM exporter of
@@ -39,7 +40,7 @@ type energyNode struct {
 	// The energy beyond the GPUs (nodeenergy.go): the BMC's counter when the
 	// node has one, the fallback factor otherwise (1: none).
 	bmc      *energy.RedfishScraper
-	bmcMeter energy.Meter
+	bmcMeter redfish.Meter
 	factor   float64
 	// The vLLM preemption counters of the node's upstreams (their base URLs),
 	// as last read, and the preemptions seen since the last interval ended
@@ -156,20 +157,41 @@ func (n *energyNode) takePreemptions() int64 {
 	return v
 }
 
+// Sources of the node's overhead, stored with the interval and reported.
+const (
+	OverheadRedfish      = "redfish"       // the BMC's energy counter minus the GPUs'
+	OverheadRedfishPower = "redfish_power" // the BMC's power, integrated (trapezoid), minus the GPUs'
+	OverheadFactor       = "factor"        // node_overhead_factor
+)
+
 // overhead decides the node's energy beyond the GPUs for an interval: the
-// BMC's counter minus the GPUs' when the BMC was read for exactly this
-// interval, else the fallback factor, else none.
-func (s *Server) overhead(n *energyNode, iv energy.Interval, bi energy.Interval, bok bool) (int64, string) {
-	if bok && bi.Start.Equal(iv.Start) && bi.End.Equal(iv.End) {
-		if bi.MJ >= iv.MJ {
-			return bi.MJ - iv.MJ, "redfish"
+// BMC's energy (its counter's difference, else its power integrated between
+// two samples no further apart than three rounds) minus the GPUs' when the BMC
+// was read for exactly this interval, else the fallback factor, else none. A
+// counter that went down (a BMC reboot) is never billed.
+func (s *Server) overhead(n *energyNode, iv energy.Interval, bi redfish.Interval, bok bool) (int64, string) {
+	switch {
+	case bok && bi.Start.Equal(iv.Start) && bi.End.Equal(iv.End):
+		if bi.Valid {
+			nodeMJ := int64(math.Round(bi.KWh * energy.MJPerKWh))
+			if nodeMJ >= iv.MJ {
+				by := OverheadRedfish
+				if bi.Source == redfish.SourcePower {
+					by = OverheadRedfishPower
+				}
+				return nodeMJ - iv.MJ, by
+			}
+			s.log.Warn("fluids: the BMC reports less energy than the GPUs alone; no overhead counted for this interval", "node", n.key, "node_mj", nodeMJ, "gpu_mj", iv.MJ)
+		} else {
+			s.log.Warn("fluids: the BMC's energy for this interval is unknown; the fallback factor applies", "node", n.key, "reason", bi.Reason)
 		}
-		s.log.Warn("fluids: the BMC reports less energy than the GPUs alone; no overhead counted for this interval", "node", n.key, "node_mj", bi.MJ, "gpu_mj", iv.MJ)
-	} else if n.bmc != nil {
+	case bok:
+		s.log.Warn("fluids: the BMC's interval is not the GPUs' (a read was missed); the fallback factor applies", "node", n.key)
+	case n.bmc != nil:
 		s.log.Warn("fluids: the BMC was not read for this interval; the fallback factor applies", "node", n.key)
 	}
 	if n.factor > 1 {
-		return int64(math.Round(float64(iv.MJ) * (n.factor - 1))), "factor"
+		return int64(math.Round(float64(iv.MJ) * (n.factor - 1))), OverheadFactor
 	}
 	return 0, ""
 }
@@ -223,13 +245,14 @@ func (s *Server) fluidsRound(ctx context.Context, es store.EnergyStore, nodes []
 		}
 		// The BMC, at the same instant (an interval is the GPUs' and the node's
 		// over the same time); a failed read leaves the fallback to this interval.
-		var bi energy.Interval
+		var bi redfish.Interval
 		var bok bool
 		if n.bmc != nil {
 			n.bmc.Timeout = s.cfg.Health.Timeout
-			if brd, berr := n.bmc.Scrape(ctx, now); berr != nil {
+			if brd, berr := n.bmc.Read(ctx); berr != nil {
 				s.log.Warn("fluids: the BMC could not be read", "node", n.key, "err", redactErr(berr))
 			} else {
+				brd.At = now // the GPUs' instant: the two intervals are the same time
 				bi, bok = n.bmcMeter.Observe(brd)
 			}
 		}
