@@ -74,6 +74,10 @@ func checkEnergyHourly(t *testing.T, st interface {
 		t.Fatalf("idle by hour %d / by day %d: %+v", idleHr, idleDay, hrIdle)
 	}
 
+	oh, err := st.OverheadBetween(ctx, t0.Add(-time.Hour), t0.AddDate(0, 0, 3))
+	if err != nil || len(oh) != 1 || oh[0].Month != "2026-10" || oh[0].Pool != "p" || oh[0].Source != "redfish" || oh[0].Intervals != 4 || oh[0].MJ != 28 {
+		t.Fatalf("overhead %+v %v", oh, err)
+	}
 	rows, err := st.PreemptionBetween(ctx, t0.Add(-time.Hour), t0.AddDate(0, 0, 3))
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("preemptions %+v %v", rows, err)

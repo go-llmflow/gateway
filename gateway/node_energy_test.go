@@ -22,12 +22,14 @@ import (
 
 // fakeBMC serves a node's EnvironmentMetrics over TLS, with basic auth.
 type fakeBMC struct {
-	mu   sync.Mutex
-	kwh  float64
-	fail bool
-	srv  *httptest.Server
-	ca   string // path of its certificate, as a CA file
-	auth atomic.Int64
+	mu        sync.Mutex
+	kwh       float64
+	watts     float64
+	powerOnly bool
+	fail      bool
+	srv       *httptest.Server
+	ca        string // path of its certificate, as a CA file
+	auth      atomic.Int64
 }
 
 func newFakeBMC(t *testing.T, user, password string) *fakeBMC {
@@ -45,6 +47,10 @@ func newFakeBMC(t *testing.T, user, password string) *fakeBMC {
 			http.Error(w, "down", http.StatusInternalServerError)
 			return
 		}
+		if b.powerOnly { // a BMC with no energy counter, only a power
+			_ = json.NewEncoder(w).Encode(map[string]any{"PowerWatts": map[string]any{"Reading": b.watts}})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"EnergykWh": map[string]any{"Reading": b.kwh}})
 	}))
 	t.Cleanup(b.srv.Close)
@@ -56,10 +62,12 @@ func newFakeBMC(t *testing.T, user, password string) *fakeBMC {
 	return b
 }
 
-func (b *fakeBMC) url() string       { return b.srv.URL + "/redfish/v1/Chassis/1/EnvironmentMetrics" }
-func (b *fakeBMC) add(kwh float64)   { b.mu.Lock(); b.kwh += kwh; b.mu.Unlock() }
-func (b *fakeBMC) setFail(f bool)    { b.mu.Lock(); b.fail = f; b.mu.Unlock() }
-func (b *fakeBMC) unauthorised() int { return int(b.auth.Load()) }
+func (b *fakeBMC) url() string        { return b.srv.URL + "/redfish/v1/Chassis/1/EnvironmentMetrics" }
+func (b *fakeBMC) add(kwh float64)    { b.mu.Lock(); b.kwh += kwh; b.mu.Unlock() }
+func (b *fakeBMC) setFail(f bool)     { b.mu.Lock(); b.fail = f; b.mu.Unlock() }
+func (b *fakeBMC) set(kwh float64)    { b.mu.Lock(); b.kwh = kwh; b.mu.Unlock() }
+func (b *fakeBMC) setPower(w float64) { b.mu.Lock(); b.powerOnly, b.watts = true, w; b.mu.Unlock() }
+func (b *fakeBMC) unauthorised() int  { return int(b.auth.Load()) }
 
 // fakeVLLMMetrics serves vLLM's preemption counter.
 type fakeVLLMMetrics struct {
@@ -139,6 +147,7 @@ type fluidsOut struct {
 	Rows        []FluidsRow        `json:"rows"`
 	Preemptions []PreemptionOut    `json:"preemptions"`
 	Meter       []MeterVarianceRow `json:"meter_variance"`
+	Overhead    []NodeOverheadOut  `json:"node_overhead"`
 }
 
 func (f *nodeFixture) report(t *testing.T) fluidsOut {
@@ -340,5 +349,84 @@ func TestParseMetricSumReadsThePreemptionCounter(t *testing.T) {
 	// The queue parser is unchanged.
 	if parseWaiting(strings.NewReader("vllm:num_requests_waiting{engine=\"0\"} 3.0\nvllm:num_requests_waiting_by_reason 9\n")) != 3 || parseWaiting(strings.NewReader("x 1\n")) != -1 {
 		t.Fatal("parseWaiting changed")
+	}
+}
+
+func overheadBy(o fluidsOut) map[string]NodeOverheadOut {
+	m := map[string]NodeOverheadOut{}
+	for _, r := range o.Overhead {
+		m[r.Source] = r
+	}
+	return m
+}
+
+func totalKWh(o fluidsOut) (sum float64) {
+	for _, r := range o.Rows {
+		sum += r.KWh
+	}
+	return
+}
+
+// A BMC that reports only a power: its trapezoid, minus the GPUs', is the
+// node's overhead; a missed read leaves the interval to the factor (stamped
+// as such), and the next interval, whose BMC samples are not the GPUs', too.
+func TestNodeEnergyFromBMCPowerWithAGap(t *testing.T) {
+	f := nodeFixtureFor(t, 1.5, true)
+	f.bmc.setPower(1200)                                                                  // 1200 W: 0.1 kWh per 5 minutes
+	gpus := func() { f.dc.add("GPU-aaa", kWhMJ*3/100); f.dc.add("GPU-bbb", kWhMJ*3/100) } // 0.06 kWh
+	f.round(0)
+	gpus()
+	f.round(5 * time.Minute) // 0.1 from the BMC: overhead 0.04
+	gpus()
+	f.round(5 * time.Minute) // 0.04
+	f.bmc.setFail(true)
+	gpus()
+	f.round(5 * time.Minute) // BMC down: factor, 0.06 x 0.5 = 0.03
+	f.bmc.setFail(false)
+	gpus()
+	f.round(5 * time.Minute) // the BMC's interval spans two rounds: factor, 0.03
+	gpus()
+	f.round(5 * time.Minute) // aligned again: 0.04
+
+	o := f.report(t)
+	by := overheadBy(o)
+	if p := by["redfish_power"]; p.Intervals != 3 || !near3(p.KWh, 0.12) {
+		t.Fatalf("power: %+v (all %+v)", p, o.Overhead)
+	}
+	if fa := by["factor"]; fa.Intervals != 2 || !near3(fa.KWh, 0.06) {
+		t.Fatalf("factor: %+v (all %+v)", fa, o.Overhead)
+	}
+	if !near3(totalKWh(o), 5*0.06+0.12+0.06) {
+		t.Fatalf("the orgs add up to %v kWh", totalKWh(o))
+	}
+}
+
+// A counter that goes down (a BMC reboot) is never billed as negative or as the
+// whole new value: the interval falls to the factor.
+func TestNodeEnergyBMCCounterResetIsNotBilled(t *testing.T) {
+	f := nodeFixtureFor(t, 1.5, true)
+	gpus := func() { f.dc.add("GPU-aaa", kWhMJ/5); f.dc.add("GPU-bbb", kWhMJ/5) } // 0.4 kWh
+	f.bmc.set(10)
+	f.round(0)
+	gpus()
+	f.bmc.add(0.6) // 0.2 beyond the GPUs
+	f.round(5 * time.Minute)
+	gpus()
+	f.bmc.set(0.3) // rebooted: the counter went from 10.6 down to 0.3
+	f.round(5 * time.Minute)
+	gpus()
+	f.bmc.add(0.5) // 0.1 beyond the GPUs
+	f.round(5 * time.Minute)
+
+	o := f.report(t)
+	by := overheadBy(o)
+	if r := by["redfish"]; r.Intervals != 2 || !near3(r.KWh, 0.3) {
+		t.Fatalf("counter: %+v (all %+v)", r, o.Overhead)
+	}
+	if fa := by["factor"]; fa.Intervals != 1 || !near3(fa.KWh, 0.2) {
+		t.Fatalf("the reset interval: %+v (all %+v)", fa, o.Overhead)
+	}
+	if !near3(totalKWh(o), 3*0.4+0.3+0.2) {
+		t.Fatalf("the orgs add up to %v kWh", totalKWh(o))
 	}
 }

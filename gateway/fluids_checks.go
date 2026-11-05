@@ -109,3 +109,34 @@ func (s *Server) preemptions(ctx context.Context, p *principal, from, to time.Ti
 	}
 	return out, nil
 }
+
+// NodeOverheadOut is the energy beyond the GPUs of a month and pool, by source:
+// "redfish" (the BMC's energy counter minus the GPUs'), "redfish_power" (the
+// BMC's power integrated by the trapezoid rule between samples, minus the
+// GPUs'), "factor" (node_overhead_factor, the fallback: no BMC, a missed read, a
+// gap, a counter reset). It states how each kWh beyond the GPUs was obtained.
+type NodeOverheadOut struct {
+	Month     string  `json:"month"`
+	Pool      string  `json:"pool,omitempty"`
+	Source    string  `json:"source"`
+	Intervals int64   `json:"intervals"`
+	KWh       float64 `json:"kwh"`
+}
+
+// nodeOverhead reads the breakdown for the period (proxy roles and finance
+// viewers only: it describes the platform's metering).
+func (s *Server) nodeOverhead(ctx context.Context, p *principal, from, to time.Time) ([]NodeOverheadOut, error) {
+	es, ok := s.st.(store.EnergyStore)
+	if !ok || !p.reportView() {
+		return nil, nil
+	}
+	rows, err := es.OverheadBetween(ctx, from, to)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]NodeOverheadOut, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, NodeOverheadOut{Month: r.Month, Pool: r.Pool, Source: r.Source, Intervals: r.Intervals, KWh: energy.KWh(r.MJ)})
+	}
+	return out, nil
+}
