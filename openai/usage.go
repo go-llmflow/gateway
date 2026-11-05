@@ -89,6 +89,10 @@ type StreamResult struct {
 	// estimate of completion tokens when the stream ends before the usage
 	// chunk (which comes last).
 	Deltas int64
+	// Bytes counts the bytes written to the client, exactly (the writes that
+	// succeeded and the one that failed are both counted by what was handed
+	// over only on success: an aborted stream counts what it delivered).
+	Bytes int64
 }
 
 var (
@@ -143,7 +147,8 @@ func CopySSEFor(ep Endpoint, dst io.Writer, flush func(), src io.Reader, dropUsa
 		if len(b) == 0 {
 			return nil
 		}
-		_, err := dst.Write(b)
+		n, err := dst.Write(b)
+		res.Bytes += int64(n)
 		return err
 	}
 	endEvent := func() error {

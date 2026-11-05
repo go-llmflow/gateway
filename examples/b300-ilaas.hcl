@@ -43,6 +43,38 @@ fluids {
       monthly = 1950 # per-month override
     }
   }
+
+  # A cost the owners already paid: the straight-line depreciation of the
+  # servers (purchase price / months of life, here 252000 / 60). It is billed to
+  # the organisations that hold no share of the pool only, on the same by_usage
+  # basis, and what they pay is credited to the owners pro rata to the GPU-hours
+  # they lent them (the lending matrix).
+  fixed_cost "b300-depreciation" {
+    monthly = 4200
+    pool    = "b300"
+    charge  = "non_shareholders"
+  }
+
+  # A storage array, spread by the storage each organisation uses (GB-months),
+  # and a switch by the traffic each sends (network bytes). The same block holds
+  # maintenance, licences or staff.
+  fixed_cost "storage-array" {
+    monthly = 900
+    basis   = "storage_gb_month"
+  }
+  fixed_cost "core-switch" {
+    monthly = 350
+    basis   = "network_bytes"
+  }
+
+  # Metered, per organisation (down to team, project and user for the network):
+  # network = bytes of the request bodies forwarded plus the answers written to
+  # clients; storage = what the gateway keeps for the organisation (its usage
+  # records in PostgreSQL and the request-log objects it wrote to the export),
+  # as GB-months. Model weights are shared platform storage: a fixed_cost, not
+  # metered per organisation.
+  price_per_gb       = 0.02
+  price_per_gb_month = 0.05
 }
 
 org "etabA" {
@@ -60,6 +92,9 @@ org "etabC" {
 org "tiers" {
   share = 0 # the third party
   team "tiers-prod" {}
+  billing {
+    markup = 0.15 # full cost plus 15 %, shown in its own column
+  }
 }
 
 pool "b300" {

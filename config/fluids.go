@@ -57,7 +57,30 @@ type Fluids struct {
 	// (hosting of the racks: space, power distribution, network). They are
 	// spread over the organisations on the basis of the idle energy.
 	FixedCosts []FixedCost
+	// PricePerGB prices the network a request used (bytes in plus bytes out,
+	// 1 GB = 10^9 bytes) and PricePerGBMonth the storage the gateway keeps for
+	// an organisation (1 GB-month = 10^9 bytes kept for a whole month), in
+	// Currency; 0 meters without pricing.
+	PricePerGB, PricePerGBMonth float64
 }
+
+// NetworkStoragePrices returns the prices of the month "YYYY-MM": per GB of
+// network and per GB-month of storage.
+func (f *Fluids) NetworkStoragePrices(month string) (perGB, perGBMonth float64) {
+	perGB, perGBMonth = f.PricePerGB, f.PricePerGBMonth
+	if o, ok := f.Periods[month]; ok {
+		if o.PricePerGB != 0 {
+			perGB = o.PricePerGB
+		}
+		if o.PricePerGBMonth != 0 {
+			perGBMonth = o.PricePerGBMonth
+		}
+	}
+	return
+}
+
+// MaxPricePerGB bounds the network and storage prices.
+const MaxPricePerGB = 1000
 
 // FixedCost is a fixed amount per month, for one pool or the whole platform.
 type FixedCost struct {
@@ -69,7 +92,28 @@ type FixedCost struct {
 	Monthly float64
 	// Periods override Monthly for one month ("2026-07").
 	Periods map[string]float64
+	// Charge says who bears it: ChargeAll (default: every organisation, on
+	// Basis) or ChargeNonShareholders (a cost the owners already paid, such as
+	// the depreciation of the hardware: billed only to organisations with no
+	// share of the pool, and credited to the owners).
+	Charge string
+	// Basis is the weight the cost is spread on: BasisEnergy (default: the
+	// idle-energy rule, fluids.idle_energy), BasisShares, BasisNetworkBytes or
+	// BasisStorageGBMonth (a switch spread by traffic, a storage array by
+	// storage used).
+	Basis string
 }
+
+// Who bears a fixed cost, and what it is spread on.
+const (
+	ChargeAll             = "all"
+	ChargeNonShareholders = "non_shareholders"
+
+	BasisEnergy         = "energy"
+	BasisShares         = "shares"
+	BasisNetworkBytes   = "network_bytes"
+	BasisStorageGBMonth = "storage_gb_month"
+)
 
 // MonthlyFor returns the amount of the month "YYYY-MM".
 func (c FixedCost) MonthlyFor(month string) float64 {
@@ -86,6 +130,8 @@ const MaxFixedMonthly = 1e7
 // FluidsPeriod is a per-month override; a zero field keeps the block's value.
 type FluidsPeriod struct {
 	PUE, PricePerKWh float64
+	PricePerGB       float64
+	PricePerGBMonth  float64
 }
 
 // Fluids defaults and bounds.
@@ -138,6 +184,10 @@ type fluidsHCL struct {
 	IntervalRange  hcl.Range         `hcl:"interval,attr_value_range"`
 	Settle         *string           `hcl:"settle,optional"`
 	SettleRange    hcl.Range         `hcl:"settle,attr_value_range"`
+	GB             *float64          `hcl:"price_per_gb,optional"`
+	GBRange        hcl.Range         `hcl:"price_per_gb,attr_value_range"`
+	GBMonth        *float64          `hcl:"price_per_gb_month,optional"`
+	GBMRange       hcl.Range         `hcl:"price_per_gb_month,attr_value_range"`
 	Periods        []fluidsPeriodHCL `hcl:"period,block"`
 	FixedCosts     []fixedCostHCL    `hcl:"fixed_cost,block"`
 	DefRange       hcl.Range         `hcl:",def_range"`
@@ -150,6 +200,10 @@ type fixedCostHCL struct {
 	MonthlyRange hcl.Range        `hcl:"monthly,attr_value_range"`
 	Pool         *string          `hcl:"pool,optional"`
 	PoolRange    hcl.Range        `hcl:"pool,attr_value_range"`
+	Charge       *string          `hcl:"charge,optional"`
+	ChargeRange  hcl.Range        `hcl:"charge,attr_value_range"`
+	Basis        *string          `hcl:"basis,optional"`
+	BasisRange   hcl.Range        `hcl:"basis,attr_value_range"`
 	Periods      []fixedPeriodHCL `hcl:"period,block"`
 	DefRange     hcl.Range        `hcl:",def_range"`
 }
@@ -168,6 +222,10 @@ type fluidsPeriodHCL struct {
 	PUERange   hcl.Range `hcl:"pue,attr_value_range"`
 	Price      *float64  `hcl:"price_per_kwh,optional"`
 	PriceRange hcl.Range `hcl:"price_per_kwh,attr_value_range"`
+	GB         *float64  `hcl:"price_per_gb,optional"`
+	GBRange    hcl.Range `hcl:"price_per_gb,attr_value_range"`
+	GBMonth    *float64  `hcl:"price_per_gb_month,optional"`
+	GBMRange   hcl.Range `hcl:"price_per_gb_month,attr_value_range"`
 }
 
 var (
@@ -219,6 +277,11 @@ func (v *validator) fluids(raw *fileHCL, c *Config) {
 	if out.Currency != "" && !currencyRE.MatchString(out.Currency) || out.Currency == "gpu_hours" || out.Currency == "kwh" {
 		v.errf(f.CurrencyRange, "Invalid currency", "currency = %q: want 2 to 16 letters, digits or _ (EUR, USD), not a unit of the reports", out.Currency)
 	}
+	out.PricePerGB = pos(f.GB, f.GBRange, "price_per_gb", 0, MaxPricePerGB)
+	out.PricePerGBMonth = pos(f.GBMonth, f.GBMRange, "price_per_gb_month", 0, MaxPricePerGB)
+	if (out.PricePerGB > 0 || out.PricePerGBMonth > 0) && out.Currency == "" {
+		v.errf(f.DefRange, "Missing currency", "price_per_gb or price_per_gb_month is set: name its currency (currency = \"EUR\")")
+	}
 	if out.PricePerKWh > 0 && out.Currency == "" {
 		v.errf(f.DefRange, "Missing currency", "price_per_kwh is set: name its currency (currency = \"EUR\"); a price without a unit cannot be billed")
 	}
@@ -260,7 +323,8 @@ func (v *validator) fluids(raw *fileHCL, c *Config) {
 			v.errf(p.MonthRange, "Duplicate period", "period %q is declared twice", p.Month)
 		}
 		seen[p.Month] = true
-		o := FluidsPeriod{PUE: pos(p.PUE, p.PUERange, "pue", 1, MaxPUE), PricePerKWh: pos(p.Price, p.PriceRange, "price_per_kwh", 0, MaxPricePerKWh)}
+		o := FluidsPeriod{PUE: pos(p.PUE, p.PUERange, "pue", 1, MaxPUE), PricePerKWh: pos(p.Price, p.PriceRange, "price_per_kwh", 0, MaxPricePerKWh),
+			PricePerGB: pos(p.GB, p.GBRange, "price_per_gb", 0, MaxPricePerGB), PricePerGBMonth: pos(p.GBMonth, p.GBMRange, "price_per_gb_month", 0, MaxPricePerGB)}
 		if o.PricePerKWh > 0 && out.Currency == "" {
 			v.errf(p.PriceRange, "Missing currency", "a period price needs fluids.currency")
 		}
@@ -295,7 +359,16 @@ func (v *validator) fixedCosts(f *fluidsHCL, out *Fluids, c *Config) {
 			continue
 		}
 		names[fc.Name] = true
-		o := FixedCost{Name: fc.Name, Monthly: amount(fc.Monthly, fc.MonthlyRange, "fixed_cost "+fc.Name), Periods: map[string]float64{}}
+		o := FixedCost{Name: fc.Name, Monthly: amount(fc.Monthly, fc.MonthlyRange, "fixed_cost "+fc.Name), Periods: map[string]float64{},
+			Charge: strOr(fc.Charge, ChargeAll), Basis: strOr(fc.Basis, BasisEnergy)}
+		if o.Charge != ChargeAll && o.Charge != ChargeNonShareholders {
+			v.errf(fc.ChargeRange, "Invalid charge", "fixed_cost %q charge = %q: want %q or %q", fc.Name, o.Charge, ChargeAll, ChargeNonShareholders)
+		}
+		switch o.Basis {
+		case BasisEnergy, BasisShares, BasisNetworkBytes, BasisStorageGBMonth:
+		default:
+			v.errf(fc.BasisRange, "Invalid basis", "fixed_cost %q basis = %q: want energy, shares, network_bytes or storage_gb_month", fc.Name, o.Basis)
+		}
 		if fc.Pool != nil && *fc.Pool != "" {
 			o.Pool = *fc.Pool
 			known := false

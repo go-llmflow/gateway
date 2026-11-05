@@ -213,7 +213,7 @@ func TestFluidsEndToEnd(t *testing.T) {
 	_ = readAll(t, resp)
 	resp = e.do("GET", "/admin/fluids?from=2026-10-01&to=2026-11-01&group_by=org,day&format=csv", master, "")
 	csv := readAll(t, resp)
-	if !strings.HasPrefix(csv, "from,to,org,day,gpu_hours,kwh_active,kwh_idle,kwh,fluids_cost,currency,fixed_cost,total_cost\n") || !strings.Contains(csv, "etabB,2026-10-15,") {
+	if !strings.HasPrefix(csv, "from,to,org,day,gpu_hours,kwh_active,kwh_idle,kwh,fluids_cost,currency,fixed_cost,total_cost,network_gb,storage_gb_month,network_cost,storage_cost,markup,credit\n") || !strings.Contains(csv, "etabB,2026-10-15,") {
 		t.Fatalf("csv:\n%s", csv)
 	}
 }

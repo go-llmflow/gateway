@@ -33,6 +33,7 @@ type Memory struct {
 	audit      memAudit
 	prof       memProfiles
 	en         memEnergy
+	billing    memBilling
 	warn       memWarn
 	quota      memQuota
 	MaxRecords int

@@ -289,6 +289,13 @@ type Record struct {
 	// request holds its slot from then to its end (LatencyMS is arrival to
 	// end), which is what the lending report integrates (#97).
 	AdmissionWaitMS float64
+
+	// BytesIn and BytesOut are the network the request used, exactly as the
+	// gateway forwarded it (v0.27.0): BytesIn the request body sent to the
+	// upstream, BytesOut what was written to the client (a streamed answer
+	// that is cut counts what it delivered). Headers and TLS framing are not
+	// counted. 0 for records written before.
+	BytesIn, BytesOut int64
 }
 
 // Store is the persistence contract.

@@ -599,7 +599,9 @@ type orgHCL struct {
 	CostCenterRange hcl.Range      `hcl:"cost_center,attr_value_range"`
 	LabCCs          []labCCHCL     `hcl:"lab,block"`
 	ProjectCCs      []projectCCHCL `hcl:"project,block"`
-	DefRange        hcl.Range      `hcl:",def_range"`
+	// Billing is the organisation's markup on its cost (billing.go).
+	Billing  *orgBillingHCL `hcl:"billing,block"`
+	DefRange hcl.Range      `hcl:",def_range"`
 }
 
 type orgTeamHCL struct {
@@ -1009,6 +1011,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			}
 		}
 		v.costCenters(&org, o)
+		v.orgBilling(&org, o)
 		c.Orgs = append(c.Orgs, org)
 	}
 	if sum > 1+1e-9 {

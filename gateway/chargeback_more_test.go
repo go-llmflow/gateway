@@ -194,7 +194,7 @@ func TestChargebackCarriesFixedCosts(t *testing.T) {
 	// The file's header and a record carry the column after fluids_cost.
 	resp = e.do("GET", "/admin/chargeback?from=2026-10-01&to=2026-11-01", master, "")
 	recs, err := csv.NewReader(strings.NewReader(readAll(t, resp))).ReadAll()
-	if err != nil || len(recs) < 2 || recs[0][5] != "fluids_cost" || recs[0][6] != "fixed_cost" {
+	if err != nil || len(recs) < 2 || recs[0][7] != "fluids_cost" || recs[0][8] != "fixed_cost" {
 		t.Fatalf("%v %v", recs, err)
 	}
 }

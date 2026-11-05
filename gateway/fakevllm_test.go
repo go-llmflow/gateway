@@ -42,6 +42,7 @@ type recorded struct {
 	Header http.Header
 	Body   map[string]any
 	Path   string
+	RawLen int // the body's size in bytes
 }
 
 func newFakeVLLM(t testing.TB) *fakeVLLM {
@@ -87,7 +88,7 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	f.hits++
-	f.reqs = append(f.reqs, recorded{Header: r.Header.Clone(), Body: body, Path: r.URL.Path})
+	f.reqs = append(f.reqs, recorded{Header: r.Header.Clone(), Body: body, Path: r.URL.Path, RawLen: len(raw)})
 	status, gate, reply, classify := f.status, f.gate, f.reply, f.classify
 	f.mu.Unlock()
 	if r.URL.Path == "/classify" && classify != nil && status == 0 {

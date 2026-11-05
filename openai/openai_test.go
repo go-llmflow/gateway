@@ -215,6 +215,38 @@ func TestCopySSEPassThrough(t *testing.T) {
 	}
 }
 
+// Bytes counts exactly what reached the client, an aborted stream included
+// (what the network bill is made of).
+func TestCopySSECountsBytes(t *testing.T) {
+	var out bytes.Buffer
+	r, err := CopySSE(&out, nil, strings.NewReader(stream), false)
+	if err != nil || r.Bytes != int64(len(stream)) || r.Bytes != int64(out.Len()) {
+		t.Fatalf("complete: %d bytes counted, %d sent, stream %d (%v)", r.Bytes, out.Len(), len(stream), err)
+	}
+	// A client that leaves after n bytes: the write that fails delivers part of
+	// an event; the count is what was delivered.
+	for _, n := range []int{1, 10, 40, len(stream) - 1} {
+		fw := &failAfter{n: n}
+		r, err := CopySSE(fw, nil, strings.NewReader(stream), false)
+		if err == nil || r.Bytes != int64(fw.got) {
+			t.Fatalf("n=%d: counted %d, delivered %d (%v)", n, r.Bytes, fw.got, err)
+		}
+	}
+}
+
+// failAfter accepts n bytes in all, then fails (a client that went away).
+type failAfter struct{ n, got int }
+
+func (f *failAfter) Write(p []byte) (int, error) {
+	if f.got+len(p) > f.n {
+		k := f.n - f.got
+		f.got = f.n
+		return k, errors.New("client gone")
+	}
+	f.got += len(p)
+	return len(p), nil
+}
+
 func TestCopySSEDropsInjectedUsage(t *testing.T) {
 	var out bytes.Buffer
 	r, err := CopySSE(&out, nil, strings.NewReader(strings.ReplaceAll(stream, "\n", "\r\n")), true)

@@ -166,6 +166,10 @@ func matrixRows() []matrixRow {
 		// read the matrix across organisations.
 		{"GET /admin/lending", "GET", p("/admin/lending" + span), "", []string{"master", "padmin", "pview", "oadmin", "oadminC", "oviewer", "fviewer"}, []string{"oadminC"}},
 		{"GET /admin/chargeback", "GET", p("/admin/chargeback" + span), "", []string{"master", "padmin", "pview", "oadmin", "oadminC", "oviewer", "fviewer"}, []string{"oadminC"}},
+		// Closed months: a proxy admin closes; the proxy roles and the finance
+		// viewer read the snapshots.
+		{"POST /admin/billing/close", "POST", p("/admin/billing/close?month=2020-01"), "", writeAll, nil},
+		{"GET /admin/billing/closed", "GET", p("/admin/billing/closed"), "", []string{"master", "padmin", "pview", "fviewer"}, nil},
 		{"GET /admin/adoption", "GET", p("/admin/adoption" + span), "", []string{"master", "padmin", "pview", "oadmin", "oadminC", "oviewer", "fviewer"}, []string{"oadminC"}},
 		{"GET /admin/decision", "GET", p("/admin/decision" + span + "&format=json"), "", []string{"master", "padmin", "pview", "oadmin", "oadminC", "oviewer", "fviewer"}, []string{"oadminC"}},
 		{"GET /admin/usage.csv", "GET", p("/admin/usage.csv" + span), "", nil, reportOutsiders},

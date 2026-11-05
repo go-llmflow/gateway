@@ -510,6 +510,10 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				CachedTokens: usage.Cached(), Cost: cost, Unit: g.cfg.Cost.Unit, LatencyMS: float64(end.Sub(t0).Microseconds()) / 1000,
 				Status: status, Priority: grant.Priority, Borrowing: grant.Borrowing, Stream: req.Stream,
 				Estimated: estimated, Tags: tags, AdmissionWaitMS: float64(tAcq.Sub(t0).Microseconds()) / 1000,
+				// Network: the body forwarded to the upstream, and what was
+				// handed to the client (a stream cut short counts what it
+				// delivered).
+				BytesIn: int64(len(out)), BytesOut: st.Bytes,
 			}
 			s.recordHolds(&rec, adm, costNano)
 			s.rec.record(rec)
@@ -789,7 +793,8 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		}
 		h.Set("Content-Length", strconv.Itoa(len(data)))
 		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write(data)
+		n, _ := w.Write(data)
+		st.Bytes = int64(n)
 	}
 }
 

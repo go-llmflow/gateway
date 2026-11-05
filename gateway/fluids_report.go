@@ -65,8 +65,23 @@ type fluidsCell struct {
 	energy.Consumer
 	ActiveMJ, IdleMJ int64
 	// FixedMinor is the part of the fixed costs (racks) charged here, in the
-	// currency's minor units (an integer: sums are exact).
-	FixedMinor int64
+	// currency's minor units (an integer: sums are exact). CreditMinor is what
+	// the owners are credited for a cost the owners bore (charge =
+	// "non_shareholders"), also in minor units.
+	FixedMinor, CreditMinor int64
+	// NetIn and NetOut are the network bytes of the cell, StorageByteDays the
+	// bytes stored at the end of the cell's day (one day of them): the
+	// metered part of the bill.
+	NetIn, NetOut, StorageByteDays int64
+	// terms are the price terms of a cell read from a closed month: the ones
+	// the month was closed with, not today's (nil: today's).
+	terms *cellTerms
+}
+
+// cellTerms are the prices and markups a closed month was billed with.
+type cellTerms struct {
+	f      *config.Fluids
+	markup func(org string) float64
 }
 
 func (c fluidsCell) month() string {
@@ -224,13 +239,54 @@ type FluidsRow struct {
 	// Cost is kWh × PUE × price in Currency ("" when no price is set).
 	Cost     float64 `json:"fluids_cost"`
 	Currency string  `json:"currency"`
-	// FixedCost is the fixed costs (racks) charged, in Currency, exact to the
-	// currency's minor unit; TotalCost is FluidsCost + FixedCost rounded to the
-	// minor unit, half to even, once per row.
-	FixedCost float64 `json:"fixed_cost"`
-	TotalCost float64 `json:"total_cost"`
+	// FixedCost is the fixed costs charged (racks, depreciation...), in
+	// Currency, exact to the currency's minor unit. NetworkGB and
+	// StorageGBMonth are the metered network (bytes in plus out, 10^9 bytes per
+	// GB) and storage (GB-months); NetworkCost and StorageCost price them;
+	// Markup is the organisation's markup on its costs; Credit is what the
+	// owners are credited for a cost they bore and a non-shareholder paid.
+	// Every money column is rounded to the currency's minor unit once per row,
+	// half to even, and TotalCost is their sum (fluids + fixed + network +
+	// storage + markup - credit), so a row adds up exactly.
+	FixedCost      float64 `json:"fixed_cost"`
+	NetworkGB      float64 `json:"network_gb"`
+	StorageGBMonth float64 `json:"storage_gb_month"`
+	NetworkCost    float64 `json:"network_cost"`
+	StorageCost    float64 `json:"storage_cost"`
+	Markup         float64 `json:"markup"`
+	Credit         float64 `json:"credit"`
+	TotalCost      float64 `json:"total_cost"`
 
-	activeMJ, idleMJ, fixedMinor int64
+	activeMJ, idleMJ, fixedMinor, creditMinor, netBytes int64
+	storByteMonths                                      float64
+	network, storage, markup                            float64
+}
+
+// cellMoney prices a cell at its month's terms: fluids, network, storage and
+// the organisation's markup on them and on the fixed costs, unrounded.
+type cellMoney struct{ fluids, network, storage, markup float64 }
+
+func daysIn(month string) float64 {
+	t, err := time.Parse("2006-01", month)
+	if err != nil {
+		return 30
+	}
+	return float64(t.AddDate(0, 1, 0).Sub(t) / (24 * time.Hour))
+}
+
+func priceCell(c fluidsCell, f *config.Fluids, markup func(org string) float64) cellMoney {
+	if c.terms != nil {
+		f, markup = c.terms.f, c.terms.markup
+	}
+	month := c.month()
+	m := cellMoney{fluids: f.Params(month).Cost(c.ActiveMJ + c.IdleMJ)}
+	perGB, perGBMonth := f.NetworkStoragePrices(month)
+	m.network = float64(c.NetIn+c.NetOut) / 1e9 * perGB
+	m.storage = float64(c.StorageByteDays) / 1e9 / daysIn(month) * perGBMonth
+	if markup != nil && c.Org != Unallocated {
+		m.markup = markup(c.Org) * (m.fluids + float64(c.FixedMinor)/math.Pow10(f.CurrencyDecimals) + m.network + m.storage)
+	}
+	return m
 }
 
 func (r FluidsRow) dim(d string) string {
@@ -269,6 +325,11 @@ func fluidsKey(dims []string, get func(string) string) string {
 // groupFluids regroups cells onto dims, pricing each cell at its month's
 // terms before they are added.
 func groupFluids(cells []fluidsCell, dims []string, f *config.Fluids) []FluidsRow {
+	return groupFluidsM(cells, dims, f, nil)
+}
+
+// groupFluidsM is groupFluids with the organisations' markups.
+func groupFluidsM(cells []fluidsCell, dims []string, f *config.Fluids, markup func(org string) float64) []FluidsRow {
 	agg := map[string]*FluidsRow{}
 	var keys []string
 	for _, c := range cells {
@@ -285,16 +346,28 @@ func groupFluids(cells []fluidsCell, dims []string, f *config.Fluids) []FluidsRo
 		r.activeMJ += c.ActiveMJ
 		r.idleMJ += c.IdleMJ
 		r.fixedMinor += c.FixedMinor
-		r.Cost += f.Params(c.month()).Cost(c.ActiveMJ + c.IdleMJ)
+		r.creditMinor += c.CreditMinor
+		r.netBytes += c.NetIn + c.NetOut
+		m := priceCell(c, f, markup)
+		r.Cost += m.fluids
+		r.network += m.network
+		r.storage += m.storage
+		r.markup += m.markup
+		r.storByteMonths += float64(c.StorageByteDays) / daysIn(c.month())
 	}
 	sort.Strings(keys)
 	out := make([]FluidsRow, 0, len(keys))
+	dec := f.CurrencyDecimals
+	unit := math.Pow10(dec)
 	for _, k := range keys {
 		r := *agg[k]
 		r.KWhActive, r.KWhIdle = energy.KWh(r.activeMJ), energy.KWh(r.idleMJ)
 		r.KWh = energy.KWh(r.activeMJ + r.idleMJ)
-		r.FixedCost = float64(r.fixedMinor) / math.Pow10(f.CurrencyDecimals)
-		r.TotalCost = float64(minorUnits(r.Cost+r.FixedCost, f.CurrencyDecimals)) / math.Pow10(f.CurrencyDecimals)
+		r.NetworkGB, r.StorageGBMonth = float64(r.netBytes)/1e9, r.storByteMonths/1e9
+		fl, nw, st, mk := minorUnits(r.Cost, dec), minorUnits(r.network, dec), minorUnits(r.storage, dec), minorUnits(r.markup, dec)
+		r.FixedCost, r.Credit = float64(r.fixedMinor)/unit, float64(r.creditMinor)/unit
+		r.NetworkCost, r.StorageCost, r.Markup = float64(nw)/unit, float64(st)/unit, float64(mk)/unit
+		r.TotalCost = float64(fl+r.fixedMinor+nw+st+mk-r.creditMinor) / unit
 		out = append(out, r)
 	}
 	return out
@@ -377,31 +450,34 @@ func (s *Server) allocatedEnergyBasis(ctx context.Context, es store.EnergyStore,
 
 // fluidsData computes the visible rows of the fluids report, with GPU-hours
 // joined by dimension.
-func (s *Server) fluidsData(r *http.Request, p *principal, from, to time.Time, dims []string) ([]FluidsRow, error) {
-	es, ok := s.st.(store.EnergyStore)
-	if !ok {
-		return nil, store.ErrNotFound
+func (s *Server) fluidsData(r *http.Request, p *principal, from, to time.Time, dims []string) ([]FluidsRow, *billingView, error) {
+	if _, ok := s.st.(store.EnergyStore); !ok {
+		return nil, nil, store.ErrNotFound
 	}
 	f := s.cfg.Fluids
-	all, basis, err := s.allocatedEnergyBasis(r.Context(), es, from, to)
+	ctx, cancel := context.WithTimeout(r.Context(), ReportTimeout)
+	defer cancel()
+	view, err := s.billing(ctx, from, to)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	all = allocateFixedCosts(all, f, from, to, s.poolShares, basis)
 	// Visibility is decided on the finest cells, before grouping: a row of a
 	// grouping that does not name the organisation must still hold nothing of
 	// another one.
-	kept := all[:0:0]
-	for _, c := range all {
+	kept := view.cells[:0:0]
+	for _, c := range view.cells {
 		if p.reportView() || c.Org != Unallocated && p.orgView(c.Org) {
 			kept = append(kept, c)
 		}
 	}
-	rows := groupFluids(kept, dims, f)
-	gpu, err := s.visibleReport(r, p, from, to, dims)
-	if err != nil {
-		return nil, err
+	rows := groupFluidsM(kept, dims, f, s.cfg.MarkupOf)
+	var urows []store.ReportRow
+	for _, u := range view.usage {
+		if p.reportView() || p.orgView(u.Org) {
+			urows = append(urows, store.ReportRow{Org: u.Org, Lab: u.Lab, Team: u.Team, Project: u.Project, User: u.User, Model: u.Model, Pool: u.Pool, Day: u.Day, Unit: u.Unit, Cost: u.Cost})
+		}
 	}
+	gpu := store.Regroup(urows, dims)
 	idx := map[string]int{}
 	for i, row := range rows {
 		idx[fluidsKey(dims, row.dim)] = i
@@ -425,11 +501,12 @@ func (s *Server) fluidsData(r *http.Request, p *principal, from, to time.Time, d
 	sort.SliceStable(rows, func(i, j int) bool {
 		return fluidsKey(dims, rows[i].dim) < fluidsKey(dims, rows[j].dim)
 	})
-	return rows, nil
+	return rows, view, nil
 }
 
 func fluidsHeader(dims []string) []string {
-	return append(append([]string{"from", "to"}, dims...), "gpu_hours", "kwh_active", "kwh_idle", "kwh", "fluids_cost", "currency", "fixed_cost", "total_cost")
+	return append(append([]string{"from", "to"}, dims...), "gpu_hours", "kwh_active", "kwh_idle", "kwh", "fluids_cost", "currency",
+		"fixed_cost", "total_cost", "network_gb", "storage_gb_month", "network_cost", "storage_cost", "markup", "credit")
 }
 
 func fluidsRecord(from, to time.Time, dims []string, r FluidsRow) []string {
@@ -438,7 +515,8 @@ func fluidsRecord(from, to time.Time, dims []string, r FluidsRow) []string {
 		rec = append(rec, csvSafe(r.dim(d)))
 	}
 	f := func(v float64) string { return strconv.FormatFloat(v, 'f', 6, 64) }
-	return append(rec, f(r.GPUHours), f(r.KWhActive), f(r.KWhIdle), f(r.KWh), f(r.Cost), r.Currency, f(r.FixedCost), f(r.TotalCost))
+	return append(rec, f(r.GPUHours), f(r.KWhActive), f(r.KWhIdle), f(r.KWh), f(r.Cost), r.Currency, f(r.FixedCost), f(r.TotalCost),
+		f(r.NetworkGB), f(r.StorageGBMonth), f(r.NetworkCost), f(r.StorageCost), f(r.Markup), f(r.Credit))
 }
 
 // fluidsReport answers GET /admin/fluids?from=&to=&group_by=&format=json|csv.
@@ -483,11 +561,12 @@ func (s *Server) fluidsReport(w http.ResponseWriter, r *http.Request, p *princip
 		apiError(w, http.StatusBadRequest, "invalid_request_error", "format: want json or csv")
 		return
 	}
-	rows, err := s.fluidsData(r, p, from, to, dims)
+	rows, view, err := s.fluidsData(r, p, from, to, dims)
 	if err != nil {
 		storeError(w, err)
 		return
 	}
+	s.stampMethod(w, view)
 	if format == FormatCSV {
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		cw := csv.NewWriter(w)
@@ -506,5 +585,6 @@ func (s *Server) fluidsReport(w http.ResponseWriter, r *http.Request, p *princip
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"from": from.UTC(), "to": to.UTC(), "group_by": dims, "idle_energy": f.IdleEnergy,
 		"pue": f.PUE, "price_per_kwh": f.PricePerKWh, "currency": f.Currency, "rows": rows,
+		"method": s.billingMethod(), "closed_months": view.closed,
 	})
 }

@@ -1178,6 +1178,8 @@ model "llama" {
   the whole month's usage). New columns, appended so the others are unchanged:
   `fixed_cost` and `total_cost` (`fluids_cost + fixed_cost`, rounded to
   `currency_decimals`, half to even, once per row).
+- **More on fixed costs, metered network and storage, markup, closed months
+  (since v0.27.0)**: see the next section.
 - **Report.** `GET /admin/fluids?from=&to=&group_by=&format=json|csv` with
   `group_by` in org, lab, team, project, user, model, pool, day. Columns:
   `gpu_hours`, `kwh_active`, `kwh_idle`, `kwh`, `fluids_cost`, `currency`: three
@@ -1190,6 +1192,103 @@ model "llama" {
   does not say the base) and skips job steps. Slurm notes the value is a job's
   real energy only for an exclusive allocation. It is not yet wired into the
   reconciliation sheet.
+
+### What a real bill holds: fixed costs, network, storage, markup, closed months (since v0.27.0)
+
+```hcl
+fluids {
+  currency           = "EUR"
+  idle_energy        = "by_usage"
+  price_per_gb       = 0.02     # network, per GB (10^9 bytes in plus out)
+  price_per_gb_month = 0.05     # storage, per GB-month
+  fixed_cost "racks"        { monthly = 1800 }                                   # whole platform
+  fixed_cost "depreciation" { monthly = 4200  pool = "b300"  charge = "non_shareholders" }
+  fixed_cost "array"        { monthly = 900   basis = "storage_gb_month" }
+  fixed_cost "switch"       { monthly = 350   basis = "network_bytes" }
+}
+org "tiers" { share = 0  billing { markup = 0.15 } }
+```
+
+(one attribute per line in a real file; `examples/b300-ilaas.hcl` is parsed by
+the tests.)
+
+- **`fixed_cost` `basis`.** What the amount is spread on: `energy` (default: the
+  `idle_energy` rule, `by_usage` on active energy with the shares as fallback),
+  `shares`, `network_bytes` (a switch, by the traffic each organisation sent) or
+  `storage_gb_month` (a storage array, by the storage used). No usage on the
+  basis: the shares; neither: `(unallocated)`. Use `fixed_cost` for maintenance,
+  licences, storage and staff too. Shared **model weights are platform
+  storage**: a fixed cost, not metered per organisation.
+- **`charge = "non_shareholders"`: hardware already paid for by the owners.**
+  The depreciation of the servers, straight line (`monthly = purchase price /
+  months of life`; the gateway does no depreciation arithmetic of its own), is
+  billed only to the organisations that hold no share of the cost's pool, on the
+  same basis, and what they pay is a `credit` to the owners pro rata to the
+  GPU-hours each lent that organisation in the period (the lending matrix of
+  `GET /admin/lending`; the owners' shares of the pool when nothing was lent).
+  With no non-shareholder in use the owners bear it: nothing is billed.
+- **Network, metered.** Every request record carries `bytes_in` (the body the
+  gateway sent to the upstream) and `bytes_out` (what it wrote to the client; a
+  stream that is cut counts what it delivered). Headers and TLS framing are not
+  counted. Counting is a sum on the existing write path: no allocation was added
+  (`BenchmarkOverhead`: 423 allocs/op before and after). Records of earlier
+  versions have 0. Column `network_gb`, priced by `price_per_gb`
+  (`network_cost`).
+- **Storage, metered.** What the gateway itself stores per organisation: its
+  usage records in PostgreSQL (the size of each row, `pg_column_size`; indexes
+  and TOAST are not counted) and the request-log objects it writes to the export
+  (the compressed size of each object, split between the organisations of the
+  batch pro rata to their bytes). The audit log is platform-wide and the keys,
+  budgets and teams are negligible: none is metered. It is sampled by day:
+  the bytes stored at the end of each UTC day, cumulative, nothing is ever
+  deleted by the gateway; GB-months are the sum of the days over the days of the
+  month. Column `storage_gb_month`, priced by `price_per_gb_month`
+  (`storage_cost`). Reading it scans the usage table up to the end of the
+  period: close months to freeze them.
+- **Markup.** `org "x" { billing { markup = 0.15 } }` adds 15 % to that
+  organisation's fluids, fixed, network and storage costs (not to a credit), in
+  its own column `markup`, default 0, at most 10.
+- **Money columns** `fixed_cost`, `network_cost`, `storage_cost`, `markup`,
+  `credit` and `total_cost = fluids + fixed + network + storage + markup -
+  credit` are each rounded to the currency's minor unit once per row, half to
+  even, so a row adds up; `/admin/fluids` and `/admin/chargeback` (and the
+  decision report) carry them. The chargeback CSV is now `period_from,
+  period_to, cost_center, gpu_hours, kwh, network_gb, storage_gb_month,
+  fluids_cost, fixed_cost, network_cost, storage_cost, markup, credit,
+  adjustment, total_cost, fluids_currency, provider_cost, provider_currency`
+  (**columns moved**: read by name), with the same names in JSON plus `*_minor`.
+  Totals of the same month agree between the two reports up to the rounding of
+  each row.
+- **Closing a month.** Reports are computed live, so a corrected PUE, a new
+  price or late data would rewrite an invoiced month. `POST
+  /admin/billing/close?month=YYYY-MM` (proxy admin only; refused for the current
+  or a future month, `409` if it is already closed; there is no reopening) stores
+  an immutable snapshot of the month's cells and usage lines **with the
+  parameters used** (PUE, prices, fixed costs, markups, the method version and
+  the gateway version), keeps its SHA-256 in the hash-chained audit log (kind
+  `billing`, action `billing.close`), and in PostgreSQL a trigger refuses any
+  `UPDATE` or `DELETE`. A report that covers the **whole** month reads the
+  snapshot, priced with the parameters it was closed with. A window that is not
+  the whole month is computed live. A later difference between the live
+  computation and the snapshot is booked as an **adjustment** line (`adjustment`
+  column of the chargeback, a credit note when negative) on the next open month,
+  once: a month closed after it keeps the adjustment it booked and the next one
+  does not book it again; what was billed plus the adjustments is what the live
+  computation gives. Provider spend in another currency is not adjusted.
+  `GET /admin/billing/closed` lists the closed months, `?month=` returns one
+  snapshot. Do not change `currency_decimals` after a close.
+- **Method.** Every report states how it was computed: JSON
+  (`/admin/fluids`, `/admin/chargeback`) has a `method` object (method version,
+  gateway version, currency, PUE, prices, idle-energy rule, token weights, fixed
+  costs, markups) and the `closed_months` it read; every response, CSV
+  included, carries the headers `X-Llmflow-Method-Version`,
+  `X-Llmflow-Gateway-Version` and `X-Llmflow-Method`; the decision report has a
+  Method section and sheet. `BillingMethodVersion` is 2 (1 was the energy-only
+  report).
+- **Fuzzing and limits.** The month parameter (`FuzzParseBillingMonth`) and the
+  proration of a fixed cost (`FuzzFixedCostParts`: however a month is cut, the
+  parts add up) are fuzzed. A fixed cost is at most 10 000 000 per month and a
+  whole number of the currency's minor units.
 
 ### Guaranteed share against use, and the lending balance (#97)
 

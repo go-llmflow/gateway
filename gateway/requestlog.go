@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/go-llmflow/gateway/config"
+	"github.com/go-llmflow/gateway/energy"
 	"github.com/go-llmflow/gateway/export"
 	"github.com/go-llmflow/gateway/store"
 )
@@ -36,6 +38,12 @@ type requestLogger struct {
 	zw      *gzip.Writer
 	records int
 	seq     atomic.Int64
+
+	// orgBytes counts the uncompressed bytes of the batch per organisation; at
+	// flush the compressed size of the object is apportioned on it and handed
+	// to meter (nil: not metered).
+	orgBytes map[string]int64
+	meter    func(day, org string, n int64)
 }
 
 // requestLogRecord is one line of a request log.
@@ -68,6 +76,12 @@ func (l *requestLogger) add(r requestLogRecord) {
 	defer l.mu.Unlock()
 	_, _ = l.zw.Write(append(b, '\n'))
 	l.records++
+	if l.meter != nil {
+		if l.orgBytes == nil {
+			l.orgBytes = map[string]int64{}
+		}
+		l.orgBytes[r.Org] += int64(len(b)) + 1
+	}
 	// A batch is bounded in bytes too: content of up to 16 MiB per
 	// record times batch_records must not pile up in memory.
 	if l.records >= l.cfg.BatchRecords || l.buf.Len() >= maxBatchBytes {
@@ -85,9 +99,36 @@ func (l *requestLogger) flushLocked() {
 	t := l.now().UTC()
 	key := fmt.Sprintf("requests/%s/%s/%d-%06d.jsonl.gz", l.cfg.Name, t.Format("2006/01/02"), t.UnixNano(), l.seq.Add(1))
 	l.q.Enqueue(key, body, export.PutOptions{ContentType: "application/x-ndjson", ContentEncoding: "gzip", Retain: l.cfg.Lock})
+	if l.meter != nil && len(l.orgBytes) > 0 {
+		l.meterBatch(t.Format("2006-01-02"), int64(len(body)))
+	}
 	l.buf.Reset()
 	l.zw.Reset(&l.buf)
 	l.records = 0
+}
+
+// meterBatch hands the object's compressed size to the meter, split between
+// the organisations of the batch pro rata to their uncompressed bytes (the
+// split is exact: the parts add up to the size).
+func (l *requestLogger) meterBatch(day string, size int64) {
+	orgs := make([]string, 0, len(l.orgBytes))
+	for o := range l.orgBytes {
+		orgs = append(orgs, o)
+	}
+	sort.Strings(orgs)
+	ws := make([]float64, len(orgs))
+	for i, o := range orgs {
+		ws[i] = float64(l.orgBytes[o])
+	}
+	if parts := energy.Apportion(size, ws); parts != nil {
+		for i, o := range orgs {
+			if parts[i] > 0 && o != "" {
+				// Off the request path: a store write must not hold the batch.
+				go l.meter(day, o, parts[i])
+			}
+		}
+	}
+	clear(l.orgBytes)
 }
 
 func (l *requestLogger) flush() {
