@@ -13,7 +13,6 @@ import (
 	"net/netip"
 	"net/url"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -77,7 +76,17 @@ type ssoProvider struct {
 	client *rp.Client
 }
 
+// rpKey is the name a provider has in the rp.Set: the single sso issuer of
+// earlier versions has none in the configuration.
+func rpKey(name string) string {
+	if name == "" {
+		return "default"
+	}
+	return name
+}
+
 type ssoState struct {
+	set       *rp.Set                 // the providers, with the mix-up defences of go-authn/rp
 	providers map[string]*ssoProvider // by name ("" for the single sso issuer)
 	order     []*ssoProvider
 
@@ -106,7 +115,7 @@ func (s *Server) startSSO(ctx context.Context) error {
 	if c == nil {
 		return nil
 	}
-	st := &ssoState{providers: map[string]*ssoProvider{}, sessions: map[[32]byte]*session{}, logins: map[string]pendingLogin{}, perNet: map[netip.Prefix]int{}}
+	st := &ssoState{set: rp.NewSet(), providers: map[string]*ssoProvider{}, sessions: map[[32]byte]*session{}, logins: map[string]pendingLogin{}, perNet: map[netip.Prefix]int{}}
 	for _, pc := range c.ProviderList() {
 		p, err := rp.Discover(ctx, s.jwtClient, pc.Issuer)
 		if err != nil {
@@ -119,6 +128,9 @@ func (s *Server) startSSO(ctx context.Context) error {
 		cl, err := rp.NewClient(ctx, p, rp.Config{ClientID: pc.ClientID, Secret: secret, RedirectURI: pc.RedirectURL,
 			Scopes: pc.Scopes, MinRefresh: pc.MinRefresh})
 		if err != nil {
+			return fmt.Errorf("gateway: sso provider %q: %w", pc.Name, err)
+		}
+		if err := st.set.Add(rpKey(pc.Name), cl); err != nil {
 			return fmt.Errorf("gateway: sso provider %q: %w", pc.Name, err)
 		}
 		sp := &ssoProvider{cfg: pc, client: cl}
@@ -221,11 +233,15 @@ func (s *Server) ssoLogin(w http.ResponseWriter, r *http.Request, provider strin
 		http.NotFound(w, r)
 		return
 	}
-	f := rp.NewFlow()
+	f, err := s.sso.set.NewFlow(rpKey(provider))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
 	browser := randomToken()
 	now := s.now()
 	cn, _ := clientNet(r)
-	err := s.putLogin(r.Context(), f.State, pendingLogin{provider: provider, flow: f, browser: sha256.Sum256([]byte(browser)), expires: now.Add(loginTTL), net: cn,
+	err = s.putLogin(r.Context(), f.State, pendingLogin{provider: provider, flow: f, browser: sha256.Sum256([]byte(browser)), expires: now.Add(loginTTL), net: cn,
 		ui: r.URL.Query().Get("next") == "ui"})
 	if err != nil {
 		s.log.Warn("sso: login refused", "reason", err)
@@ -294,17 +310,6 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request, provider st
 		fail(http.StatusBadRequest, "unknown, used or expired state", nil)
 		return
 	}
-	// Mix-up (RFC 9700 §4.4.2): the login went to one provider; only that
-	// provider's callback finishes it, and an iss parameter, when the
-	// response carries one (RFC 9207 §2.4), must be that provider's issuer.
-	if pl.provider != provider {
-		fail(http.StatusBadRequest, "mix-up: the login was started at another provider", fmt.Errorf("started at %q, delivered to %q", pl.provider, provider))
-		return
-	}
-	if isses := q["iss"]; len(isses) > 1 || len(isses) == 1 && isses[0] != prov.client.Provider().Issuer {
-		fail(http.StatusBadRequest, "mix-up: iss parameter is not the provider's issuer", fmt.Errorf("iss %q, want %q", truncate(q.Get("iss"), 128), prov.client.Provider().Issuer))
-		return
-	}
 	ck, err := r.Cookie(loginCookie)
 	if err != nil {
 		fail(http.StatusBadRequest, "no login cookie", err)
@@ -316,16 +321,23 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request, provider st
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	_, id, err := prov.client.Exchange(ctx, code, pl.flow)
+	// go-authn/rp: the login went to one provider and only that provider's
+	// callback finishes it; an iss response parameter must be its issuer
+	// (RFC 9700 §4.4.2, RFC 9207 §2.4); the ID token's iss is verified against
+	// this provider by go-authn/oidc.
+	_, id, err := s.sso.set.Exchange(ctx, rpKey(provider), code, pl.flow, q)
 	if err != nil {
-		fail(http.StatusBadRequest, "code exchange", err)
+		reason := "code exchange"
+		if errors.Is(err, rp.ErrMixUp) {
+			reason = "mix-up"
+		}
+		fail(http.StatusBadRequest, reason, err)
 		return
 	}
-	// The ID token's iss was verified against this provider by go-authn/oidc
-	// (exact match); the institution filter comes before anything else.
-	if ae := checkAccept(prov.cfg.Accept, id); ae != nil {
-		shown = ae.Message()
-		fail(http.StatusForbidden, "institution not accepted", ae)
+	// The institution filter comes before anything else.
+	if ref := oidc.Check(prov.cfg.Accept, id); ref != nil {
+		shown = acceptMessage(ref)
+		fail(http.StatusForbidden, "institution not accepted", ref)
 		return
 	}
 	user := id.Username()
@@ -398,7 +410,7 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request, provider st
 func (s *Server) ssoBindings(p *ssoProvider, id *oidc.Token, user string) []store.Binding {
 	var out []store.Binding
 	for _, m := range p.cfg.Roles {
-		if !slices.Contains(claimValues(id, m.Claim), m.Value) {
+		if !slices.Contains(oidc.ClaimValues(id, m.Claim), m.Value) {
 			continue
 		}
 		if !p.cfg.MayGrant(s.cfg, m) {
@@ -446,49 +458,13 @@ func (s *Server) bindIdentity(ctx context.Context, p *ssoProvider, user, subject
 	return got == want, err
 }
 
-// acceptError is a login or token refused by an accept block.
-type acceptError struct {
-	claim, value string // value: what the token states ("" when nothing)
-}
-
-func (e *acceptError) Error() string {
-	return fmt.Sprintf("accept: claim %q = %q holds none of the accepted values", e.claim, e.value)
-}
-
-// Message is what the person is told: the institution value, no internals.
-func (e *acceptError) Message() string {
-	if e.value == "" {
+// acceptMessage is what the person is told when an accept block refuses them:
+// the institution value (already cleaned by go-authn/oidc), no internals.
+func acceptMessage(r *oidc.Refusal) string {
+	if r.Value == "" {
 		return "your identity provider did not state your institution; login refused"
 	}
-	return fmt.Sprintf("institution %q is not accepted by this gateway", e.value)
-}
-
-// checkAccept applies every accept block: all must hold, any value of a
-// multi-valued claim may match.
-func checkAccept(accs []config.Accept, tok *oidc.Token) *acceptError {
-	for _, a := range accs {
-		vals := claimValues(tok, a.Claim)
-		if a.Holds(vals) {
-			continue
-		}
-		return &acceptError{claim: a.Claim, value: shownValue(vals)}
-	}
-	return nil
-}
-
-// shownValue is the first value of a claim, safe to show back: printable
-// ASCII only, bounded.
-func shownValue(vals []string) string {
-	if len(vals) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	for _, r := range vals[0] {
-		if r >= 0x20 && r < 0x7f && b.Len() < 64 {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
+	return fmt.Sprintf("institution %q is not accepted by this gateway", r.Value)
 }
 
 // sessionPrincipal authenticates an admin request by its session cookie.

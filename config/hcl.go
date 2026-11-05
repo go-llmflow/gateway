@@ -1356,7 +1356,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			}
 			cj.Maps = append(cj.Maps, cm)
 			if !legacy && m.Team != "" && teams[m.Team] {
-				if o := c.OrgOfTeam(m.Team); !contains(j.Orgs, o) {
+				if o := c.OrgOfTeam(m.Team); !slices.Contains(j.Orgs, o) {
 					v.errf(m.TeamRange, "Map outside the issuer's organisations", "jwt %q may vouch for %v only, but team %q belongs to organisation %q", j.Name, j.Orgs, m.Team, o)
 				}
 			}

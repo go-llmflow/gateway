@@ -4,12 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/go-authn/oidc"
@@ -25,10 +23,13 @@ import (
 
 var errJWTUnmapped = errors.New("token verified, but no jwt map block matches it")
 
-// startJWT builds the verifier. Discovery happens here, at start-up: a
-// gateway that cannot reach its issuer cannot authenticate anybody and
-// should say so before it listens.
+// startJWT builds the verifiers, one per issuer, into a go-authn/oidc Set that
+// routes a token by its iss. Discovery happens here, at start-up: a gateway
+// that cannot reach its issuer cannot authenticate anybody and should say so
+// before it listens.
 func (s *Server) startJWT(ctx context.Context) error {
+	var vs []*oidc.Verifier
+	s.jwtCfg = map[string]*config.JWT{}
 	for _, j := range s.cfg.JWTIssuers() {
 		v, err := oidc.New(ctx, oidc.Config{
 			Issuer: j.Issuer, Audience: j.Audience, JWKSURL: j.JWKSURL, Type: j.Type,
@@ -38,77 +39,17 @@ func (s *Server) startJWT(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("gateway: jwt issuer %s: %w", j.Issuer, err)
 		}
-		s.jwt = append(s.jwt, &jwtIssuer{cfg: j, v: v})
+		vs = append(vs, v)
+		s.jwtCfg[v.Issuer()] = j
 	}
-	return nil
-}
-
-// jwtIssuer is one configured issuer of inference access tokens.
-type jwtIssuer struct {
-	cfg *config.JWT
-	v   *oidc.Verifier
-}
-
-var errJWTUnknownIssuer = errors.New("token issued by an issuer no jwt block names")
-
-// jwtFor picks the issuer a token is verified against, by its iss claim: one
-// key set, never a try of every one. With a single issuer there is nothing to
-// choose and the verifier's own exact iss check refuses a stranger.
-func (s *Server) jwtFor(raw string) (*jwtIssuer, error) {
-	if len(s.jwt) == 1 {
-		return s.jwt[0], nil
+	if len(vs) == 0 {
+		return nil
 	}
-	iss, ok := unverifiedIssuer(raw)
-	if !ok {
-		return nil, errJWTUnknownIssuer
-	}
-	for _, ji := range s.jwt {
-		if ji.cfg.Issuer == iss {
-			return ji, nil
-		}
-	}
-	return nil, errJWTUnknownIssuer
-}
-
-// unverifiedIssuer reads the iss claim of a compact JWT without verifying
-// anything: it only chooses the key set the token is then verified with, and
-// that check fails for a token whose signature or iss does not hold.
-func unverifiedIssuer(raw string) (string, bool) {
-	i := strings.IndexByte(raw, '.')
-	if i < 0 || len(raw) > 16<<10 {
-		return "", false
-	}
-	rest := raw[i+1:]
-	j := strings.IndexByte(rest, '.')
-	if j < 0 {
-		return "", false
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(rest[:j])
+	set, err := oidc.NewSet(vs...)
 	if err != nil {
-		return "", false
+		return fmt.Errorf("gateway: jwt: %w", err)
 	}
-	var c struct {
-		Iss string `json:"iss"`
-	}
-	if json.Unmarshal(payload, &c) != nil || c.Iss == "" {
-		return "", false
-	}
-	return c.Iss, true
-}
-
-// claimValues reads a claim as strings: a string, or a list of strings.
-func claimValues(tok *oidc.Token, name string) []string {
-	if name == "groups" || name == "" {
-		return tok.Groups()
-	}
-	var one string
-	if err := tok.Claim(name, &one); err == nil {
-		return []string{one}
-	}
-	var many []string
-	if err := tok.Claim(name, &many); err == nil {
-		return many
-	}
+	s.jwtSet = set
 	return nil
 }
 
@@ -117,11 +58,11 @@ func claimValues(tok *oidc.Token, name string) []string {
 func (s *Server) jwtIdentity(ctx context.Context, j *config.JWT, tok *oidc.Token) (store.Key, error) {
 	ctx, cancel := context.WithTimeout(ctx, storeTimeout)
 	defer cancel()
-	if ae := checkAccept(j.Accept, tok); ae != nil {
-		return store.Key{}, fmt.Errorf("%w: %v", errJWTUnmapped, ae)
+	if ref := oidc.Check(j.Accept, tok); ref != nil {
+		return store.Key{}, fmt.Errorf("%w: %v", errJWTUnmapped, ref)
 	}
 	for _, m := range j.Maps {
-		if !slices.Contains(claimValues(tok, m.Claim), m.Value) {
+		if !slices.Contains(oidc.ClaimValues(tok, m.Claim), m.Value) {
 			continue
 		}
 		t, err := s.st.GetTeam(ctx, m.Team)
@@ -161,15 +102,17 @@ func (s *Server) lookupJWT(ctx context.Context, raw string) (store.Key, error) {
 	if k, found, cached := s.jwtCache.get(h); cached && found {
 		return k, nil
 	}
-	ji, err := s.jwtFor(raw)
+	// Routed by iss to one issuer's verifier (an unknown iss is refused with
+	// no network access), then verified there.
+	tok, err := s.jwtSet.Verify(ctx, raw)
 	if err != nil {
 		return store.Key{}, err
 	}
-	tok, err := ji.v.Verify(ctx, raw)
-	if err != nil {
-		return store.Key{}, err
+	jc := s.jwtCfg[tok.Issuer()]
+	if jc == nil {
+		return store.Key{}, errJWTUnmapped
 	}
-	k, err := s.jwtIdentity(ctx, ji.cfg, tok)
+	k, err := s.jwtIdentity(ctx, jc, tok)
 	if err != nil {
 		return store.Key{}, err
 	}

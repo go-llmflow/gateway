@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-authn/oidc"
 	"github.com/go-llmflow/gateway/audit"
 	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/export"
@@ -134,7 +135,8 @@ type Server struct {
 	alerts      *alerter
 	// jwt verifies OpenID Connect access tokens (nil: virtual keys only);
 	// jwtCache keeps verified tokens until their expiry or the key TTL.
-	jwt       []*jwtIssuer
+	jwtSet    *oidc.Set
+	jwtCfg    map[string]*config.JWT // by verified issuer
 	jwtCache  *keyCache
 	jwtClient *http.Client
 	// sso holds the admin login client, sessions and logins in progress.

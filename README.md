@@ -1813,10 +1813,14 @@ jwt "partners" {                            # inference tokens, routed by iss
   to the provider and `sub` that vouched for them (`llmflow_user_idps`;
   nothing to migrate); a login of the same name through another provider, or
   with another `sub`, is refused, and a session never inherits the stored
-  roles of a user linked to another identity. A user without a link (created
-  before v0.27.0, or provisioned and not yet logged in) is adopted by the
-  first provider, or by a provider whose `orgs` cover every role the user
-  holds.
+  roles of a user linked to another identity: a session opened before the
+  user was stored, or by another identity, is dropped once the user exists.
+  A user without a link (created before v0.27.0, or provisioned and not yet
+  logged in) is adopted, at their first login, by the single unrestricted
+  `sso` issuer of earlier versions, or by a `provider` block only when its
+  `orgs` cover **every** role the user holds (proxy-wide roles need
+  `allow_proxy_roles`); a user with no role at all is adopted only by a
+  provider with `adopt = true`, and refused otherwise.
 - **`accept { claim, values }`**, one or more, all must hold, any value of a
   multi-valued claim matches; otherwise the login is refused with
   `institution "x" is not accepted by this gateway` (or that the provider did
@@ -1824,7 +1828,13 @@ jwt "partners" {                            # inference tokens, routed by iss
   claims whose schema compares without case: `schac_home_organization`
   (SCHAC 1.6.0: a domain name, `caseIgnoreMatch`), `eduperson_scoped_affiliation`
   (eduPerson schema, `caseIgnoreMatch`) and `voperson_external_affiliation`
-  (scoped like it): those are lower-cased. **The claim must be in the ID token**
+  (scoped like it): those are compared in ASCII lower case (the Kelvin sign
+  U+212A is not a `k`). The matching, the routing of tokens by `iss` and the
+  mix-up defences are [go-authn/oidc](https://github.com/go-authn/oidc) v0.5.0
+  (`Set`, `Accept`) and [go-authn/rp](https://github.com/go-authn/rp) v0.3.0
+  (`Set`, `CheckIssuer`); the gateway keeps the organisation allow-list, the
+  role mapping, the adoption rule and the (provider, subject) link.
+  **The claim must be in the ID token**
   (resp. in the access token for `jwt`): MyAccessID releases
   `schac_home_organization` in userinfo only, and the gateway does not call
   userinfo, so ask the proxy for it in the ID token (a Keycloak mapper, or
@@ -1834,6 +1844,15 @@ jwt "partners" {                            # inference tokens, routed by iss
   error) and `accept`. A token is routed to its block by its `iss`; an unknown
   `iss` is a 401, and no other issuer's key set is tried. With one issuer the
   path is unchanged (same allocations, measured below).
+- **In front of a SAML federation** ([go-authn/bridge](https://github.com/go-authn/bridge)):
+  the bridge can already restrict who may log in, by IdP, with
+  `saml { idps = ["<entityID>", ...] }` (README: "restrict; one entry skips the
+  choice"), and disable one institution's IdP at run time. That is a filter by
+  entityID at the bridge. The gateway's `accept` filters by the institution
+  claim whatever the proxy, and needs the claim in the ID token: the bridge's
+  ID tokens carry nothing about the person unless the client sets
+  `id_token_claims = true`, and `schac_home_organization` comes with its
+  `eduperson` scope.
 - `check-config` validates it all with `file:line`: duplicate names and
   issuers, unknown organisations, empty `orgs` or `accept` lists, roles
   outside `orgs`, an unnamed `jwt` block next to named ones.

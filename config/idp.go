@@ -1,8 +1,11 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/go-authn/oidc"
 )
 
 // Several identity providers (v0.27.0).
@@ -40,13 +43,6 @@ type SSOProvider struct {
 	Accept []Accept
 	// Roles map claims to role bindings.
 	Roles []SSORole
-}
-
-// Accept is "claim = ..., values = [...]": the login (or token) is refused
-// unless the claim holds one of Values. Several Accept entries must all hold.
-type Accept struct {
-	Claim  string
-	Values []string
 }
 
 // ProviderList returns the providers of an sso block: its provider blocks, or
@@ -92,21 +88,12 @@ func (p *SSOProvider) MayGrant(c *Config, r SSORole) bool {
 	}
 	switch {
 	case r.Org != "":
-		return contains(p.Orgs, r.Org)
+		return slices.Contains(p.Orgs, r.Org)
 	case r.Team != "":
 		o := c.OrgOfTeam(r.Team)
-		return o != "" && contains(p.Orgs, o)
+		return o != "" && slices.Contains(p.Orgs, o)
 	}
 	return p.AllowProxyRoles
-}
-
-func contains(l []string, s string) bool {
-	for _, x := range l {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }
 
 func firstNonEmpty(a, b string) string {
@@ -137,55 +124,7 @@ func (v *validator) accepts(in []acceptHCL, where string) []Accept {
 	return out
 }
 
-// foldedClaims hold domain names or scoped values, which their schemas
-// compare with caseIgnoreMatch: schacHomeOrganization (SCHAC 1.6.0, "domain
-// name conforming to RFC 1035"), eduPersonScopedAffiliation (eduPerson
-// schema), and voperson_external_affiliation (AARC-G025, scoped like it).
-// Every other claim, groups and entitlements included, is compared exactly.
-var foldedClaims = map[string]bool{
-	"schac_home_organization": true, "schachomeorganization": true,
-	"eduperson_scoped_affiliation": true, "edupersonscopedaffiliation": true,
-	"voperson_external_affiliation": true,
-}
-
-// FoldsCase says whether values of claim are compared without regard to case.
-func FoldsCase(claim string) bool { return foldedClaims[strings.ToLower(claim)] }
-
-// Normalize is the form values of claim are compared in.
-func Normalize(claim, v string) string {
-	if !FoldsCase(claim) {
-		return v
-	}
-	return asciiLower(strings.TrimSuffix(v, "."))
-}
-
-// asciiLower folds A-Z only. strings.ToLower is Unicode: it maps the Kelvin
-// sign U+212A to "k", so "univ-K.fr" would match "univ-k.fr".
-func asciiLower(s string) string {
-	for i := 0; i < len(s); i++ {
-		if c := s[i]; 'A' <= c && c <= 'Z' {
-			b := []byte(s)
-			for j := i; j < len(b); j++ {
-				if 'A' <= b[j] && b[j] <= 'Z' {
-					b[j] += 'a' - 'A'
-				}
-			}
-			return string(b)
-		}
-	}
-	return s
-}
-
-// Holds reports whether one of values (a claim's, however many it has) is one
-// of a.Values: exactly, or without case for the claims that fold.
-func (a Accept) Holds(values []string) bool {
-	for _, v := range values {
-		nv := Normalize(a.Claim, v)
-		for _, w := range a.Values {
-			if nv == Normalize(a.Claim, w) {
-				return true
-			}
-		}
-	}
-	return false
-}
+// Accept is "claim = ..., values = [...]" (go-authn/oidc): the login (or token)
+// is refused unless the claim holds one of Values; several must all hold. The
+// case rules (SCHAC, eduPerson) and the matching are the library's.
+type Accept = oidc.Accept

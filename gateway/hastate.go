@@ -142,7 +142,7 @@ func (s *Server) takeLogin(ctx context.Context, state string) (pendingLogin, boo
 			return pendingLogin{}, false, err
 		}
 		net, _ := netip.ParsePrefix(sl.Net)
-		return pendingLogin{provider: sl.Provider, flow: rp.Flow{State: sl.State, Nonce: sl.Nonce, Verifier: sl.Verifier}, browser: sl.Browser,
+		return pendingLogin{provider: sl.Provider, flow: rp.Flow{State: sl.State, Nonce: sl.Nonce, Verifier: sl.Verifier, Provider: rpKey(sl.Provider)}, browser: sl.Browser,
 			ui: sl.UI, net: net, expires: s.now().Add(time.Minute)}, true, nil
 	}
 	st.mu.Lock()
