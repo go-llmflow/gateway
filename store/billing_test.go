@@ -130,4 +130,10 @@ func TestBillingStorePostgres(t *testing.T) {
 	if _, err := p.pool.Exec(ctx, `DELETE FROM llmflow_billing_closed`); err == nil {
 		t.Fatal("a closed month was deleted")
 	}
+	if _, err := p.pool.Exec(ctx, `TRUNCATE llmflow_billing_closed`); err == nil {
+		t.Fatal("the closed months were truncated")
+	}
+	if ms, err := p.ClosedMonths(ctx); err != nil || len(ms) != 2 {
+		t.Fatalf("the closed months after the refused writes: %v %v", ms, err)
+	}
 }

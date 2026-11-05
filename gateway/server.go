@@ -557,6 +557,12 @@ func (s *Server) Close(ctx context.Context) {
 			s.log.Error("budget ledger: unregister failed", "err", err)
 		}
 	}
+	// The storage meter of the request logs: the last batches' sizes are
+	// recorded before the store goes away.
+	for _, l := range s.uniqueRequestLogs() {
+		l.flush()
+		l.waitMeter()
+	}
 	// Last: the final checkpoint above queued its anchor.
 	for _, q := range s.exports {
 		q.Close(ctx)
@@ -679,13 +685,27 @@ func (s *Server) HTTPServer() *http.Server {
 // read: OpenAI's {"error": {message, type, code}}, plus Anthropic's
 // top-level "type": "error" (its error object has the same type and
 // message fields).
-func apiError(w http.ResponseWriter, status int, typ, msg string) {
+//
+// It returns the bytes written, which the request's network meter counts.
+func apiError(w http.ResponseWriter, status int, typ, msg string) int {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	b, _ := json.Marshal(map[string]any{
 		"type":  "error",
 		"error": map[string]any{"message": msg, "type": typ, "code": status},
 	})
+	n, _ := w.Write(append(b, '\n'))
+	return n
+}
+
+// audioBytes is the size of the uploaded audio of a transcription request (0
+// for any other): the multipart file is kept aside from the JSON view the
+// pipeline forwards, so the request body alone would miss it.
+func audioBytes(a *audioFile) int64 {
+	if a == nil {
+		return 0
+	}
+	return int64(len(a.data))
 }
 
 func bearer(r *http.Request) string {

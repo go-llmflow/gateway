@@ -1229,8 +1229,9 @@ the tests.)
   With no non-shareholder in use the owners bear it: nothing is billed.
 - **Network, metered.** Every request record carries `bytes_in` (the body the
   gateway sent to the upstream) and `bytes_out` (what it wrote to the client; a
-  stream that is cut counts what it delivered). Headers and TLS framing are not
-  counted. Counting is a sum on the existing write path: no allocation was added
+  stream that is cut counts what it delivered; the error bodies the gateway
+  writes itself count, and an audio upload counts the file). Headers and TLS
+  framing are not counted. Counting is a sum on the existing write path: no allocation was added
   (`BenchmarkOverhead`: 423 allocs/op before and after). Records of earlier
   versions have 0. Column `network_gb`, priced by `price_per_gb`
   (`network_cost`).
@@ -1266,8 +1267,8 @@ the tests.)
   an immutable snapshot of the month's cells and usage lines **with the
   parameters used** (PUE, prices, fixed costs, markups, the method version and
   the gateway version), keeps its SHA-256 in the hash-chained audit log (kind
-  `billing`, action `billing.close`), and in PostgreSQL a trigger refuses any
-  `UPDATE` or `DELETE`. A report that covers the **whole** month reads the
+  `billing`, action `billing.close`), and in PostgreSQL triggers refuse any
+  `UPDATE`, `DELETE` or `TRUNCATE`. A report that covers the **whole** month reads the
   snapshot, priced with the parameters it was closed with. A window that is not
   the whole month is computed live. A later difference between the live
   computation and the snapshot is booked as an **adjustment** line (`adjustment`
@@ -1284,7 +1285,9 @@ the tests.)
   included, carries the headers `X-Llmflow-Method-Version`,
   `X-Llmflow-Gateway-Version` and `X-Llmflow-Method`; the decision report has a
   Method section and sheet. `BillingMethodVersion` is 2 (1 was the energy-only
-  report).
+  report). A reader sees the markups of the organisations it may read only, and
+  the gateway version only as a proxy role (a markup is the commercial term of one
+  partner's agreement).
 - **Fuzzing and limits.** The month parameter (`FuzzParseBillingMonth`) and the
   proration of a fixed cost (`FuzzFixedCostParts`: however a month is cut, the
   parts add up) are fuzzed. A fixed cost is at most 10 000 000 per month and a

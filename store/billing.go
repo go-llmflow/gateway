@@ -258,6 +258,9 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS llmflow_billing_closed_immutable ON llmflow_billing_closed;
 CREATE TRIGGER llmflow_billing_closed_immutable BEFORE UPDATE OR DELETE ON llmflow_billing_closed
 	FOR EACH ROW EXECUTE FUNCTION llmflow_billing_closed_immutable();
+DROP TRIGGER IF EXISTS llmflow_billing_closed_no_truncate ON llmflow_billing_closed;
+CREATE TRIGGER llmflow_billing_closed_no_truncate BEFORE TRUNCATE ON llmflow_billing_closed
+	FOR EACH STATEMENT EXECUTE FUNCTION llmflow_billing_closed_immutable();
 CREATE TABLE IF NOT EXISTS llmflow_storage_log (
 	day   text NOT NULL,
 	org   text NOT NULL,

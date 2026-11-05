@@ -113,7 +113,7 @@ type decisionData struct {
 // buildDecision gathers the figures from the reports p may read.
 func (s *Server) buildDecision(r *http.Request, p *principal, from, to time.Time) (*decisionData, error) {
 	d := &decisionData{From: from, To: to, PrevFrom: from.Add(-to.Sub(from)), Generated: s.now().UTC(), MinUsers: s.adoptionMin(), CurrencyDecimals: 2,
-		Method: s.billingMethod()}
+		Method: s.methodFor(p)}
 	if s.cfg.Fluids != nil {
 		d.CurrencyDecimals = s.cfg.Fluids.CurrencyDecimals
 	}
@@ -247,7 +247,7 @@ func (s *Server) buildDecision(r *http.Request, p *principal, from, to time.Time
 	}
 	d.Chargeback = cb
 	if view != nil {
-		d.Closed = view.closed
+		d.Closed = closedFor(p, view.closed)
 	}
 	// Slurm's energy against the DCGM energy attributed (#97).
 	if s.cfg.Slurm.SacctFile != "" {

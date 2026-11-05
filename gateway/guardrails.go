@@ -238,18 +238,21 @@ func (f *guardFailure) Error() string { return "guardrail " + f.guard + " is una
 
 // guardRefusal answers a request a guardrail stopped.
 func (s *Server) guardRefusal(w http.ResponseWriter, err error) int {
+	status, _ := s.guardRefusalN(w, err)
+	return status
+}
+
+// guardRefusalN is guardRefusal that also returns the bytes it wrote.
+func (s *Server) guardRefusalN(w http.ResponseWriter, err error) (int, int) {
 	var b *guardBlock
 	if errors.As(err, &b) {
-		apiError(w, http.StatusBadRequest, "guardrail_violation", b.Error())
-		return http.StatusBadRequest
+		return http.StatusBadRequest, apiError(w, http.StatusBadRequest, "guardrail_violation", b.Error())
 	}
 	var f *guardFailure
 	if errors.As(err, &f) {
-		apiError(w, http.StatusServiceUnavailable, "service_unavailable", f.Error())
-		return http.StatusServiceUnavailable
+		return http.StatusServiceUnavailable, apiError(w, http.StatusServiceUnavailable, "service_unavailable", f.Error())
 	}
-	apiError(w, http.StatusBadRequest, "invalid_request_error", "the request could not be inspected by its guardrails")
-	return http.StatusBadRequest
+	return http.StatusBadRequest, apiError(w, http.StatusBadRequest, "invalid_request_error", "the request could not be inspected by its guardrails")
 }
 
 // maskWith returns the text function of the masking guards of a stage: it

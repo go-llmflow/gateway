@@ -566,7 +566,7 @@ func (s *Server) fluidsReport(w http.ResponseWriter, r *http.Request, p *princip
 		storeError(w, err)
 		return
 	}
-	s.stampMethod(w, view)
+	s.stampMethod(w, view, p)
 	if format == FormatCSV {
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		cw := csv.NewWriter(w)
@@ -585,6 +585,6 @@ func (s *Server) fluidsReport(w http.ResponseWriter, r *http.Request, p *princip
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"from": from.UTC(), "to": to.UTC(), "group_by": dims, "idle_energy": f.IdleEnergy,
 		"pue": f.PUE, "price_per_kwh": f.PricePerKWh, "currency": f.Currency, "rows": rows,
-		"method": s.billingMethod(), "closed_months": view.closed,
+		"method": s.methodFor(p), "closed_months": closedFor(p, view.closed),
 	})
 }
