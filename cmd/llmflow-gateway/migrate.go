@@ -33,7 +33,13 @@ func auditMigration(ctx context.Context, st store.Store, cmd *cobra.Command, act
 	for i, r := range listed {
 		pairs[i] = [2]string{r.From, r.To}
 	}
-	after := map[string]any{"domain": domain, "users": len(plan), "renames": pairs, "truncated": len(listed) < len(plan), "host": host}
+	recordOnly := 0
+	for _, r := range plan {
+		if r.RecordsOnly {
+			recordOnly++
+		}
+	}
+	after := map[string]any{"domain": domain, "users": len(plan), "record_only_users": recordOnly, "renames": pairs, "truncated": len(listed) < len(plan), "host": host}
 	for k, v := range extra {
 		after[k] = v
 	}
@@ -55,7 +61,10 @@ func migrateUsersCmd() *cobra.Command {
 names; this renames each to name@<domain> (the domain of the sso, jwt or scim
 block that carries one) together with its budgets, the ledger, spend records,
 keys, admin tokens, roles, identity links, profile assignments and warning
-marks, in one transaction. It is idempotent (a second run changes nothing) and
+marks, in one transaction. A person who was never a stored user (a JWT-only
+caller) has only spend records under the bare name: those records are renamed
+too, so one person has one history. The audit log chain is not rewritten: its
+entries keep the names they were written with. It is idempotent (a second run changes nothing) and
 refuses to run when a new name is already in use, listing the collisions. Without
 --apply it only prints the plan. A run is written to the audit log before it
 starts and after it ends.`,

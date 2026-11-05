@@ -37,6 +37,24 @@ func PlanUserRenames(us []store.User, domain string) []store.UserRename {
 	return out
 }
 
+// PlanRecordRenames is the renames of the record-only names (bare names that
+// only spend records carry) under domain; a name that would not make a valid
+// account name is left alone.
+func PlanRecordRenames(names []string, domain string) []store.UserRename {
+	var out []store.UserRename
+	if domain == "" {
+		return nil
+	}
+	for _, n := range names {
+		to := n + "@" + domain
+		if n == "" || strings.Contains(n, "@") || !config.ValidUserName(to) {
+			continue
+		}
+		out = append(out, store.UserRename{From: n, To: to, RecordsOnly: true})
+	}
+	return out
+}
+
 // MigrateUsers plans the renames and, when apply, makes them in one
 // transaction. It returns the plan and the collisions: with any collision
 // nothing is changed. It is idempotent: once the users are renamed, the plan is
@@ -47,6 +65,13 @@ func MigrateUsers(ctx context.Context, st store.Store, domain string, apply bool
 		return nil, nil, err
 	}
 	plan = PlanUserRenames(us, domain)
+	// The people who were never stored users (JWT-only callers) have only their
+	// spend records under the bare name: they get the same scoped name.
+	names, err := st.RecordOnlyUsers(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	plan = append(plan, PlanRecordRenames(names, domain)...)
 	if !apply || len(plan) == 0 {
 		// A dry run still reports what would collide: a collision is one
 		// more rename-in-waiting that the same transaction would refuse.

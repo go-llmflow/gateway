@@ -2058,8 +2058,19 @@ jwt "partners" {                            # inference tokens, routed by iss
   already in use and lists the collisions (nothing is changed), and is written to
   the audit log before it starts and after it ends. Left as they were: the audit
   entries (a hash chain), the SCIM records (SCIM maps its raw `userName` to the
-  new name), the per-day anonymous refusal counts, and the history of people who
-  were never stored users. **The gateway refuses to start while stored users with
+  new name) and the per-day anonymous refusal counts.
+  **People who were never stored users (v0.34.0).** A JWT-only caller has no stored
+  user, only spend records (and perhaps a budget) under the bare name. Since
+  v0.34.0 `migrate-users` plans them too, with one grouped query (the records are
+  not loaded), and renames their records and the budgets, ledger, profile
+  assignments and warning marks under the name to `name@domain`, the domain being
+  the one used for stored users, in the same transaction, idempotently, audited
+  (the audit entry counts them as `record_only_users`). A new name already in use
+  (a stored user, a link, a budget, a profile or warning row) is a collision:
+  it is listed and nothing is changed. Records already under `name@domain` are
+  not a collision: the history joins them. Without this, after the upgrade the
+  same person shows as `alice` before and `alice@domain` after, and per-person
+  reports and `/v1/me/usage` split. **The gateway refuses to start while stored users with
   bare names remain and a domain is configured**; `legacy_unscoped_names = true`
   starts it anyway with a read-only alias (a bare name from the domain's issuer is
   the stored user of that name) until you migrate. Without a domain, an unscoped
