@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"regexp"
 	"runtime/debug"
@@ -740,9 +741,26 @@ func (s *Server) billingClosed(w http.ResponseWriter, r *http.Request, p *princi
 			apiError(w, http.StatusNotFound, "not_found", "the month "+m+" is open")
 			return
 		}
+		body := c.Payload
+		if p.peopleBlind() {
+			// A finance office reads money, not people: the snapshot without its
+			// per-person rows and without the gateway version. The checksum is that
+			// of the whole snapshot, which a reader of this view cannot recompute.
+			var snap closedPayload
+			if err := json.Unmarshal(c.Payload, &snap); err != nil {
+				storeError(w, err)
+				return
+			}
+			snap.redactPeople()
+			if body, err = json.Marshal(snap); err != nil {
+				storeError(w, err)
+				return
+			}
+			w.Header().Set("X-Llmflow-Redacted", "people")
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Llmflow-Checksum", c.Checksum)
-		_, _ = w.Write(c.Payload)
+		_, _ = w.Write(body)
 		return
 	}
 	months, err := bs.ClosedMonths(r.Context())
@@ -756,7 +774,11 @@ func (s *Server) billingClosed(w http.ResponseWriter, r *http.Request, p *princi
 		if err != nil || snap == nil {
 			continue
 		}
-		out = append(out, closedRef{m, c.ClosedAt, c.Checksum, snap.Method.MethodVersion, snap.Method.GatewayVersion})
+		ref := closedRef{m, c.ClosedAt, c.Checksum, snap.Method.MethodVersion, snap.Method.GatewayVersion}
+		if !p.proxyView() { // the gateway version only for the proxy roles (methodFor)
+			ref.GatewayVersion = ""
+		}
+		out = append(out, ref)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"closed": out})
 }
@@ -812,4 +834,57 @@ func (s *Server) stampMethod(w http.ResponseWriter, v *billingView, p *principal
 		cb, _ := json.Marshal(closedFor(p, v.closed))
 		w.Header().Set("X-Llmflow-Closed-Months", string(cb))
 	}
+}
+
+// redactPeople removes the people from a snapshot, for a reader who sees money
+// and energy and not persons (principal.peopleBlind): the cells and the usage
+// lines are summed over the person, and the gateway version is dropped (the
+// proxy roles alone see it, methodFor).
+func (c *closedPayload) redactPeople() {
+	c.Method.GatewayVersion = ""
+	type cellKey struct{ day, org, lab, team, project, model, pool, at string }
+	var cells []cellSnap
+	idx := map[cellKey]int{}
+	for _, x := range c.Cells {
+		k := cellKey{x.Day, x.Org, x.Lab, x.Team, x.Project, x.Model, x.Pool, x.At}
+		i, ok := idx[k]
+		if !ok {
+			x.User = ""
+			if x.Bands != nil {
+				x.Bands = maps.Clone(x.Bands)
+			}
+			idx[k] = len(cells)
+			cells = append(cells, x)
+			continue
+		}
+		y := &cells[i]
+		y.ActiveMJ += x.ActiveMJ
+		y.IdleMJ += x.IdleMJ
+		y.FixedMinor += x.FixedMinor
+		y.CreditMinor += x.CreditMinor
+		y.NetIn += x.NetIn
+		y.NetOut += x.NetOut
+		y.StorageByteDays += x.StorageByteDays
+		for b, v := range x.Bands {
+			if y.Bands == nil {
+				y.Bands = map[string]int64{}
+			}
+			y.Bands[b] += v
+		}
+	}
+	c.Cells = cells
+	type useKey struct{ org, lab, team, project, model, pool, day, unit string }
+	var usage []usageSnap
+	uidx := map[useKey]int{}
+	for _, x := range c.Usage {
+		k := useKey{x.Org, x.Lab, x.Team, x.Project, x.Model, x.Pool, x.Day, x.Unit}
+		if i, ok := uidx[k]; ok {
+			usage[i].Cost += x.Cost
+			continue
+		}
+		x.User = ""
+		uidx[k] = len(usage)
+		usage = append(usage, x)
+	}
+	c.Usage = usage
 }

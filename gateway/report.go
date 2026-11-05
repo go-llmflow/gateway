@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,6 +39,33 @@ func ParseGroupBy(v string) ([]string, error) {
 	return store.ValidateDims(dims)
 }
 
+// A finance office reads money and energy, not people (rbac.go reportView): it
+// may not group a report by person or key, whatever the route. The proxy roles
+// may. This is the one guard of every report that groups by dimension: the
+// routes call refusePeople, visibleReport enforces it again for every report
+// built from the records, and a test (people_test.go) asks every GET admin route
+// as a finance_viewer, so a route added later that forgets it fails there.
+
+// peopleBlind reports whether p reads reports without people or keys.
+func (p *principal) peopleBlind() bool { return p.financeView() && !p.proxyView() }
+
+// peopleDim reports whether a report dimension names a person or a key.
+func peopleDim(d string) bool { return d == "user" || d == "key" }
+
+// refusePeople answers 403 and returns true when p may not read a report
+// grouped by dims.
+func refusePeople(w http.ResponseWriter, p *principal, dims []string) bool {
+	if p.peopleBlind() && slices.ContainsFunc(dims, peopleDim) {
+		forbidden(w)
+		return true
+	}
+	return false
+}
+
+// errPeopleForbidden is visibleReport's refusal, for a route that reached it
+// without refusePeople.
+var errPeopleForbidden = errors.New("gateway: this role reads no report grouped by person or key")
+
 // spendReport answers GET /admin/spend?from=&to=&group_by=&format=.
 func (s *Server) spendReport(w http.ResponseWriter, r *http.Request, p *principal) {
 	q := r.URL.Query()
@@ -63,10 +91,7 @@ func (s *Server) spendReport(w http.ResponseWriter, r *http.Request, p *principa
 		apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	// A finance office reads money and energy, not people (rbac.go reportView):
-	// it may not group by person or key. The proxy roles may.
-	if p.financeView() && !p.proxyView() && (slices.Contains(dims, "user") || slices.Contains(dims, "key")) {
-		forbidden(w)
+	if refusePeople(w, p, dims) {
 		return
 	}
 	format := q.Get("format")
@@ -107,6 +132,9 @@ func (s *Server) usageCSV(w http.ResponseWriter, r *http.Request, p *principal) 
 // A report reads every record of its period: it runs under ReportTimeout, over
 // at most store.MaxReportSpan (spendReport checks it), a few at a time (heavy).
 func (s *Server) visibleReport(r *http.Request, p *principal, from, to time.Time, dims []string) ([]store.ReportRow, error) {
+	if p.peopleBlind() && slices.ContainsFunc(dims, peopleDim) {
+		return nil, errPeopleForbidden
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), ReportTimeout)
 	defer cancel()
 	if p.reportView() { // the proxy roles and finance_viewer read every organisation

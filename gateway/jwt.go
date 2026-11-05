@@ -94,8 +94,8 @@ func (s *Server) jwtIdentity(ctx context.Context, j *config.JWT, tok *oidc.Token
 		// The person is (issuer, subject), never a name alone (OpenID Connect
 		// Core §2: sub is unique within its issuer; a username claim is not,
 		// and an issuer's users may choose it). The synthetic key id stands
-		// for them, unless a stored user of that name is linked to exactly
-		// this issuer and subject.
+		// for them, unless the scoped name they assert is no stored user's, or is
+		// a stored user linked to exactly this issuer and subject (jwtPerson).
 		owner, err := s.jwtPerson(ctx, j, tok, id)
 		if err != nil {
 			return store.Key{}, fmt.Errorf("%w: %v", errAuthUnavailable, err)
@@ -172,7 +172,20 @@ func (s *Server) jwtPerson(ctx context.Context, j *config.JWT, tok *oidc.Token, 
 	name, err := s.scopedPerson(ctx, tok, j.NameScopes(), j.Domain)
 	switch {
 	case err == nil:
-		return name, nil
+		// An identity is (provider, subject), as at the SSO login (sso.go
+		// bindIdentity): a stored user linked to another provider or subject is
+		// somebody else, whatever name this token asserts. The scoped name is the
+		// person only when no link exists for it or the link is this issuer's and
+		// this subject's. A token never creates a link: that stays the SSO login's.
+		switch cur, lerr := s.st.UserIdP(ctx, name); {
+		case errors.Is(lerr, store.ErrNotFound):
+			return name, nil
+		case lerr != nil:
+			return "", errPersonStore
+		case cur == (store.IdPLink{Provider: j.Name, Subject: tok.Subject()}):
+			return name, nil
+		}
+		return id, nil
 	case errors.Is(err, errPersonStore):
 		return "", err
 	}

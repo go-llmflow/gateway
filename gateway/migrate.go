@@ -47,7 +47,11 @@ func PlanRecordRenames(names []string, domain string) []store.UserRename {
 	}
 	for _, n := range names {
 		to := n + "@" + domain
-		if n == "" || strings.Contains(n, "@") || !config.ValidUserName(to) {
+		// The synthetic person of a JWT caller with no assertable name
+		// (jwt-<hash of issuer and subject>) belongs to no institution: scoping it
+		// would put the people of every issuer under the legacy domain, again at
+		// every run.
+		if n == "" || strings.Contains(n, "@") || isSyntheticPerson(n) || !config.ValidUserName(to) {
 			continue
 		}
 		out = append(out, store.UserRename{From: n, To: to, RecordsOnly: true})

@@ -73,6 +73,9 @@ func writeXLSX(w io.Writer, b *reportBundle) error {
 		}
 	}
 	for _, d := range exportDims {
+		if _, ok := b.By[d]; !ok { // a dimension the reader may not see has no sheet
+			continue
+		}
 		if err := xlsxSheet(wb, d, b.By[d]); err != nil {
 			return err
 		}

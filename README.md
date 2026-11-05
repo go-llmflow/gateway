@@ -1562,7 +1562,15 @@ profile lookup and a handful of in-memory reads per request (`usageHeaders`).
   `/admin/lending` with its matrix, `/admin/chargeback`, `/admin/adoption`) and
   nothing else: no listing of teams, keys or users, no audit log, no write, and
   `/admin/spend` refuses `group_by` with `user` or `key` (a finance office reads
-  money and energy, not people; v0.30.0). `/admin/spend` and `/admin/usage.csv`
+  money and energy, not people; v0.30.0). **Since v0.35.0 the refusal is one guard
+  (`refusePeople`, enforced again in `visibleReport`) used by every report that
+  groups:** `/admin/export` (CSV refuses `user` and `key`, and its default grouping
+  and the XLSX workbook have no person), `/admin/fluids` (`group_by=user` is 403),
+  and `GET /admin/billing/closed?month=` serves the closed snapshot summed over
+  the person and without `gateway_version` (the checksum is that of the whole
+  snapshot, and the answer says `X-Llmflow-Redacted: people`). A test asks every
+  GET admin route as a finance_viewer, so a route added later cannot forget it.
+  `/admin/spend` and `/admin/usage.csv`
   cap the period at 366 days and run a few at a time, like the other reports, and
   so does `/admin/fluids`.
   Only a **proxy admin** grants it (`PUT /admin/users/{name}/roles`); an
@@ -2076,6 +2084,22 @@ jwt "partners" {                            # inference tokens, routed by iss
   the stored user of that name) until you migrate. Without a domain, an unscoped
   name is no identity: a login is refused, a token is a synthetic person, and
   `scim` is a configuration error.
+- **v0.35.0 fixes (audit of v0.34.0).** An inference token (JWT) is attributed to
+  the scoped name it asserts only when no stored user holds that name with a
+  link, or the link is this issuer's and this subject's (the SSO login makes the
+  same check); otherwise it is the synthetic person `jwt-<hash>` (before, a person
+  of one institution behind a federation issuer was charged as another
+  institution's linked user). A name with two scopes (`a@b@c`) or an empty side is
+  no name (`ValidUserName`). `migrate-users` no longer plans the synthetic
+  `jwt-<hash>` people, who belong to no institution. **Repair, if v0.34.0
+  `migrate-users --apply` ran while such records existed:** their records were
+  renamed to `jwt-<hash>@<domain>`; list them with `SELECT DISTINCT user_name FROM
+  llmflow_usage WHERE user_name ~ '^jwt-[A-Za-z0-9_-]+@'` and, if any, rename them
+  back (`UPDATE llmflow_usage SET user_name = split_part(user_name, '@', 1) WHERE
+  user_name ~ '^jwt-[A-Za-z0-9_-]+@<domain>$'`; the same for `llmflow_budgets_v2`,
+  `llmflow_budget_ledger`, `llmflow_budget_grants`, `llmflow_budget_arming` and
+  `llmflow_budget_buckets` with `name` and `kind IN ('user', 'profile_week',
+  'profile_session', 'profile_overflow')`).
 - **In front of a SAML federation** ([go-authn/bridge](https://github.com/go-authn/bridge)):
   the bridge can already restrict who may log in, by IdP, with
   `saml { idps = ["<entityID>", ...] }` (README: "restrict; one entry skips the
