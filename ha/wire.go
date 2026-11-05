@@ -35,6 +35,9 @@ const (
 	hdrSeq      = "Llmflow-Ha-Seq"
 	hdrTime     = "Llmflow-Ha-Time"
 	hdrSig      = "Llmflow-Ha-Sig"
+	// hdrEpoch names the receiver's incarnation: random at its start, learned
+	// by the sender from a signed answer, and part of every request's MAC.
+	hdrEpoch = "Llmflow-Ha-Epoch"
 
 	// maxSkew bounds the timestamp of a request: wide enough for clocks a
 	// few minutes apart (the chaos test uses 2 minutes), the window is what
@@ -159,6 +162,11 @@ var (
 	errReplay  = errors.New("ha: request replayed")
 	errSkew    = errors.New("ha: request timestamp outside the accepted window")
 	errBadPeer = errors.New("ha: peer address outside peer_networks")
+	// errEpoch: authenticated, but bound to another incarnation or another
+	// receiver than this one: a request captured before this process started
+	// (the replay windows are in memory and start empty), or meant for another
+	// replica. The sender learns the current epoch from the signed 421 and retries.
+	errEpoch = errors.New("ha: request bound to another receiver incarnation")
 )
 
 // verify authenticates an incoming request and returns its body.
@@ -176,13 +184,19 @@ func (n *Node) verify(r *http.Request) ([]byte, string, uint64, error) {
 	if inst == "" || len(inst) > 256 || err1 != nil || err2 != nil {
 		return nil, "", 0, errAuth
 	}
-	want := mac(n.rpcKey, "req", r.Method, r.URL.Path, inst, seqS, tS, bodyHash(body))
+	epoch := r.Header.Get(hdrEpoch)
+	// The MAC names the receiver (its advertised address and its incarnation):
+	// a request for one replica is not valid at another, nor after a restart.
+	want := mac(n.rpcKey, "req", r.Method, r.URL.Path, inst, n.cfg.Advertise, epoch, seqS, tS, bodyHash(body))
 	if !hmac.Equal([]byte(want), []byte(sig)) {
 		return nil, "", 0, errAuth
 	}
 	now := n.cfg.Now()
 	if d := now.Sub(time.UnixMilli(ms)); d > maxSkew || d < -maxSkew {
 		return nil, "", 0, errSkew
+	}
+	if epoch != n.epoch {
+		return nil, inst, seq, errEpoch
 	}
 	if !n.replay.accept(inst, seq, now) {
 		return nil, "", 0, errReplay
@@ -194,7 +208,8 @@ func (n *Node) verify(r *http.Request) ([]byte, string, uint64, error) {
 func (n *Node) reply(w http.ResponseWriter, inst string, seq uint64, status int, v any) {
 	b, _ := json.Marshal(v)
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set(hdrSig, mac(n.rpcKey, "resp", inst, strconv.FormatUint(seq, 10), strconv.Itoa(status), bodyHash(b)))
+	w.Header().Set(hdrEpoch, n.epoch)
+	w.Header().Set(hdrSig, mac(n.rpcKey, "resp", inst, strconv.FormatUint(seq, 10), strconv.Itoa(status), n.epoch, bodyHash(b)))
 	w.WriteHeader(status)
 	_, _ = w.Write(b)
 }
@@ -247,8 +262,41 @@ type statusError struct {
 
 func (e *statusError) Error() string { return fmt.Sprintf("ha: peer answered %d", e.status) }
 
-// call sends a signed request to a peer and decodes its signed answer.
+// call sends a signed request to a peer and decodes its signed answer. A
+// request is bound to the peer's address and incarnation (epoch): with none
+// known, or a stale one after the peer restarted, the peer answers a signed 421
+// naming its epoch, and the call is made once more with it.
 func (n *Node) call(ctx context.Context, addr, path string, in, out any) error {
+	err := n.callOnce(ctx, addr, path, in, out)
+	var se *statusError
+	if errors.As(err, &se) && se.status == statusEpoch {
+		return n.callOnce(ctx, addr, path, in, out)
+	}
+	return err
+}
+
+// statusEpoch answers a request bound to another incarnation (421 Misdirected
+// Request, RFC 9110 15.5.20).
+const statusEpoch = http.StatusMisdirectedRequest
+
+func (n *Node) epochOf(addr string) string {
+	n.seqMu.Lock()
+	defer n.seqMu.Unlock()
+	return n.epochs[addr]
+}
+
+func (n *Node) setEpoch(addr, e string) {
+	if e == "" || len(e) > 64 {
+		return
+	}
+	n.seqMu.Lock()
+	if len(n.epochs) < 4096 || n.epochs[addr] != "" {
+		n.epochs[addr] = e
+	}
+	n.seqMu.Unlock()
+}
+
+func (n *Node) callOnce(ctx context.Context, addr, path string, in, out any) error {
 	if !allowed(n.cfg.PeerNetworks, addr) {
 		return errBadPeer
 	}
@@ -272,7 +320,9 @@ func (n *Node) call(ctx context.Context, addr, path string, in, out any) error {
 	req.Header.Set(hdrInstance, n.cfg.Instance)
 	req.Header.Set(hdrSeq, seq)
 	req.Header.Set(hdrTime, ts)
-	req.Header.Set(hdrSig, mac(n.rpcKey, "req", http.MethodPost, path, n.cfg.Instance, seq, ts, bodyHash(body)))
+	epoch := n.epochOf(addr)
+	req.Header.Set(hdrEpoch, epoch)
+	req.Header.Set(hdrSig, mac(n.rpcKey, "req", http.MethodPost, path, n.cfg.Instance, addr, epoch, seq, ts, bodyHash(body)))
 	resp, err := n.client.Do(req)
 	if err != nil {
 		return err
@@ -285,10 +335,12 @@ func (n *Node) call(ctx context.Context, addr, path string, in, out any) error {
 	if len(rb) > maxBody {
 		return errors.New("ha: answer too large")
 	}
-	want := mac(n.rpcKey, "resp", n.cfg.Instance, seq, strconv.Itoa(resp.StatusCode), bodyHash(rb))
+	peerEpoch := resp.Header.Get(hdrEpoch)
+	want := mac(n.rpcKey, "resp", n.cfg.Instance, seq, strconv.Itoa(resp.StatusCode), peerEpoch, bodyHash(rb))
 	if !hmac.Equal([]byte(want), []byte(resp.Header.Get(hdrSig))) {
 		return errAuth
 	}
+	n.setEpoch(addr, peerEpoch) // authenticated: the peer's current incarnation
 	if resp.StatusCode != http.StatusOK {
 		return &statusError{status: resp.StatusCode, body: rb}
 	}

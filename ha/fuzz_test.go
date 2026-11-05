@@ -39,7 +39,8 @@ func FuzzInternalAPI(f *testing.F) {
 		req.Header.Set(hdrInstance, "peer")
 		req.Header.Set(hdrSeq, s)
 		req.Header.Set(hdrTime, ts)
-		req.Header.Set(hdrSig, mac(n.rpcKey, "req", http.MethodPost, path, "peer", s, ts, bodyHash(body)))
+		req.Header.Set(hdrEpoch, n.epoch)
+		req.Header.Set(hdrSig, mac(n.rpcKey, "req", http.MethodPost, path, "peer", n.cfg.Advertise, n.epoch, s, ts, bodyHash(body)))
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 		if w.Code == http.StatusUnauthorized {

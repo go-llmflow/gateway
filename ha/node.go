@@ -175,6 +175,10 @@ type Node struct {
 
 	seqMu sync.Mutex
 	seqs  map[string]*atomic.Uint64
+	// epoch is this process's incarnation (random at start); epochs are the
+	// peers' as last learned from a signed answer (guarded by seqMu).
+	epoch  string
+	epochs map[string]string
 
 	pools map[string]*poolState
 	order []string
@@ -269,7 +273,7 @@ func New(cfg Config, st store.HAStore) (*Node, error) {
 	n := &Node{
 		cfg: cfg, st: st, client: newRPCClient(cfg.PeerNetworks, cfg.ForwardTimeout, cfg.ClientTLS),
 		rpcKey: deriveKey(cfg.Secret, "rpc v1"), replay: newReplayGuard(),
-		seqs: map[string]*atomic.Uint64{}, pools: map[string]*poolState{}, kick: make(chan struct{}, 1),
+		seqs: map[string]*atomic.Uint64{}, epoch: newID(), epochs: map[string]string{}, pools: map[string]*poolState{}, kick: make(chan struct{}, 1),
 	}
 	for _, p := range cfg.Pools {
 		n.pools[p.Name] = &poolState{spec: p, local: map[string]*localGrant{}, capacity: p.Capacity, pubCapacity: -1}
@@ -1029,6 +1033,12 @@ func (n *Node) ownerCheck(ps *poolState, known int64) (int, bool) {
 func (n *Node) handle(f func(inst string, body []byte) (int, any)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, inst, seq, err := n.verify(r)
+		if errors.Is(err, errEpoch) {
+			// Authenticated, so signing the answer is safe: it tells the sender
+			// which incarnation to bind to.
+			n.reply(w, inst, seq, statusEpoch, map[string]string{"error": "epoch"})
+			return
+		}
 		if err != nil {
 			// Unsigned: nothing to bind a signature to.
 			http.Error(w, "unauthorized", http.StatusUnauthorized)

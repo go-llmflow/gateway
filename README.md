@@ -348,7 +348,15 @@ ha {
   answer is HMAC-SHA256-signed (key derived with HKDF from `secret_file`),
   bound to the sender's instance, a sequence number and a timestamp
   (5 minutes of clock difference are accepted); replays are refused with a
-  sliding window per instance (RFC 4303, 3.4.3). The owner's address is read
+  sliding window per instance (RFC 4303, 3.4.3). Since v0.30.0 a request is also
+  bound to its receiver: the MAC names the receiver's advertised address and its
+  incarnation (an `epoch`, random at each start, learned from a signed answer:
+  a request with none or a stale one gets a signed 421 naming it and is sent
+  again), so a request captured before a replica restarted (the windows are in
+  memory and start empty) is refused, and one meant for a replica is not valid at
+  another. **Mutual TLS is the recommended mode** (the `tls_*` files below): on
+  plain HTTP anyone on the path who captures a request can still replay it to
+  the same incarnation inside the window until it is seen. The owner's address is read
   from the database and dialled only inside `peer_networks`, without
   redirects, with `forward_timeout`; bodies are bounded. With the three
   `tls_*` files (secret references, all three or none) the channel runs
