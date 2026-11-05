@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-authn/oidc"
@@ -90,9 +91,19 @@ func (s *Server) jwtIdentity(ctx context.Context, j *config.JWT, tok *oidc.Token
 		// A stable key ID per (issuer, subject): budgets, limits, allowlists
 		// and reports see one key per person.
 		sum := sha256.Sum256([]byte(tok.Issuer() + "\x00" + tok.Subject()))
+		id := "jwt-" + base64.RawURLEncoding.EncodeToString(sum[:16])
+		// The person is (issuer, subject), never a name alone (OpenID Connect
+		// Core §2: sub is unique within its issuer; a username claim is not,
+		// and an issuer's users may choose it). The synthetic key id stands
+		// for them, unless a stored user of that name is linked to exactly
+		// this issuer and subject.
+		owner, err := s.jwtPerson(ctx, j, tok, id)
+		if err != nil {
+			return store.Key{}, fmt.Errorf("%w: %v", errAuthUnavailable, err)
+		}
 		return store.Key{
-			ID: "jwt-" + base64.RawURLEncoding.EncodeToString(sum[:16]), Org: t.Org, Team: t.Name, Project: m.Project,
-			Owner: tok.Username(), Name: tok.Username(), RPM: j.RPM, TPM: j.TPM, MaxInFlight: j.MaxInFlight,
+			ID: id, Org: t.Org, Team: t.Name, Project: m.Project,
+			Owner: owner, Name: tok.Username(), RPM: j.RPM, TPM: j.TPM, MaxInFlight: j.MaxInFlight,
 		}, nil
 	}
 	return store.Key{}, errJWTUnmapped
@@ -151,4 +162,46 @@ func looksLikeJWT(s string) bool {
 // and key sets (except loopback) and checks every redirect.
 func defaultJWTClient() *http.Client {
 	return &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: nil}}
+}
+
+// jwtPerson is the person a verified token is attributed to: their username
+// when a stored user of that name is linked (llmflow_user_idps) to this
+// token's issuer and subject, else the synthetic key id.
+//
+// The unnamed jwt block of earlier versions, with no sso provider blocks, keeps
+// the username: there is one issuer and no other identity source whose names
+// it could collide with, which is the setting v0.4.0 to v0.27.0 were built
+// for (a username claim the issuer lets a person choose is that deployment's
+// own trust decision). Any other setting (several issuers, or sso providers
+// beside the jwt block) cannot: two issuers each have an "alice".
+func (s *Server) jwtPerson(ctx context.Context, j *config.JWT, tok *oidc.Token, id string) (string, error) {
+	name := tok.Username()
+	if name == "" || !config.ValidUserName(name) {
+		return id, nil
+	}
+	if j.Name == "" && (s.cfg.SSO == nil || len(s.cfg.SSO.Providers) == 0) {
+		return name, nil
+	}
+	provider, ok := "", false
+	if s.cfg.SSO != nil {
+		for _, p := range s.cfg.SSO.ProviderList() {
+			if strings.TrimRight(p.Issuer, "/") == strings.TrimRight(j.Issuer, "/") {
+				provider, ok = p.Name, true
+				break
+			}
+		}
+	}
+	if !ok {
+		return id, nil
+	}
+	link, err := s.st.UserIdP(ctx, name)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return id, nil
+	case err != nil:
+		return "", err
+	case link == (store.IdPLink{Provider: provider, Subject: tok.Subject()}):
+		return name, nil
+	}
+	return id, nil
 }

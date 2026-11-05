@@ -1941,7 +1941,14 @@ jwt "partners" {                            # inference tokens, routed by iss
 - **Inference tokens**: each `jwt "<name>"` block has its own audience, JWKS,
   maps, `orgs` (a `map` to a team of another organisation is a configuration
   error) and `accept`. A token is routed to its block by its `iss`; an unknown
-  `iss` is a 401, and no other issuer's key set is tried. With one issuer the
+  `iss` is a 401, and no other issuer's key set is tried. **The person a token
+  is attributed to is (issuer, subject)**, not its username claim (v0.28.2): the
+  synthetic `jwt-…` key id stands for them (budgets, `/v1/me/usage`, records,
+  mails), unless a stored user of that name is linked (`llmflow_user_idps`) to
+  that issuer, through the `sso` provider with the same issuer, and that
+  subject. Only the unnamed `jwt` block with no `sso` provider blocks keeps
+  the username claim, as before: one issuer and no other identity source whose
+  names it could collide with. With one issuer the
   path is unchanged: `BenchmarkJWTLookup` (`gateway/jwt_bench_test.go`, one
   issuer, Apple M4 Max, `GOMAXPROCS=1`, 8 rounds interleaved by `abbench
   --max-load 4`, compared with `benchstat`) against a clean clone of v0.25.2:
