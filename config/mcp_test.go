@@ -2,6 +2,7 @@ package config
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -9,10 +10,12 @@ import (
 func TestParseMCPServers(t *testing.T) {
 	c, err := parse(valid + `
 mcp_server "github" {
+  orgs       = ["etabA"]
   url        = "https://mcp.example.org/github/mcp"
   token_file = "/etc/llmflow/mcp-github.token"
 }
 mcp_server "local_files" {
+  orgs     = ["etabA", "etabB"]
   url      = "http://10.0.0.5:8080/mcp"
   protocol = "2025-11-25"
   timeout  = "30s"
@@ -36,23 +39,41 @@ mcp_server "local_files" {
 		t.Fatal("token_file is not a secret reference")
 	}
 	for name, block := range map[string]string{
-		"dot in name":       "mcp_server \"a.b\" {\n  url = \"https://x/mcp\"\n}\n",
-		"duplicate":         "mcp_server \"a\" {\n  url = \"https://x/mcp\"\n}\nmcp_server \"a\" {\n  url = \"https://y/mcp\"\n}\n",
-		"credentials":       "mcp_server \"a\" {\n  url = \"https://u:p@x/mcp\"\n}\n",
-		"query":             "mcp_server \"a\" {\n  url = \"https://x/mcp?k=v\"\n}\n",
-		"scheme":            "mcp_server \"a\" {\n  url = \"file:///etc/passwd\"\n}\n",
-		"relative":          "mcp_server \"a\" {\n  url = \"/mcp\"\n}\n",
-		"token over http":   "mcp_server \"a\" {\n  url = \"http://x/mcp\"\n  token_file = \"/t\"\n}\n",
-		"protocol":          "mcp_server \"a\" {\n  url = \"https://x/mcp\"\n  protocol = \"2024-11-05\"\n}\n",
-		"timeout":           "mcp_server \"a\" {\n  url = \"https://x/mcp\"\n  timeout = \"1h\"\n}\n",
-		"response limit":    "mcp_server \"a\" {\n  url = \"https://x/mcp\"\n  max_response_bytes = 10\n}\n",
-		"unknown attribute": "mcp_server \"a\" {\n  url = \"https://x/mcp\"\n  headers = {}\n}\n",
+		"dot in name":       "mcp_server \"a.b\" {\n  orgs = [\"etabA\"]\n  url = \"https://x/mcp\"\n}\n",
+		"duplicate":         "mcp_server \"a\" {\n  orgs = [\"etabA\"]\n  url = \"https://x/mcp\"\n}\nmcp_server \"a\" {\n  orgs = [\"etabA\"]\n  url = \"https://y/mcp\"\n}\n",
+		"credentials":       "mcp_server \"a\" {\n  orgs = [\"etabA\"]\n  url = \"https://u:p@x/mcp\"\n}\n",
+		"query":             "mcp_server \"a\" {\n  orgs = [\"etabA\"]\n  url = \"https://x/mcp?k=v\"\n}\n",
+		"scheme":            "mcp_server \"a\" {\n  orgs = [\"etabA\"]\n  url = \"file:///etc/passwd\"\n}\n",
+		"relative":          "mcp_server \"a\" {\n  orgs = [\"etabA\"]\n  url = \"/mcp\"\n}\n",
+		"token over http":   "mcp_server \"a\" {\n  orgs = [\"etabA\"]\n  url = \"http://x/mcp\"\n  token_file = \"/t\"\n}\n",
+		"protocol":          "mcp_server \"a\" {\n  orgs = [\"etabA\"]\n  url = \"https://x/mcp\"\n  protocol = \"2024-11-05\"\n}\n",
+		"timeout":           "mcp_server \"a\" {\n  orgs = [\"etabA\"]\n  url = \"https://x/mcp\"\n  timeout = \"1h\"\n}\n",
+		"response limit":    "mcp_server \"a\" {\n  orgs = [\"etabA\"]\n  url = \"https://x/mcp\"\n  max_response_bytes = 10\n}\n",
+		"unknown attribute": "mcp_server \"a\" {\n  orgs = [\"etabA\"]\n  url = \"https://x/mcp\"\n  headers = {}\n}\n",
 	} {
 		if _, err := parse(valid + block); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if _, err := parse(valid + "mcp_server \"a\" {\n  url = \"http://127.0.0.1:9/mcp\"\n  token_file = \"/t\"\n}\n"); err != nil {
+	if _, err := parse(valid + "mcp_server \"a\" {\n  orgs = [\"etabA\"]\n  url = \"http://127.0.0.1:9/mcp\"\n  token_file = \"/t\"\n}\n"); err != nil {
 		t.Fatalf("loopback http with a token: %v", err)
+	}
+}
+
+// A tool server names the organisations whose teams may use it: the gateway
+// calls it with its own token.
+func TestMCPServerOrgs(t *testing.T) {
+	c, err := parse(valid + "mcp_server \"a\" {\n  url = \"https://x/mcp\"\n  orgs = [\"etabA\"]\n}\n")
+	if err != nil || len(c.MCPServers[0].Orgs) != 1 || c.MCPServers[0].Orgs[0] != "etabA" {
+		t.Fatalf("%v %+v", err, c.MCPServers)
+	}
+	for name, block := range map[string]string{
+		"missing": "mcp_server \"a\" {\n  url = \"https://x/mcp\"\n}\n",
+		"empty":   "mcp_server \"a\" {\n  url = \"https://x/mcp\"\n  orgs = []\n}\n",
+		"unknown": "mcp_server \"a\" {\n  url = \"https://x/mcp\"\n  orgs = [\"nowhere\"]\n}\n",
+	} {
+		if _, err := parse(valid + block); err == nil || !strings.Contains(err.Error(), "test.hcl:") {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

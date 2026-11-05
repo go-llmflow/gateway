@@ -1742,7 +1742,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	}
 	c.Guardrails = v.guardrails(raw.Guardrails, orgs, teams, modelClass)
 	c.Tracing = v.tracing(raw.Tracing)
-	c.MCPServers = v.mcpServers(raw.MCPServers)
+	c.MCPServers = v.mcpServers(raw.MCPServers, orgs)
 	v.external(raw, c)
 	v.budgets(raw, c)
 	v.fluids(raw, c)

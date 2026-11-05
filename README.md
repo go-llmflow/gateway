@@ -2884,6 +2884,7 @@ The job environment is not readable through `job_info`: it exists only in the su
 ```hcl
 mcp_server "github" {
   url        = "https://mcp.example.org/github/mcp"
+  orgs       = ["etabA"]                            # the organisations whose teams may use it (required)
   token_file = "vault:secret/llmflow/mcp#github"   # bearer sent to the server, from the secret source
   protocol   = "2026-07-28"                        # or 2025-11-25 / 2025-06-18 / 2025-03-26
   timeout    = "60s"                               # per call, 1s to 10m
@@ -2891,6 +2892,7 @@ mcp_server "github" {
 }
 ```
 
+- **A tool server belongs to organisations** (v0.30.0). The gateway calls a tool server with its own token, so `orgs` names the organisations whose teams may be given its tools; an administrator of any other organisation cannot name it (`PUT /admin/teams/{team}/tools` answers 400), `*` is every tool server of the team's organisation and no more, and a key of another organisation neither sees nor calls its tools. `orgs` is required: a tool server with none is a configuration error.
 - **Tools are named `<server>.<tool>`** (server names are `[A-Za-z0-9_-]{1,32}`). A tool whose name is outside `[A-Za-z0-9_.-]{1,128}`, or whose `x-mcp-header` annotations break the specification's constraints, is left out of the list and logged.
 - **Per-team allow-lists, closed by default.** A team with no list sees no tool. An organisation administrator sets the list with `PUT /admin/teams/{team}/tools` `{"tools":["github.*","docs.search"]}`. A pattern is `*`, `<server>.*` or `<server>.<tool>`, and it must name a configured server. Team administrators can read the list but cannot widen it. `tools/list` returns only the allowed tools. A call to any other tool answers `-32602 Unknown tool`, exactly like a tool that does not exist, and the refusal is audited (`tool.denied`).
 - **Every call is audited before it is made.** A `tool.call` entry (kind `tool`) names the key, its organisation, team and project, the tool, and the SHA-256 and size of the canonical arguments; the arguments themselves are never stored. If that entry cannot be written, the call is not made (503). A `tool.result` entry follows with the outcome (`ok`, `tool_error`, `input_required`, `server_error`, `unavailable`, `malformed`) and the duration. `llmflow_tool_calls_total{team,server,status}` counts the calls.

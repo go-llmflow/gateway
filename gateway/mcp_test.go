@@ -92,7 +92,7 @@ func (f *fakeTools) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func newMCPEnv(t testing.TB, url string) *env {
 	cfg := testConfig("http://127.0.0.1:9") // no model is called here
-	cfg.MCPServers = []config.MCPServer{{Name: "docs", URL: url, Protocol: mcp.Version, Timeout: 5 * time.Second, MaxResponseBytes: 1 << 20}}
+	cfg.MCPServers = []config.MCPServer{{Name: "docs", URL: url, Protocol: mcp.Version, Timeout: 5 * time.Second, MaxResponseBytes: 1 << 20, Orgs: []string{"etabA", "etabB"}}}
 	st := store.NewMemory()
 	srv, err := New(cfg, st, Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg), CacheSaltKey: testSaltKey,
 		MCPTokens: map[string]string{"docs": toolToken}})
