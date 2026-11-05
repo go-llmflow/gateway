@@ -1485,7 +1485,11 @@ profile lookup and a handful of in-memory reads per request (`usageHeaders`).
 - **`finance_viewer`** is a role without scope: it reads the reports of every
   organisation (`/admin/spend`, `/admin/export`, `/admin/fluids`,
   `/admin/lending` with its matrix, `/admin/chargeback`, `/admin/adoption`) and
-  nothing else: no listing of teams, keys or users, no audit log, no write.
+  nothing else: no listing of teams, keys or users, no audit log, no write, and
+  `/admin/spend` refuses `group_by` with `user` or `key` (a finance office reads
+  money and energy, not people; v0.30.0). `/admin/spend` and `/admin/usage.csv`
+  cap the period at 366 days and run a few at a time, like the other reports, and
+  so does `/admin/fluids`.
   Only a **proxy admin** grants it (`PUT /admin/users/{name}/roles`); an
   `org_admin` never can, so an organisation's admin cannot open another
   organisation's reports. It is also a valid `sso` role mapping. Every report
