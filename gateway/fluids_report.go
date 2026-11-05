@@ -561,6 +561,13 @@ func (s *Server) fluidsReport(w http.ResponseWriter, r *http.Request, p *princip
 		apiError(w, http.StatusBadRequest, "invalid_request_error", "format: want json or csv")
 		return
 	}
+	// A report reads every record of its period: a few at a time, like the
+	// other reports (security review 2026-11-05, finding 4).
+	release, ok := heavy(w)
+	if !ok {
+		return
+	}
+	defer release()
 	rows, view, err := s.fluidsData(r, p, from, to, dims)
 	if err != nil {
 		storeError(w, err)

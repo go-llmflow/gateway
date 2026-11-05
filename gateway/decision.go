@@ -491,6 +491,14 @@ func usersCell(n int64, k int) xlsx.Cell {
 	return xlsx.Number(float64(n))
 }
 
+// usersLabelAny is the count, or the words for a small cell, as JSON.
+func usersLabelAny(n int64, k int) any {
+	if hidden(n, k) {
+		return "fewer than " + strconv.Itoa(k)
+	}
+	return n
+}
+
 // usersLabel is usersCell as text.
 func usersLabel(n int64, k int) string {
 	if hidden(n, k) {
@@ -1064,8 +1072,18 @@ func decisionName(from, to time.Time, format string) string {
 
 // json is the report as data.
 func (d *decisionData) json() map[string]any {
+	// The per-partner count of active people is a small cell like the others
+	// (security review 2026-11-05, finding 6): fewer than MinUsers is words.
+	type partnerJSON struct {
+		partner
+		ActiveUsers any
+	}
+	partners := make([]partnerJSON, len(d.Partners))
+	for i, x := range d.Partners {
+		partners[i] = partnerJSON{partner: x, ActiveUsers: usersLabelAny(x.ActiveUsers, d.MinUsers)}
+	}
 	return map[string]any{
-		"from": d.From.UTC(), "to": d.To.UTC(), "generated": d.Generated, "partners": d.Partners, "matrix": d.Matrix,
+		"from": d.From.UTC(), "to": d.To.UTC(), "generated": d.Generated, "partners": partners, "matrix": d.Matrix,
 		"unattributed_gpu_hours": d.Unattributed, "chargeback": d.Chargeback, "currency": d.Currency,
 		"energy_reconciliation": d.EnergyRecon, "energy_reconciliation_note": d.ReconNote, "energy_reconciliation_assumption": reconAssumption,
 		"quotas": d.Quotas, "variance": d.Variance, "variance_threshold_pct": d.VarianceLimit,

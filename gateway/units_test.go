@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-llmflow/gateway/config"
 )
@@ -102,11 +103,11 @@ func TestBudgetsKeepUnitsApart(t *testing.T) {
 	}
 
 	e.srv.Close(context.Background()) // flush the records
-	rep := readAll(t, e.do("GET", "/admin/spend?from=2000-01-01&to=2100-01-01&group_by=org", master, ""))
+	rep := readAll(t, e.do("GET", "/admin/spend?from="+time.Now().AddDate(0, 0, -1).Format("2006-01-02")+"&to="+time.Now().AddDate(0, 0, 2).Format("2006-01-02")+"&group_by=org", master, ""))
 	if !strings.Contains(rep, `"unit":"per_row"`) || !strings.Contains(rep, `"unit":"EUR"`) || !strings.Contains(rep, `"unit":"gpu_hours"`) {
 		t.Fatalf("spend report not split by unit: %s", rep)
 	}
-	csv := readAll(t, e.do("GET", "/admin/spend?from=2000-01-01&to=2100-01-01&group_by=org&format=csv", master, ""))
+	csv := readAll(t, e.do("GET", "/admin/spend?from="+time.Now().AddDate(0, 0, -1).Format("2006-01-02")+"&to="+time.Now().AddDate(0, 0, 2).Format("2006-01-02")+"&group_by=org&format=csv", master, ""))
 	if !strings.Contains(csv, ",cost,unit\n") || !strings.Contains(csv, ",EUR\n") || !strings.Contains(csv, ",gpu_hours\n") {
 		t.Fatalf("CSV report: %s", csv)
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -46,6 +47,13 @@ func (s *Server) spendReport(w http.ResponseWriter, r *http.Request, p *principa
 		apiError(w, http.StatusBadRequest, "invalid_request_error", "from and to are required (RFC 3339 or YYYY-MM-DD), from < to")
 		return
 	}
+	// A report reads every record of its period, whoever asks (a team member
+	// included): the period is bounded like the other reports', and a few run
+	// at a time.
+	if to.Sub(from) > store.MaxReportSpan {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", "the period is longer than "+strconv.Itoa(int(store.MaxReportSpan.Hours()/24))+" days")
+		return
+	}
 	groupBy := q.Get("group_by")
 	if groupBy == "" {
 		groupBy = "org,team"
@@ -53,6 +61,12 @@ func (s *Server) spendReport(w http.ResponseWriter, r *http.Request, p *principa
 	dims, err := ParseGroupBy(groupBy)
 	if err != nil {
 		apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	// A finance office reads money and energy, not people (rbac.go reportView):
+	// it may not group by person or key. The proxy roles may.
+	if p.financeView() && !p.proxyView() && (slices.Contains(dims, "user") || slices.Contains(dims, "key")) {
+		forbidden(w)
 		return
 	}
 	format := q.Get("format")
@@ -63,6 +77,11 @@ func (s *Server) spendReport(w http.ResponseWriter, r *http.Request, p *principa
 		apiError(w, http.StatusBadRequest, "invalid_request_error", "format: want json, csv or parsable2")
 		return
 	}
+	release, ok := heavy(w)
+	if !ok {
+		return
+	}
+	defer release()
 	rows, err := s.visibleReport(r, p, from, to, dims)
 	if err != nil {
 		storeError(w, err)
@@ -85,9 +104,8 @@ func (s *Server) usageCSV(w http.ResponseWriter, r *http.Request, p *principal) 
 // first, filtered (teams the principal may view; for a member, only their
 // own keys), then regrouped onto the dimensions asked for.
 //
-// A report reads every record of its period: it runs under ReportTimeout
-// whatever the period (the API keeps accepting any period; the UI and the
-// exports also cap it at store.MaxReportSpan).
+// A report reads every record of its period: it runs under ReportTimeout, over
+// at most store.MaxReportSpan (spendReport checks it), a few at a time (heavy).
 func (s *Server) visibleReport(r *http.Request, p *principal, from, to time.Time, dims []string) ([]store.ReportRow, error) {
 	ctx, cancel := context.WithTimeout(r.Context(), ReportTimeout)
 	defer cancel()
