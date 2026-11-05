@@ -79,6 +79,11 @@ type Config struct {
 	// JWTs are the named jwt blocks (several issuers); JWT is the unnamed
 	// one of earlier versions. Never both.
 	JWTs []*JWT
+	// LegacyNames keeps matching a stored user with the unscoped name of an
+	// issuer's domain as the same person (an alias, read only), until the
+	// users are renamed with the migrate-users command. Default off: the
+	// gateway refuses to start while unscoped users remain.
+	LegacyNames bool
 	// SSO, when set, logs administrators in with OpenID Connect
 	// (authorization code + PKCE) and keeps them in a session cookie.
 	SSO *SSO

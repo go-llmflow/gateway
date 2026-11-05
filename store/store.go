@@ -377,6 +377,10 @@ type Store interface {
 	CreateSCIMUser(ctx context.Context, name string) error
 	DisableSCIMUser(ctx context.Context, name string) error
 	MarkSCIMOrigin(ctx context.Context, name string) error
+	// RenameUsers renames stored users and everything keyed by their name, in
+	// one transaction (rename.go): idempotent, and refused as a whole, with
+	// the colliding renames returned, when a new name is already in use.
+	RenameUsers(ctx context.Context, renames []UserRename) ([]UserRename, error)
 	// DisableUser disables a user and revokes their admin tokens.
 	DisableUser(ctx context.Context, name string) error
 	// LinkUserIdP binds a user to the identity provider and subject that

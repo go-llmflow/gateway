@@ -38,7 +38,7 @@ func RootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(versionCmd(), checkConfigCmd(), serveCmd(), exportCmd(), auditCmd())
+	root.AddCommand(versionCmd(), checkConfigCmd(), serveCmd(), exportCmd(), auditCmd(), migrateUsersCmd())
 	return root
 }
 

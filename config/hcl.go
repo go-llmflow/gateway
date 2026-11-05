@@ -39,6 +39,7 @@ type fileHCL struct {
 	ShutdownGrace        *string         `hcl:"shutdown_grace,optional"`
 	ShutdownGraceRange   hcl.Range       `hcl:"shutdown_grace,attr_value_range"`
 	ExposeOverheadHeader *bool           `hcl:"expose_overhead_header,optional"`
+	LegacyUnscopedNames  *bool           `hcl:"legacy_unscoped_names,optional"`
 	ExternalGuardrails   *bool           `hcl:"external_requires_guardrails,optional"`
 	ExternalGuardsRange  hcl.Range       `hcl:"external_requires_guardrails,attr_value_range"`
 	CacheIsolation       *string         `hcl:"cache_isolation,optional"`
@@ -863,6 +864,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		KeyCacheTTL:       v.dur(raw.KeyCacheTTL, raw.KeyCacheTTLRange, "key_cache_ttl", DefaultKeyCacheTTL),
 		ShutdownGrace:     v.dur(raw.ShutdownGrace, raw.ShutdownGraceRange, "shutdown_grace", DefaultShutdownGrace),
 		ExposeOverheadHdr: raw.ExposeOverheadHeader != nil && *raw.ExposeOverheadHeader,
+		LegacyNames:       raw.LegacyUnscopedNames != nil && *raw.LegacyUnscopedNames,
 		Retries:           DefaultRetries,
 	}
 	if c.MasterKeyFile == "" {

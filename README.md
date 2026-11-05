@@ -2034,14 +2034,26 @@ jwt "partners" {                            # inference tokens, routed by iss
   eduPersonPrincipalName: single-valued, `caseIgnoreMatch` in the eduPerson schema, the
   scope being the administrative domain that issued it; or `voperson_id`); names are
   compared in ASCII lower case, by go-authn/oidc v0.6.0 `ScopedName`.
-  **Migration.** Accounts that predate scoped names are unscoped (`alice`). The
-  institution they belong to sets `domain = "polytechnique.edu"` on its provider
-  (`sso`) and issuer (`jwt`): an unscoped `alice` is `alice@polytechnique.edu`, and a
-  stored user `alice` is that person and keeps their name (and their roles and tokens)
-  until renamed; only one issuer may carry `domain`, since unscoped names belong to one
-  institution. Without `domain` (or `domains`) an unscoped name is no identity: a login
-  is refused, a token is a synthetic person. **Upgrading a gateway that uses `sso` or
-  `jwt` without a domain therefore needs `domain` set.**
+  **Migration (v0.31.0): `migrate-users`.** Accounts that predate scoped names are
+  bare (`alice`). The institution they belong to sets `domain = "polytechnique.edu"`
+  on its `sso` provider, `jwt` block and `scim` block (only one issuer may carry
+  it, since unscoped names belong to one institution), and
+  `llmflow-gateway migrate-users --config gateway.hcl` prints the plan;
+  `--apply` renames every stored bare user to `name@polytechnique.edu`, **and
+  everything keyed by their name**, in one transaction: roles, admin tokens, the
+  identity link, keys' owners, budgets and the budget ledger (user and workload
+  profile scopes), spend records, profile assignments and warning marks. It is
+  idempotent (a second run changes nothing), refuses to run when a new name is
+  already in use and lists the collisions (nothing is changed), and is written to
+  the audit log before it starts and after it ends. Left as they were: the audit
+  entries (a hash chain), the SCIM records (SCIM maps its raw `userName` to the
+  new name), the per-day anonymous refusal counts, and the history of people who
+  were never stored users. **The gateway refuses to start while stored users with
+  bare names remain and a domain is configured**; `legacy_unscoped_names = true`
+  starts it anyway with a read-only alias (a bare name from the domain's issuer is
+  the stored user of that name) until you migrate. Without a domain, an unscoped
+  name is no identity: a login is refused, a token is a synthetic person, and
+  `scim` is a configuration error.
 - **In front of a SAML federation** ([go-authn/bridge](https://github.com/go-authn/bridge)):
   the bridge can already restrict who may log in, by IdP, with
   `saml { idps = ["<entityID>", ...] }` (README: "restrict; one entry skips the
@@ -2232,9 +2244,9 @@ scim {
 - A provisioned user is a gateway user named `local@domain` (v0.30.0): the
   `userName` (letters, digits, `_ . - @ +`, at most 128) is scoped, its domain
   must be the `domain` or one of the `domains` of the `scim` block (another is a
-  400 `invalidValue`), and an unscoped one takes `domain`. A stored user with the
-  unscoped name (created before scoped names) is that person and keeps their
-  name. The user is disabled while `active` is false or after deletion, which
+  400 `invalidValue`), and an unscoped one takes `domain`. Users created
+  before scoped names are renamed by `migrate-users` (see Names are scoped); until
+  then `legacy_unscoped_names = true` keeps a bare name matching the stored user. The user is disabled while `active` is false or after deletion, which
   revokes their admin tokens. A renamed user is a new gateway user; the old name
   is disabled.
 - **SCIM acts only on the users it provisioned.** A user is created with origin

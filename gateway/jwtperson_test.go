@@ -73,6 +73,7 @@ func TestJWTPersonIsScopedAndTheScopeChecked(t *testing.T) {
 	a, b := newFakeIdP(t), newFakeIdP(t)
 	now := time.Now()
 	e := multiJWTEnv(t, a, b, func() time.Time { return now }, nil)
+	e.cfg.LegacyNames = true
 	e.cfg.JWTs[0].Domain = "univ-a.fr"            // the institution whose accounts predate scoped names
 	e.cfg.JWTs[1].Domains = []string{"univ-b.fr"} // accounts of univ-b.fr, always scoped
 	ctx := context.Background()

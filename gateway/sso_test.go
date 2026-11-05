@@ -30,6 +30,7 @@ func newSSOEnv(t testing.TB, clientSecret string, tweak ...func(*config.SSO)) *s
 	idp.secret = clientSecret
 	cfg := testConfig("http://127.0.0.1:1")
 	cfg.AuthFailuresPerMinute = 0
+	cfg.LegacyNames = true // these tests create bare-named users after the start
 	cfg.SSO = &config.SSO{
 		Domain: "example.org", Issuer: idp.srv.URL, ClientID: "llmflow-admin", RedirectURL: gwOrigin + "/admin/callback",
 		Scopes: []string{"openid", "profile"}, SessionTTL: time.Hour,
@@ -315,6 +316,7 @@ func FuzzSSOCallback(f *testing.F) {
 	idp := newFakeIdP(f)
 	cfg := testConfig("http://127.0.0.1:1")
 	cfg.AuthFailuresPerMinute = 0
+	cfg.LegacyNames = true // these tests create bare-named users after the start
 	cfg.SSO = &config.SSO{Domain: "example.org", Issuer: idp.srv.URL, ClientID: "llmflow-admin", RedirectURL: gwOrigin + "/admin/callback",
 		Scopes: []string{"openid"}, SessionTTL: time.Hour, Roles: []config.SSORole{{Claim: "groups", Value: "g", Role: "proxy_admin"}}}
 	srv, err := New(cfg, store.NewMemory(), Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg), CacheSaltKey: testSaltKey})

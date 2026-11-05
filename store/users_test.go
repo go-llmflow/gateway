@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // contractUsers runs after contract (orgA, etabA exist).
@@ -212,4 +214,150 @@ func contractIdP(t *testing.T, m Store) {
 	if got, err := m.UserIdP(ctx, "idp-user"); err != nil || got != a {
 		t.Fatalf("read back: %+v %v", got, err)
 	}
+}
+
+// RenameUsers: a legacy user, with everything keyed by their name, is renamed in
+// one go; a second run does nothing; a name already in use refuses the whole
+// batch and changes nothing.
+func contractRenameUsers(t *testing.T, s Store) {
+	ctx := context.Background()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(s.CreateUser(ctx, "mig-alice"))
+	must(s.CreateUser(ctx, "mig-bob"))
+	must(s.Grant(ctx, Binding{User: "mig-alice", Role: RoleTeamAdmin, Team: "etabA", Provenance: ProvProxyAdmin}))
+	must(s.CreateUserToken(ctx, UserToken{ID: "t_mig", Hash: HashSecret("llma-mig"), User: "mig-alice"}))
+	_, err := s.LinkUserIdP(ctx, "mig-alice", IdPLink{Provider: "p", Subject: "sub-1"})
+	must(err)
+	must(s.CreateKey(ctx, Key{ID: "k_mig", Hash: HashSecret("k-mig"), Team: "etabA", Owner: "mig-alice"}))
+	must(s.SetBudget(ctx, Budget{BudgetKey: BudgetKey{Kind: ScopeUser, Name: "mig-alice"}, Period: Month, MaxCost: 5}))
+	at := time.Now().UTC()
+	must(s.InsertRecords(ctx, []Record{{ID: "mig-r1", Time: at, Org: "orgA", Team: "etabA", KeyID: "k_mig", User: "mig-alice", Model: "m", Pool: "p", PromptTokens: 10, Cost: 1}}))
+	must(s.AssignProfile(ctx, Assignment{User: "mig-alice", Profile: "mig-prof", SetBy: "test", From: at}))
+
+	// A collision: mig-bob@x.org exists already, so the batch is refused whole.
+	must(s.CreateUser(ctx, "mig-bob@x.org"))
+	renames := []UserRename{{"mig-alice", "mig-alice@x.org"}, {"mig-bob", "mig-bob@x.org"}}
+	coll, err := s.RenameUsers(ctx, renames)
+	if err != nil || len(coll) != 1 || coll[0].From != "mig-bob" {
+		t.Fatalf("collision: %v %v", coll, err)
+	}
+	if _, err := s.GetUser(ctx, "mig-alice"); err != nil {
+		t.Fatalf("a refused batch changed something: %v", err)
+	}
+	if _, err := s.GetUser(ctx, "mig-alice@x.org"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a refused batch created a user: %v", err)
+	}
+
+	// Without the collision it is made.
+	coll, err = s.RenameUsers(ctx, renames[:1])
+	if err != nil || len(coll) != 0 {
+		t.Fatalf("rename: %v %v", coll, err)
+	}
+	if _, err := s.GetUser(ctx, "mig-alice"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the old name remains: %v", err)
+	}
+	if u, err := s.GetUser(ctx, "mig-alice@x.org"); err != nil || u.Name != "mig-alice@x.org" {
+		t.Fatalf("the new user: %+v %v", u, err)
+	}
+	if bs, _ := s.Bindings(ctx, "mig-alice@x.org"); len(bs) != 1 || bs[0].Role != RoleTeamAdmin {
+		t.Errorf("roles: %+v", bs)
+	}
+	if ts, _ := s.ListUserTokens(ctx, "mig-alice@x.org"); len(ts) != 1 {
+		t.Errorf("tokens: %+v", ts)
+	}
+	if l, err := s.UserIdP(ctx, "mig-alice@x.org"); err != nil || l.Subject != "sub-1" {
+		t.Errorf("link: %+v %v", l, err)
+	}
+	if k, _ := s.GetKey(ctx, "k_mig"); k.Owner != "mig-alice@x.org" {
+		t.Errorf("key owner: %q", k.Owner)
+	}
+	found := false
+	bsd, _ := s.Budgets(ctx)
+	for _, b := range bsd {
+		if b.Kind == ScopeUser && b.Name == "mig-alice@x.org" && b.MaxCost == 5 {
+			found = true
+		}
+		if b.Kind == ScopeUser && b.Name == "mig-alice" {
+			t.Errorf("a budget kept the old name")
+		}
+	}
+	if !found {
+		t.Errorf("the budget did not follow")
+	}
+	rows, err := s.Report(ctx, at.Add(-time.Hour), at.Add(time.Hour), []string{"user"})
+	must(err)
+	spent := 0.0
+	for _, r := range rows {
+		if r.User == "mig-alice" {
+			t.Errorf("spend history kept the old name")
+		}
+		if r.User == "mig-alice@x.org" {
+			spent += r.Cost
+		}
+	}
+	if spent != 1 {
+		t.Errorf("spend history under the new name: %v", spent)
+	}
+	as, _ := s.Assignments(ctx)
+	okA := false
+	for _, a := range as {
+		okA = okA || a.User == "mig-alice@x.org"
+		if a.User == "mig-alice" {
+			t.Errorf("assignment kept the old name")
+		}
+	}
+	if !okA {
+		t.Errorf("the profile assignment did not follow")
+	}
+
+	// A second run is a no-op.
+	coll, err = s.RenameUsers(ctx, renames[:1])
+	if err != nil || len(coll) != 0 {
+		t.Fatalf("second run: %v %v", coll, err)
+	}
+	if u, err := s.GetUser(ctx, "mig-alice@x.org"); err != nil || u.Name != "mig-alice@x.org" {
+		t.Fatalf("second run changed the user: %+v %v", u, err)
+	}
+}
+
+func TestRenameUsersMemory(t *testing.T) {
+	m := NewMemory()
+	ctx := context.Background()
+	if err := m.CreateOrg(ctx, "orgA"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CreateTeam(ctx, "etabA", "orgA"); err != nil {
+		t.Fatal(err)
+	}
+	contractRenameUsers(t, m)
+}
+
+func TestRenameUsersPostgres(t *testing.T) {
+	dsn := os.Getenv("LLMFLOW_TEST_PG_DSN")
+	if dsn == "" {
+		t.Skip("LLMFLOW_TEST_PG_DSN not set")
+	}
+	ctx := context.Background()
+	p, err := OpenPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropAll(t, p)
+	p.Close()
+	if p, err = OpenPostgres(ctx, dsn); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if err := p.CreateOrg(ctx, "orgA"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.CreateTeam(ctx, "etabA", "orgA"); err != nil {
+		t.Fatal(err)
+	}
+	contractRenameUsers(t, p)
 }

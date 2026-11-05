@@ -42,6 +42,9 @@ func (s *Server) scopedPerson(ctx context.Context, tok *oidc.Token, scopes []str
 // names, who keeps their name until renamed. A user stored under the scoped
 // name wins.
 func (s *Server) legacyAlias(ctx context.Context, name, domain string) (string, error) {
+	if !s.cfg.LegacyNames {
+		return name, nil // migrated: the user was renamed (migrate-users)
+	}
 	if domain == "" || !strings.HasSuffix(name, "@"+domain) {
 		return name, nil
 	}

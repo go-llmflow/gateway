@@ -444,6 +444,9 @@ func (s *Server) Start(ctx context.Context) error {
 			}
 		}
 	}
+	if err := s.refuseUnscopedUsers(ctx); err != nil {
+		return err
+	}
 	if err := s.startJWT(ctx); err != nil {
 		return err
 	}
