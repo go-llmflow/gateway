@@ -3,8 +3,9 @@ package store
 import (
 	"context"
 	"errors"
-	"strings"
+	"slices"
 
+	"github.com/go-authn/oidc"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -85,7 +86,15 @@ func (p *Postgres) SCIMList(ctx context.Context, kind, name string) ([]SCIMDoc, 
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (SCIMDoc, error) { return scanDoc(r) })
+	docs, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (SCIMDoc, error) { return scanDoc(r) })
+	if err != nil || name == "" {
+		return docs, err
+	}
+	// lower() folds Unicode where the database's locale does (the Kelvin sign
+	// is a "k"), and the index on it must stay so that the query uses it: the
+	// rows are the candidates, and the names this package folds ASCII-only
+	// (go-authn/oidc, the same fold as the scoped names) are the answer.
+	return slices.DeleteFunc(docs, func(d SCIMDoc) bool { return !oidc.EqualASCIIFold(d.Name, name) }), nil
 }
 
 type memSCIM map[[2]string]SCIMDoc
@@ -102,7 +111,7 @@ func (m *Memory) scimNameTaken(d SCIMDoc) bool {
 		return false
 	}
 	for k, o := range m.scim() {
-		if k[0] == "User" && k[1] != d.ID && strings.EqualFold(o.Name, d.Name) {
+		if k[0] == "User" && k[1] != d.ID && oidc.EqualASCIIFold(o.Name, d.Name) {
 			return true
 		}
 	}
@@ -177,7 +186,7 @@ func (m *Memory) SCIMList(_ context.Context, kind, name string) ([]SCIMDoc, erro
 	}
 	out := []SCIMDoc{}
 	for k, d := range m.scimDocs {
-		if k[0] == kind && (name == "" || strings.EqualFold(d.Name, name)) {
+		if k[0] == kind && (name == "" || oidc.EqualASCIIFold(d.Name, name)) {
 			out = append(out, d)
 		}
 	}

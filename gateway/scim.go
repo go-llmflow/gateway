@@ -9,7 +9,6 @@ import (
 	"github.com/go-authn/oidc"
 	"net/http"
 	"slices"
-	"strings"
 	"sync"
 
 	"github.com/go-authn/scim"
@@ -349,7 +348,7 @@ func (b *scimBackend) ListGroups(ctx context.Context, f *scim.Filter) ([]scim.Gr
 // mapping finds the scim group block for a display name.
 func (b *scimBackend) mapping(displayName string) (config.SCIMGroup, bool) {
 	for _, g := range b.s.cfg.SCIM.Groups {
-		if strings.EqualFold(g.Name, displayName) {
+		if oidc.EqualASCIIFold(g.Name, displayName) {
 			return g, true
 		}
 	}
