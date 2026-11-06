@@ -89,6 +89,11 @@ type StreamResult struct {
 	// estimate of completion tokens when the stream ends before the usage
 	// chunk (which comes last).
 	Deltas int64
+	// Partial is the usage a Messages stream reported at message_start when it
+	// ended before message_delta (HavePartial, and then not HaveUsage): a
+	// floor for the charge, never the final usage.
+	Partial     Usage
+	HavePartial bool
 	// Bytes counts the bytes written to the client, exactly (the writes that
 	// succeeded and the one that failed are both counted by what was handed
 	// over only on success: an aborted stream counts what it delivered).
@@ -120,8 +125,9 @@ func CopySSE(dst io.Writer, flush func(), src io.Reader, dropUsage bool) (Stream
 // CopySSEFor is CopySSE for the event stream of ep: a Responses stream
 // carries its usage in the final response.completed (or .incomplete,
 // .failed) event, and its text in response.output_text.delta events.
-func CopySSEFor(ep Endpoint, dst io.Writer, flush func(), src io.Reader, dropUsage bool) (StreamResult, error) {
+func CopySSEFor(ep Endpoint, dst io.Writer, flush func(), src io.Reader, dropUsage bool) (res StreamResult, _ error) {
 	inspectEvent, countDeltas := inspectEvent, countDeltas
+	var partial func() (Usage, bool)
 	switch ep {
 	case Responses:
 		inspectEvent = func(ev []byte) (Usage, bool, bool) {
@@ -135,13 +141,18 @@ func CopySSEFor(ep Endpoint, dst io.Writer, flush func(), src io.Reader, dropUsa
 			u, ok := t.inspect(ev)
 			return u, ok, false
 		}
-		countDeltas = func(ev []byte) int64 { return int64(bytes.Count(ev, messagesDelta)) }
+		countDeltas = countMessagesDeltas
+		partial = t.partial
 	}
+	defer func() {
+		if partial != nil && !res.HaveUsage {
+			res.Partial, res.HavePartial = partial()
+		}
+	}()
 	br := bufio.NewReaderSize(src, 64<<10)
 	var (
 		event    []byte
 		overflow bool // event too long to hold: being streamed through
-		res      StreamResult
 	)
 	write := func(b []byte) error {
 		if len(b) == 0 {

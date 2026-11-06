@@ -221,6 +221,14 @@ func (b *scimBackend) DeleteUser(ctx context.Context, id string) error {
 // retire disables a gateway user that provisioning no longer names and
 // removes the roles provisioning gave it.
 func (b *scimBackend) retire(ctx context.Context, name string) error {
+	if gu, err := b.s.st.GetUser(ctx, name); err != nil || gu.Origin != "scim" {
+		// Not provisioned by SCIM (made by hand, or unknown): neither its
+		// roles nor its state are SCIM's.
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		return nil
+	}
 	bs, err := b.s.st.Bindings(ctx, name)
 	if err != nil {
 		return err
@@ -384,9 +392,15 @@ func (b *scimBackend) reconcile(ctx context.Context) error {
 			b.s.log.Warn("scim: user skipped, no scoped name this client may name", "userName", u.UserName, "err", perr)
 			continue
 		}
-		names[u.ID] = name
-		provisioned[name] = true
 		gu, err := b.s.st.GetUser(ctx, name)
+		// A user is provisioned, and its roles are provisioning's to manage,
+		// only when SCIM created it (origin "scim"): a user made by hand keeps
+		// the roles an administrator granted, and no group of the identity
+		// provider grants it one (README, SCIM).
+		if err == nil && gu.Origin == "scim" || errors.Is(err, store.ErrNotFound) {
+			names[u.ID] = name
+			provisioned[name] = true
+		}
 		switch {
 		case errors.Is(err, store.ErrNotFound):
 			// SCIM provisions the user (origin "scim"), disabled when inactive.

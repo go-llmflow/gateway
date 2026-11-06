@@ -233,11 +233,19 @@ func inspectResponsesEvent(event []byte) (Usage, bool) {
 		return Usage{}, false
 	}
 	var env struct {
+		Type     string `json:"type"`
 		Response *struct {
 			Usage *responsesUsage `json:"usage"`
 		} `json:"response"`
 	}
 	if err := json.Unmarshal(eventPayload(event), &env); err != nil || env.Response == nil || env.Response.Usage == nil {
+		return Usage{}, false
+	}
+	switch env.Type {
+	case "response.completed", "response.incomplete", "response.failed":
+	default:
+		// An earlier event (created, in_progress...) that carries a usage
+		// object reports a running count, not the final one.
 		return Usage{}, false
 	}
 	u := env.Response.Usage.usage()

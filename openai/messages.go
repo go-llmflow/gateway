@@ -119,7 +119,7 @@ func parseMessagesUsage(body []byte) (Usage, bool) {
 // (cumulative). Each event that carries usage refines it.
 type messagesUsageTracker struct {
 	start, last anthropicUsage
-	seen        bool
+	seen, final bool
 }
 
 func (t *messagesUsageTracker) inspect(event []byte) (Usage, bool) {
@@ -138,13 +138,31 @@ func (t *messagesUsageTracker) inspect(event []byte) (Usage, bool) {
 	}
 	switch {
 	case env.Type == "message_start" && env.Message != nil && env.Message.Usage != nil && env.Message.Usage.valid():
+		// The usage of message_start is a floor (output_tokens 0 or 1), never
+		// the final usage: only message_delta, which comes after the text, is.
 		t.start = *env.Message.Usage
+		t.seen = true
+		return Usage{}, false
 	case env.Type == "message_delta" && env.Usage != nil && env.Usage.valid():
 		t.last = *env.Usage
+		t.final = true
 	default:
 		return Usage{}, false
 	}
-	t.seen = true
+	return t.merged()
+}
+
+// partial is what the stream reported so far when it ends before its final
+// usage: message_start's counts, a floor the caller raises to what it forwarded.
+func (t *messagesUsageTracker) partial() (Usage, bool) {
+	if !t.seen || t.final {
+		return Usage{}, false
+	}
+	u := t.start.usage()
+	return u, u.Valid()
+}
+
+func (t *messagesUsageTracker) merged() (Usage, bool) {
 	merged := t.last
 	if merged.InputTokens+merged.CacheReadInputTokens+merged.CacheCreationInputTokens == 0 {
 		merged.InputTokens, merged.CacheReadInputTokens, merged.CacheCreationInputTokens, merged.CacheCreation =
@@ -155,4 +173,14 @@ func (t *messagesUsageTracker) inspect(event []byte) (Usage, bool) {
 	return u, u.Valid()
 }
 
-var messagesDelta = []byte(`"text_delta"`)
+// messagesDeltas are the content_block_delta types that carry generated
+// output: text, thinking and tool-call arguments all cost output tokens.
+var messagesDeltas = [][]byte{[]byte(`"text_delta"`), []byte(`"thinking_delta"`), []byte(`"input_json_delta"`)}
+
+func countMessagesDeltas(ev []byte) int64 {
+	var n int
+	for _, k := range messagesDeltas {
+		n += bytes.Count(ev, k)
+	}
+	return int64(n)
+}

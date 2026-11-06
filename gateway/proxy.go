@@ -435,12 +435,30 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			// billW: a Bedrock answer whose final usage was not read (a stream
 			// cut, an exception event, a CRC failure) is charged the worst case.
 			billW bool
+			// cut: a non-streaming answer the client left before reading.
+			cut   bool
 			bconv interface{ Complete() bool }
 			cconv *converseSSE
 		)
 		defer func() {
 			if !haveUsage && worked {
+				// Never below what the stream reported before it was cut
+				// (message_start's counts), nor below what was forwarded.
 				usage = openai.Usage{PromptTokens: promptEst, CompletionTokens: st.Deltas}
+				if st.HavePartial {
+					if st.Partial.PromptTokens > 0 {
+						usage.PromptTokens = st.Partial.PromptTokens
+					}
+					usage.CompletionTokens = max(usage.CompletionTokens, st.Partial.CompletionTokens)
+					usage.PromptTokensDetails = st.Partial.PromptTokensDetails
+					usage.CacheWrite5m, usage.CacheWrite1h, usage.CacheWriteUnknown = st.Partial.CacheWrite5m, st.Partial.CacheWrite1h, st.Partial.CacheWriteUnknown
+				}
+				if cut {
+					// The client left before the answer: the upstream ran the
+					// request to its bound (no budget: the worst case is not
+					// held, so max_tokens of output stands for it).
+					usage.CompletionTokens = max(usage.CompletionTokens, req.MaxTokens)
+				}
 				usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 				haveUsage, estimated = true, true
 				s.met.estimated.add(1, key.Team, g.cfg.Name)
@@ -612,6 +630,11 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 				// send returns the context error only when a request was
 				// in flight at vLLM: the prompt may have been computed.
 				worked = errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+				if worked && !req.Stream {
+					// A non-streaming answer cut before its first byte: the
+					// upstream may have produced all of it (see below).
+					billW, cut = true, true
+				}
 				return
 			}
 			switch {
@@ -734,6 +757,10 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		if err != nil || int64(len(data)) > maxResp {
 			if r.Context().Err() != nil {
 				status = 499 // client gone while vLLM was answering
+				// The upstream computed the answer nobody read: charge the
+				// worst case (a client could otherwise cut every request
+				// just before its answer and use the GPUs for free).
+				billW, cut = true, true
 				return
 			}
 			status = http.StatusBadGateway
