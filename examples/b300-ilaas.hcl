@@ -149,3 +149,18 @@ model "llama-3.3-70b" {
     redfish_ca_file       = "/etc/llmflow/site-ca.pem"
   }
 }
+
+# The third party's dispatcher (CentraleSupelec/aristote-dispatcher, ILaaS)
+# lists this gateway as one node: {url = "https://llmflow.example.org/fed/ilaas",
+# token = <a key of the organisation tiers>}. Under the prefix only keys of
+# "tiers" are served (403 otherwise), and GET /fed/ilaas/metrics, read without
+# a key from metrics_networks only, gives its "least busy" strategy the
+# time-to-first-token histogram of the requests that came through the prefix,
+# with every 429 counted as +Inf: the dispatcher leaves the node when it is full.
+# The administration, the UI and the gateway's own /metrics are not reachable
+# under the prefix. The organisation must hold no share of the pools it uses.
+federation "ilaas" {
+  prefix           = "/fed/ilaas"
+  org              = "tiers"
+  metrics_networks = ["10.0.0.0/8"]
+}

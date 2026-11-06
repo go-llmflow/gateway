@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeVLLM records what the gateway sends and answers like vLLM's OpenAI
@@ -24,6 +25,7 @@ type fakeVLLM struct {
 	reqs   []recorded
 	status int           // answer with this status when non-zero
 	gate   chan struct{} // when set, completions wait on it
+	delay  time.Duration // each answer waits this long (after the gate)
 	hits   int
 	// reply, when set, is the answer's content: joined for a JSON answer,
 	// one delta per element for a stream (default "hi"; t0, t1, t2).
@@ -105,6 +107,10 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	f.mu.Lock()
+	delay := f.delay
+	f.mu.Unlock()
+	time.Sleep(delay)
 	if status != 0 {
 		http.Error(w, `{"error":"boom"}`, status)
 		return

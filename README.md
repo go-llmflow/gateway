@@ -258,6 +258,77 @@ fluids { pue = 1.3  price_per_kwh = 0.18  currency = "EUR"  idle_energy = "by_us
   energy). With `idle_watts = 0`, the third party pays all the energy of the
   intervals it used. For ILaaS we recommend `idle_energy = "by_usage"`.
 
+### Being a node of a peer dispatcher: `federation` (since v0.37.0)
+
+ILaaS routes its users' requests with
+[CentraleSupelec/aristote-dispatcher](https://github.com/CentraleSupelec/aristote-dispatcher)
+(MIT, read at v1.5.0). It lists each backend as `{url, token, organization,
+max_parallel_requests}`, forwards the client's path (`/v1/chat/completions`…)
+under `url` with `Authorization: Bearer <token>` (`src/sender/main.py`), once,
+and, with its `least_busy` strategy, **polls `<url>/metrics` with no
+credentials** and scores each node by the 95th percentile of
+`vllm:time_to_first_token_seconds` over a 24 s window
+(`src/consumer/strategy/{metrics_tracker,histogram,least_busy}.py`). A node with
+no such histogram scores -1, "never used", and is chosen first; a node it cannot
+read stops being monitored. Pointed at the gateway as it is, the dispatcher sent
+everything to it (the gateway exposes no such histogram, and its own `/metrics`
+must not be opened: it carries per-organisation activity) while the gateway
+answered 429 `pool_spare` whenever the pool was full, and that 429 reached the
+end user. A `federation` block fixes both:
+
+```hcl
+federation "ilaas" {
+  prefix           = "/fed/ilaas"        # 1 to 3 segments; not /v1, /admin, /ui, /metrics...
+  org              = "tiers"             # the peer's organisation (no share of any pool it uses)
+  metrics_networks = ["10.0.0.0/8"]      # who may read <prefix>/metrics, which asks for no key
+}
+```
+
+In the dispatcher: `url = https://llmflow.example.org/fed/ilaas`, `token` = a
+key of the organisation `tiers`.
+
+- **Under the prefix** the inference API of the root answers
+  (`/v1/chat/completions`, `/v1/models`, `/v1/messages`, `/v1/embeddings`…),
+  with the same pipeline, but **the key must belong to `org`**: any other key
+  gets 403, before a budget is held or anything reaches vLLM. The
+  administration, the UI, SSO, SCIM, MCP, `/healthz` and the gateway's own
+  `/metrics` are **not routes** under the prefix (404); a path that is not in
+  clean form (`..`, `//`, `%2e%2e`) is refused (404).
+- **`GET <prefix>/metrics`** needs no key, and is served to `metrics_networks`
+  only (403 elsewhere; `X-Forwarded-For` counts only from `trusted_proxies`, as
+  for every route). It is Prometheus text with one histogram,
+  `vllm:time_to_first_token_seconds` (`_bucket`, `_sum`, `_count`, label
+  `model_name`), with vLLM's own bounds (`TIME_TO_FIRST_TOKEN_BUCKETS`,
+  `vllm/v1/metrics/buckets.py`, selected at `vllm/v1/metrics/loggers.py:831`).
+  Nothing else: no organisation, no key, and nothing of the owners' traffic.
+  Values are printed with a decimal point (`3.0`), as the dispatcher's pattern
+  requires.
+- **What is observed**: for the requests that came through the prefix only, per
+  model, the time from arrival to the first body byte given to the client (the
+  first event of a stream; the whole answer for a non-streamed request, which
+  the gateway reads in full to account it). Every refusal for lack of room (429
+  `pool_spare`, a key's rate limit, 502/503/504, a fallback pool that is full)
+  is observed as **+Inf**: counted in the `+Inf` bucket and `_count` only, not in
+  `_sum`. So the dispatcher's p95 is +Inf as soon as more than 5 % of the
+  window's requests were refused, and it sends the traffic elsewhere; after a
+  window (24 s) without traffic its diff is zero in every bucket, the node
+  scores the first bound (0.001: a zero count in each bucket, not -1) and is
+  tried again. Before any request the exposition has no bucket line, the
+  dispatcher's -1.
+- **Several models**: the dispatcher merges the lines of all models bucket by
+  bucket, the last model (in name order) winning; give the peer one model per
+  node when its score must mean something.
+- **`check-config`** refuses: a prefix that is not 1 to 3 plain segments, one
+  the gateway serves itself, two overlapping prefixes, an unknown `org`, an `org`
+  holding a share of a pool a model uses (it would have reserved capacity, and the
+  signal describes spare capacity), an empty `metrics_networks` or one that
+  contains a `/0`. There are no warnings in `check-config`, so these are errors.
+  Use `borrow = "spare"` on the lent pool: with `borrow = "all"` the peer queues
+  at vLLM instead of being refused, and its latency shows in the histogram.
+- Example: the end of `examples/b300-ilaas.hcl`. Tests port the dispatcher's
+  reading (`Histogram.parse`, `get_percentile`, the window diff) in
+  `gateway/federation_test.go`.
+
 ### Ordering borrowers: Slurm Fair Tree
 
 Among borrowers, the rank is the dense rank of the team's **level fairshare**

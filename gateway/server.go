@@ -149,6 +149,8 @@ type Server struct {
 	secretWriter SecretWriter
 	// scimBackend is the SCIM provisioning backend (nil: no scim block).
 	scimBackend *scimBackend
+	// feds are the federation mounts (federation.go), in configuration order.
+	feds []*fedMount
 	// auditLog records administrative actions; auditKey signs checkpoints.
 	auditLog *audit.Log
 	auditKey ed25519.PrivateKey
@@ -390,6 +392,9 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 		}
 		s.scimBackend = &scimBackend{s: s}
 	}
+	for _, f := range cfg.Federations {
+		s.feds = append(s.feds, newFedMount(f))
+	}
 	if secrets.AuditKey != "" {
 		k, err := audit.ParsePrivateKey(secrets.AuditKey)
 		if err != nil {
@@ -588,6 +593,63 @@ func (s *Server) Close(ctx context.Context) {
 // Handler returns the HTTP handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	inf := s.inferenceRoutes(mux)
+	mux.Handle("GET /healthz", s.withClientAddr(s.cfg.Routes.Healthz, http.HandlerFunc(s.healthz)))
+	// /metrics: from an allowed network, or anywhere with the metrics token.
+	mux.Handle("GET /metrics", s.withClientAddr(nil, http.HandlerFunc(s.metrics)))
+	// MCP: one endpoint for every method (GET and DELETE answer 405).
+	if len(s.mcpServers) > 0 {
+		mux.Handle("/mcp", inf(s.mcpHandler))
+	}
+	s.adminRoutes(mux)
+	if s.scimBackend != nil {
+		mux.Handle("/scim/v2/", s.scimHandler())
+	}
+	// A federation mount answers from its own mux, which holds the inference
+	// routes and its metrics and nothing else (federation.go).
+	fed := make([]fedRoute, len(s.feds))
+	for i, f := range s.feds {
+		fed[i] = fedRoute{f, s.fedMux(f)}
+	}
+	// The UI's security headers go on every response under /ui/, including
+	// the ones the mux writes itself (the redirect that cleans "//", 404s,
+	// 405s), not only on the pages the UI handlers render.
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No server-wide WriteTimeout (a stream lasts as long as generation
+		// does), but no response outlives max_request_duration either: a
+		// client that stops reading would otherwise block its handler in a
+		// write forever, holding the buffered answer, its key's in-flight
+		// slot and its fair-share grant (security audit 2026-10-26, A2).
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(s.cfg.Limits.MaxRequestDuration + writeGrace))
+		for i := range fed {
+			if rest, ok := fed[i].match(r.URL.Path); ok {
+				s.serveFed(w, r, fed[i], rest)
+				return
+			}
+		}
+		if strings.HasPrefix(r.URL.Path, "/ui/") {
+			uiHeaders(w)
+		}
+		adminHeaders(w, r.URL.Path)
+		// Administration (API, UI, SSO, SCIM) reads the store on every
+		// request: bounded, so a partitioned store answers 503 instead of
+		// holding requests (A6). The chain verification reads the whole log.
+		if p := r.URL.Path; strings.HasPrefix(p, "/admin/") || strings.HasPrefix(p, "/ui/") || strings.HasPrefix(p, "/scim/") {
+			d := adminTimeout
+			if p == "/admin/audit/verify" || p == "/ui/audit/verify" {
+				d = s.cfg.Limits.MaxRequestDuration
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), d)
+			defer cancel()
+			r = r.WithContext(ctx)
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+// inferenceRoutes registers the inference API on mux, for the root and for
+// each federation mount, and returns the network guard of its routes.
+func (s *Server) inferenceRoutes(mux *http.ServeMux) func(http.HandlerFunc) http.Handler {
 	inf := func(h http.HandlerFunc) http.Handler { return s.withClientAddr(s.cfg.Routes.Inference, h) }
 	mux.Handle("POST /v1/chat/completions", inf(s.proxy("/v1/chat/completions")))
 	mux.Handle("POST /v1/completions", inf(s.proxy("/v1/completions")))
@@ -616,45 +678,7 @@ func (s *Server) Handler() http.Handler {
 	// The caller's own usage windows (soft quotas, #96): for statusLine
 	// scripts and anything else that wants to show them.
 	mux.Handle("GET /v1/me/usage", inf(s.meUsageHandler))
-	mux.Handle("GET /healthz", s.withClientAddr(s.cfg.Routes.Healthz, http.HandlerFunc(s.healthz)))
-	// /metrics: from an allowed network, or anywhere with the metrics token.
-	mux.Handle("GET /metrics", s.withClientAddr(nil, http.HandlerFunc(s.metrics)))
-	// MCP: one endpoint for every method (GET and DELETE answer 405).
-	if len(s.mcpServers) > 0 {
-		mux.Handle("/mcp", inf(s.mcpHandler))
-	}
-	s.adminRoutes(mux)
-	if s.scimBackend != nil {
-		mux.Handle("/scim/v2/", s.scimHandler())
-	}
-	// The UI's security headers go on every response under /ui/, including
-	// the ones the mux writes itself (the redirect that cleans "//", 404s,
-	// 405s), not only on the pages the UI handlers render.
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// No server-wide WriteTimeout (a stream lasts as long as generation
-		// does), but no response outlives max_request_duration either: a
-		// client that stops reading would otherwise block its handler in a
-		// write forever, holding the buffered answer, its key's in-flight
-		// slot and its fair-share grant (security audit 2026-10-26, A2).
-		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(s.cfg.Limits.MaxRequestDuration + writeGrace))
-		if strings.HasPrefix(r.URL.Path, "/ui/") {
-			uiHeaders(w)
-		}
-		adminHeaders(w, r.URL.Path)
-		// Administration (API, UI, SSO, SCIM) reads the store on every
-		// request: bounded, so a partitioned store answers 503 instead of
-		// holding requests (A6). The chain verification reads the whole log.
-		if p := r.URL.Path; strings.HasPrefix(p, "/admin/") || strings.HasPrefix(p, "/ui/") || strings.HasPrefix(p, "/scim/") {
-			d := adminTimeout
-			if p == "/admin/audit/verify" || p == "/ui/audit/verify" {
-				d = s.cfg.Limits.MaxRequestDuration
-			}
-			ctx, cancel := context.WithTimeout(r.Context(), d)
-			defer cancel()
-			r = r.WithContext(ctx)
-		}
-		mux.ServeHTTP(w, r)
-	})
+	return inf
 }
 
 // adminTimeout bounds an administration request.

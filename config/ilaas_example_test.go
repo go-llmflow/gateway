@@ -29,6 +29,9 @@ func TestILaaSExample(t *testing.T) {
 	if c.MarkupOf("tiers") != 0.15 || c.Fluids.PricePerGB != 0.02 || c.Fluids.PricePerGBMonth != 0.05 {
 		t.Fatalf("markup %v prices %v %v", c.MarkupOf("tiers"), c.Fluids.PricePerGB, c.Fluids.PricePerGBMonth)
 	}
+	if len(c.Federations) != 1 || c.Federations[0].Prefix != "/fed/ilaas" || c.Federations[0].Org != "tiers" || len(c.Federations[0].MetricsNetworks) != 1 {
+		t.Fatalf("federations: %+v", c.Federations)
+	}
 	if c.Fluids == nil || c.Fluids.IdleEnergy != "by_usage" {
 		t.Fatalf("fluids: %+v", c.Fluids)
 	}

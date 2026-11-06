@@ -304,6 +304,15 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (store.Key
 	if !ok {
 		return fail(http.StatusUnauthorized, "authentication_error", "invalid or revoked key")
 	}
+	// Under a federation prefix only the peer's own organisation is served,
+	// before anything is held for the request.
+	if len(s.feds) > 0 {
+		if fc := fedCallOf(r); fc != nil && k.Org != fc.m.cfg.Org {
+			s.met.denied.add(1, k.Team, "federation_org")
+			apiError(w, http.StatusForbidden, "permission_denied", "this key does not belong to the organisation served under this prefix")
+			return store.Key{}, false
+		}
+	}
 	if !s.addrAllowed(r, k) {
 		s.met.denied.add(1, k.Team, "address")
 		apiError(w, http.StatusForbidden, "permission_denied", "address not allowed")

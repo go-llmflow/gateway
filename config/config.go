@@ -137,6 +137,8 @@ type Config struct {
 	Tracing *Tracing
 	// MCPServers are the tool servers exposed at /mcp.
 	MCPServers []MCPServer
+	// Federations are the peer dispatchers served under a prefix.
+	Federations []Federation
 }
 
 // Tracing configures OpenTelemetry traces (OTLP/HTTP or OTLP/gRPC).
