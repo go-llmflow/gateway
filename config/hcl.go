@@ -75,6 +75,7 @@ type fileHCL struct {
 	Guardrails           []guardrailHCL  `hcl:"guardrail,block"`
 	Tracing              *tracingHCL     `hcl:"tracing,block"`
 	MCPServers           []mcpServerHCL  `hcl:"mcp_server,block"`
+	Federations          []federationHCL `hcl:"federation,block"`
 	Budgets              *budgetsHCL     `hcl:"budgets,block"`
 	Fluids               *fluidsHCL      `hcl:"fluids,block"`
 	AdoptionMinUsers     *int            `hcl:"adoption_min_users,optional"`
@@ -1769,6 +1770,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	v.fluids(raw, c)
 	v.redfishNodes(raw, c)
 	v.dcgmPools(raw, c)
+	c.Federations = v.federations(raw.Federations, orgs, c)
 	v.adoptionPrivacy(raw, c)
 	v.decisionReport(raw, c)
 	v.profiles(raw, c)

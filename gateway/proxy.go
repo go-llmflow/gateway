@@ -236,6 +236,11 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
+		if len(s.feds) > 0 {
+			if fc := fedCallOf(r); fc != nil {
+				fc.model = g.cfg.Name // the federation's histogram is per model
+			}
+		}
 		if !s.cfg.PoolAllows(g.cfg.Pool, key.Org) {
 			// The pool lends its idle capacity only to its shareholders
 			// (borrow = "shareholders"): refused before anything is held or
