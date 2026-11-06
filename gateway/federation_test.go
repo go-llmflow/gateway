@@ -587,3 +587,52 @@ func httpToken(s string) bool {
 }
 
 func pathClean(p string) bool { return p == path.Clean(p) }
+
+// BenchmarkFederationPath interleaves one request at the root and one under
+// the federation prefix (same key organisation, same upstream) and reports the
+// mean of each: the cost of the prefix mount (path match, context, writer
+// wrapper, histogram observation). Run on one core:
+//
+//	go test -run '^$' -bench FederationPath -cpu 1 -benchtime 20000x ./gateway
+func BenchmarkFederationPath(b *testing.B) {
+	up := instantUpstream()
+	defer up.Close()
+	cfg, err := config.Parse([]byte(fmt.Sprintf(fedHCL, up.URL, loopbackNets)), "fed.hcl")
+	if err != nil {
+		b.Fatal(err)
+	}
+	st := store.NewMemory()
+	srv, err := New(cfg, st, Secrets{MasterKey: master, UpstreamKeys: testKeys(cfg), CacheSaltKey: testSaltKey})
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := srv.Start(context.Background()); err != nil {
+		b.Fatal(err)
+	}
+	defer srv.Close(context.Background())
+	gw := httptest.NewServer(srv.Handler())
+	defer gw.Close()
+	secret, id, h := store.GenerateKey()
+	if err := st.CreateKey(context.Background(), store.Key{ID: id, Hash: h, Team: "ilaas"}); err != nil {
+		b.Fatal(err)
+	}
+	client := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 4}}
+	body := `{"model":"llama","messages":[{"role":"user","content":"Say hi."}],"max_tokens":8}`
+	for i := 0; i < 200; i++ {
+		post(b, client, gw.URL+"/v1/chat/completions", secret, body)
+		post(b, client, gw.URL+fedPrefix+"/v1/chat/completions", secret, body)
+	}
+	var root, fed time.Duration
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if i%2 == 0 {
+			root += post(b, client, gw.URL+"/v1/chat/completions", secret, body)
+			fed += post(b, client, gw.URL+fedPrefix+"/v1/chat/completions", secret, body)
+		} else {
+			fed += post(b, client, gw.URL+fedPrefix+"/v1/chat/completions", secret, body)
+			root += post(b, client, gw.URL+"/v1/chat/completions", secret, body)
+		}
+	}
+	b.ReportMetric(float64(root.Microseconds())/float64(b.N), "root_us/req")
+	b.ReportMetric(float64(fed.Microseconds())/float64(b.N), "fed_us/req")
+}

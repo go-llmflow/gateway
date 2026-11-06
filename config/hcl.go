@@ -76,7 +76,7 @@ type fileHCL struct {
 	Tracing              *tracingHCL     `hcl:"tracing,block"`
 	MCPServers           []mcpServerHCL  `hcl:"mcp_server,block"`
 	Federations          []federationHCL `hcl:"federation,block"`
-	Budgets             *budgetsHCL     `hcl:"budgets,block"`
+	Budgets              *budgetsHCL     `hcl:"budgets,block"`
 	Fluids               *fluidsHCL      `hcl:"fluids,block"`
 	AdoptionMinUsers     *int            `hcl:"adoption_min_users,optional"`
 	AdoptionMinRange     hcl.Range       `hcl:"adoption_min_users,attr_value_range"`
