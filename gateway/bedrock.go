@@ -540,6 +540,12 @@ func (b *bedrockSSE) chunk(payload []byte) {
 		Type  string `json:"type"`
 		Usage *struct {
 			OutputTokens *int64 `json:"output_tokens"`
+			// The other counts the Messages usage tracker reads
+			// (anthropicUsage.valid): a delta with a negative one is not a
+			// final usage, so the stream is not complete and is charged W.
+			InputTokens              int64 `json:"input_tokens"`
+			CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &ev); err != nil || !validEventType(ev.Type) {
@@ -558,7 +564,8 @@ func (b *bedrockSSE) chunk(payload []byte) {
 	case "message_start":
 		b.start = true
 	case "message_delta":
-		if b.start && ev.Usage != nil && ev.Usage.OutputTokens != nil {
+		if u := ev.Usage; b.start && u != nil && u.OutputTokens != nil && *u.OutputTokens >= 0 &&
+			u.InputTokens >= 0 && u.CacheReadInputTokens >= 0 && u.CacheCreationInputTokens >= 0 {
 			b.usage = true
 		}
 	case "message_stop":

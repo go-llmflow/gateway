@@ -8,7 +8,7 @@ require (
 	github.com/go-authn/scim v0.1.1
 	github.com/go-gitsafe/gitsafe v0.21.0
 	github.com/go-llmflow/aws v0.1.2
-	github.com/go-llmflow/pii v0.2.1
+	github.com/go-llmflow/pii v0.2.2
 	github.com/go-ooxml/ooxml v0.7.0
 	github.com/go-opentype/fonts v0.14.0
 	github.com/go-pdfkit/html2pdf v0.4.0
@@ -32,7 +32,7 @@ require (
 
 require (
 	github.com/agext/levenshtein v1.2.1 // indirect
-	github.com/andybalholm/brotli v1.2.6 // indirect
+	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/apparentlymart/go-textseg/v15 v15.0.0 // indirect
 	github.com/apparentlymart/go-textseg/v17 v17.0.1 // indirect
 	github.com/breml/rootcerts v0.3.7 // indirect
@@ -68,7 +68,7 @@ require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.3 // indirect
-	github.com/klauspost/compress v1.18.7 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/sergeymakinen/go-bmp v1.0.0 // indirect
