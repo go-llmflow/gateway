@@ -7,6 +7,7 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -15,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-llmflow/gateway/openai"
 )
 
 // streamCutRecords runs one stream that the upstream cuts short of its final
@@ -183,5 +186,28 @@ func TestSecAudit2NonStreamingCutIsChargedTheWorstCase(t *testing.T) {
 			t.Errorf("no budget: %d completion tokens estimated=%v, want max_tokens (20)", r.CompletionTokens, r.Estimated)
 		}
 		srv.Close()
+	}
+}
+
+// A Bedrock stream whose message_delta carries an invalid count (a negative
+// input_tokens) is not complete: the Messages tracker does not read it as the
+// final usage, so it is charged W (found by FuzzBedrockStream in CI).
+func TestSecAudit2BedrockDeltaWithInvalidCountIsNotComplete(t *testing.T) {
+	var src []byte
+	src = append(src, chunkEvent(`{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}`)...)
+	src = append(src, chunkEvent(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"a"}}`)...)
+	src = append(src, chunkEvent(`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":-5,"output_tokens":7}}`)...)
+	src = append(src, chunkEvent(`{"type":"message_stop"}`)...)
+	c := newBedrockSSE(bytes.NewReader(src))
+	sse, err := io.ReadAll(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _ := openai.CopySSEFor(openai.Messages, io.Discard, nil, bytes.NewReader(sse), false)
+	if st.HaveUsage || c.Complete() {
+		t.Fatalf("HaveUsage=%v Complete=%v for a delta with a negative count", st.HaveUsage, c.Complete())
+	}
+	if cost, atW := settleBedrockStream(c.Complete(), st, bdrkPrices, 1234); cost != 1234 || !atW {
+		t.Fatalf("charged %d atW=%v, want W", cost, atW)
 	}
 }
