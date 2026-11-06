@@ -3507,6 +3507,7 @@ gateway requires those releases:
 - go-authn/oidc v0.4.3 (#18), go-authn/rp v0.1.3 (#7; v0.2.0 since, for `min_refresh`), go-authn/scim v0.1.1 (#4);
 - go-volumes/interface v0.1.0 (#8) and go-volumes/pool v0.1.0 (#14, #15), their first tags, and go-volumes/s3 v0.2.2 (#17, #18). Since gateway v0.10.1 no fleet module in the graph is pinned at a pseudo-version;
 - go-llmflow/pii v0.2.2 (second audit: context no longer hides an e-mail, an IPv6 address or a lower-case IBAN);
+- andybalholm/brotli v1.2.7 (GO-2026-6888) and klauspost/compress v1.20.2 (GO-2026-6865), indirect, reported by `govulncheck` on 2026-11-06;
 - go-gitsafe/gitsafe v0.17.1, which already declared it.
 
 A consumer building with `GOTOOLCHAIN=local` on an older toolchain is now
