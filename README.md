@@ -2306,7 +2306,12 @@ scim {
 - The members of a mapped group (display names compare without case) get the
   block's role on its team; leaving the group, deactivation or deletion takes
   it away. Only those (role, team) pairs of provisioned users are managed:
-  roles granted by hand stay. Nested groups are not expanded.
+  roles granted by hand stay. Nested groups are not expanded. **Since v0.36.0 a
+  user is provisioned, and its roles managed, only when its origin is `scim`**:
+  posting a SCIM User with the name of a hand-made user no longer revokes the
+  roles an administrator granted it, and a mapped group grants no role to a user
+  SCIM did not create (v0.35.0 did both; the audit proof is
+  `secaudit2_scim_test.go`).
 - The state is reconciled after every change and at start-up, so a change
   interrupted half-way is repaired.
 - The bearer token is compared in constant time and failures count in the
@@ -2578,7 +2583,7 @@ Coding agents that speak the Messages API can therefore use local models. Point 
 
 **Accounting.** It follows vLLM's `AnthropicUsage`. There `input_tokens` excludes the cached prompt, so the gateway charges `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` as prompt, of which `cache_read_input_tokens` are cached.
 
-In a stream, the input counts come from `message_start` and the output count from the final `message_delta`.
+In a stream, the input counts come from `message_start` and the output count from the final `message_delta`. **Since v0.36.0 the usage of `message_start` is a floor, never the final usage** (its `output_tokens` is 0 or 1): usage is final only once `message_delta` has been seen. A stream the client cut before it is charged the larger of what `message_start` reported and the deltas forwarded (`text_delta`, `thinking_delta` and `input_json_delta`), marked estimated, and never more than the hold under a hard budget. Before v0.36.0 a client that left after the text and before `message_delta` was charged one output token, not estimated.
 
 `/v1/messages/count_tokens` (since v0.12.1) goes to vLLM's own endpoint, which renders the chat template and counts the prompt's tokens, so the count is exact (`{"input_tokens": N}`). Claude Code calls it, and falls back to a character-based estimate without it. It is authenticated, allow-listed and rate limited like `/tokenize`, and it is not charged and not guarded. `cache_salt` and the engine fields are stripped; `chat_template_kwargs` is kept, so the count matches the `/v1/messages` request that carries the same fields.
 
@@ -3439,6 +3444,16 @@ go-authn/oidc `nbf` overflow.
 | A8 | low | The admin API, SSO and SCIM answers had no `nosniff`, CSP or frame denial (the UI had them). | fixed, #56 |
 | A9 | high | go-llmflow/pii v0.1.0, used by the `pii` guardrail, is quadratic on long runs of digits (1 MiB took 5 to 20 minutes of one core): any key holder of a guarded team could pin a core per request. Found by the performance review. | fixed in pii v0.2.0 (go-llmflow/pii#2), bumped here in #57 |
 
+Second audit (v0.35.0, fixed in v0.36.0; each proof test fails before the fix):
+
+| # | severity | finding | state |
+|---|---|---|---|
+| B1 | high | `/v1/messages` stream cut after the text and before `message_delta`: billed the 1 output token of `message_start`, `estimated:false`, so a key holder had unlimited output under a hard quota. Same pattern audited on chat, Responses, Bedrock invoke and converse streams and transcription; only Responses (an `in_progress` usage object) had it. | fixed: usage is final at `message_delta`; before, the max of the reported count and the deltas forwarded, estimated |
+| B2 | medium | A non-streaming request cut before its answer was charged the prompt estimate and 0 output (free GPU time, fair-share priority kept). | fixed: charged the worst case under a hard budget, `max_tokens` of output otherwise |
+| B3 | medium | SCIM revoked the hand-granted `team_admin` of a user it did not create, and group membership granted `team_admin` to non-SCIM users. | fixed: only users of origin `scim` are managed |
+| B4 | medium, low | go-llmflow/pii v0.2.1: an e-mail after dots, an IPv6 address after a glued label or before a closing colon, a lower-case IBAN were left in clear. | fixed in pii v0.2.2, bumped here |
+| B5 | low | `fakevllm` (go-llmflow/bench) kept the wider mode of an existing recording holding Authorization headers. | fixed in bench v0.9.2 |
+
 Verified without finding: no cross-organisation IDOR on the 39 admin routes;
 CSRF (synchronizer token, `Origin` and `Sec-Fetch-Site`) on every state change
 of the UI and of cookie-authenticated API calls; a fresh session at login,
@@ -3491,7 +3506,7 @@ gateway requires those releases:
 
 - go-authn/oidc v0.4.3 (#18), go-authn/rp v0.1.3 (#7; v0.2.0 since, for `min_refresh`), go-authn/scim v0.1.1 (#4);
 - go-volumes/interface v0.1.0 (#8) and go-volumes/pool v0.1.0 (#14, #15), their first tags, and go-volumes/s3 v0.2.2 (#17, #18). Since gateway v0.10.1 no fleet module in the graph is pinned at a pseudo-version;
-- go-llmflow/pii v0.2.1 (#3);
+- go-llmflow/pii v0.2.2 (second audit: context no longer hides an e-mail, an IPv6 address or a lower-case IBAN);
 - go-gitsafe/gitsafe v0.17.1, which already declared it.
 
 A consumer building with `GOTOOLCHAIN=local` on an older toolchain is now
