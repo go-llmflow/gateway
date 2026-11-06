@@ -2303,6 +2303,16 @@ scim {
   Users stored before origins existed are claimed at start-up when SCIM gave them
   roles and nobody else did; any other stays out of its reach (a user SCIM
   deactivated before v0.30.0 is not re-enabled by SCIM: an administrator does it).
+- **Names compare without case, ASCII letters only** (go-authn/oidc `ASCIILower`,
+  the fold that produced the scoped names; v0.36.1). `strings.EqualFold` folds
+  Unicode: the Kelvin sign U+212A is a "k" and U+017F (long s) an "s", so two
+  accounts of an IdP, `kate@example.org` and the Kelvin spelling, were one SCIM
+  user in the in-memory store (the second refused, a lookup of `kate` returned
+  both) and a group `Lab Phyſics` received the roles mapped to `Lab Physics`.
+  Group names in `scim` blocks and the `domain(s)` are folded the same way.
+  With PostgreSQL, the unique index on `lower(name)` is unchanged and still
+  refuses the second Kelvin-spelled user (it fails closed); a lookup returns
+  only the ASCII-fold matches.
 - The members of a mapped group (display names compare without case) get the
   block's role on its team; leaving the group, deactivation or deletion takes
   it away. Only those (role, team) pairs of provisioned users are managed:

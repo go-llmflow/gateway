@@ -3,7 +3,7 @@ module github.com/go-llmflow/gateway
 go 1.27.3
 
 require (
-	github.com/go-authn/oidc v0.6.0
+	github.com/go-authn/oidc v0.7.0
 	github.com/go-authn/rp v0.3.0
 	github.com/go-authn/scim v0.1.1
 	github.com/go-gitsafe/gitsafe v0.21.0

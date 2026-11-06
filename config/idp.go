@@ -157,7 +157,7 @@ func (v *validator) domains(domain *string, domains []string, r, rs hcl.Range, w
 	one := ""
 	var out []string
 	if domain != nil {
-		one = strings.ToLower(strings.TrimSuffix(*domain, "."))
+		one = oidc.ASCIILower(strings.TrimSuffix(*domain, "."))
 		if !ok(one) {
 			v.errf(r, "Invalid domain", "%s: domain %q: want a DNS name such as polytechnique.edu", where, *domain)
 			one = ""
@@ -174,7 +174,7 @@ func (v *validator) domains(domain *string, domains []string, r, rs hcl.Range, w
 		}
 	}
 	for _, d := range domains {
-		n := strings.ToLower(strings.TrimSuffix(d, "."))
+		n := oidc.ASCIILower(strings.TrimSuffix(d, "."))
 		if !ok(n) {
 			v.errf(rs, "Invalid domain", "%s: domains entry %q: want a DNS name", where, d)
 			continue

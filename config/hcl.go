@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-authn/oidc"
 	"github.com/go-llmflow/gateway/secret"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/gohcl"
@@ -1742,7 +1743,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		for _, g := range sc.Groups {
 			cg := SCIMGroup{Name: g.Name, Team: g.Team, Role: strOr(g.Role, "member")}
 			switch {
-			case strings.TrimSpace(g.Name) == "" || seen[strings.ToLower(g.Name)]:
+			case strings.TrimSpace(g.Name) == "" || seen[oidc.ASCIILower(g.Name)]:
 				v.errf(g.DefRange, "Invalid group", "group %q: empty or declared twice (names compare without case)", g.Name)
 			case !ValidName(g.Team):
 				v.errf(g.DefRange, "Invalid team", "group %q: team %q", g.Name, g.Team)
@@ -1751,7 +1752,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			case cg.Role != "member" && cg.Role != "team_admin" && cg.Role != "viewer":
 				v.errf(g.DefRange, "Invalid role", "group %q: role %q: want member, team_admin or viewer", g.Name, cg.Role)
 			}
-			seen[strings.ToLower(g.Name)] = true
+			seen[oidc.ASCIILower(g.Name)] = true
 			cs.Groups = append(cs.Groups, cg)
 		}
 		cs.Domain, cs.Domains = v.domains(sc.Domain, sc.Domains, sc.DomainRange, sc.DomainsRange, "scim", "scim", map[string]string{})
