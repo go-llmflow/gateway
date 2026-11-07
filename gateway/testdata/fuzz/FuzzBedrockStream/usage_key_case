@@ -1,0 +1,7 @@
+go test fuzz v1
+[]byte("{\"type\":\"message_delta\",\"usAge\":{\"output_tokens\":0,\"000000000000000\":1000000000000000000,\"00000000000000000000000\":0}}")
+byte('\r')
+uint32(7)
+uint32(7)
+uint32(0)
+uint32(1)

@@ -419,6 +419,8 @@ func printable(s string) string {
 type bedrockSSE struct {
 	*eventReader
 	start, usage, stop bool
+	// reader is the usage reading CopySSEFor will do on what this writes.
+	reader openai.MessagesStream
 }
 
 func newBedrockSSE(r io.Reader) *bedrockSSE {
@@ -557,18 +559,18 @@ func (b *bedrockSSE) chunk(payload []byte) {
 		b.fail("a chunk of the provider's stream could not be read")
 		return
 	}
-	b.out.WriteString("event: " + ev.Type + "\ndata: ")
-	b.out.Write(data.Bytes())
-	b.out.WriteString("\n\n")
+	block := "event: " + ev.Type + "\ndata: " + data.String() + "\n\n"
+	b.out.WriteString(block)
+	// What the reader will find in this block: the tracker CopySSEFor runs, not
+	// a copy of its rules (#157, twice: counts that overflow when summed, and a
+	// usage key spelled "usAge" that Go's decoder matches and its byte search
+	// does not). A stream is complete only when the reader finds the final usage.
+	final := b.reader.Observe([]byte(block))
 	switch ev.Type {
 	case "message_start":
 		b.start = true
 	case "message_delta":
-		// The same test the usage tracker applies (openai.ValidMessagesCounts):
-		// a delta it would not take as the final usage must not make the stream
-		// complete, or a complete stream would have no usage read (#157).
-		if u := ev.Usage; b.start && u != nil && u.OutputTokens != nil &&
-			openai.ValidMessagesCounts(u.InputTokens, *u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens) {
+		if u := ev.Usage; b.start && u != nil && u.OutputTokens != nil && final {
 			b.usage = true
 		}
 	case "message_stop":
