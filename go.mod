@@ -11,15 +11,15 @@ require (
 	github.com/go-llmflow/pii v0.2.2
 	github.com/go-ooxml/ooxml v0.7.0
 	github.com/go-opentype/fonts v0.14.0
-	github.com/go-pdfkit/html2pdf v0.4.0
+	github.com/go-pdfkit/html2pdf v0.4.1
 	github.com/go-pdfkit/pdfkit v0.20.0
-	github.com/go-plot/plot v0.3.0
+	github.com/go-plot/plot v0.3.1
 	github.com/go-redfish/redfish v0.2.0
 	github.com/go-volumes/s3 v0.2.2
 	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/spf13/cobra v1.10.2
-	github.com/zclconf/go-cty v1.19.0
+	github.com/zclconf/go-cty v1.20.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.47.0
@@ -42,18 +42,18 @@ require (
 	github.com/dop251/goja v0.0.0-20260926152631-39ec2650adc9 // indirect
 	github.com/evanw/esbuild v0.28.2 // indirect
 	github.com/go-browserhttp/browserhttp v0.2.0 // indirect
-	github.com/go-gfx/gfx v0.36.1 // indirect
+	github.com/go-gfx/gfx v0.37.0 // indirect
 	github.com/go-gfx/oksvg v0.2.0 // indirect
 	github.com/go-images/gif v0.2.0 // indirect
 	github.com/go-images/images v0.1.0 // indirect
 	github.com/go-images/jpeg v0.3.0 // indirect
-	github.com/go-images/jpeg2000 v0.13.8 // indirect
+	github.com/go-images/jpeg2000 v0.14.0 // indirect
 	github.com/go-images/png v0.2.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/go-ndarray/ndarray v0.18.0 // indirect
+	github.com/go-ndarray/ndarray v0.28.0 // indirect
 	github.com/go-ooxml/opc v0.2.0 // indirect
-	github.com/go-opentype/opentype v0.16.0 // indirect
+	github.com/go-opentype/opentype v0.16.1 // indirect
 	github.com/go-simd/highway v0.0.14 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.4+incompatible // indirect
 	github.com/go-tex/math v0.50.0 // indirect
@@ -71,8 +71,6 @@ require (
 	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/refraction-networking/utls v1.8.2 // indirect
-	github.com/sergeymakinen/go-bmp v1.0.0 // indirect
-	github.com/sergeymakinen/go-ico v1.0.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/tannevaled/gobig2 v0.2.0 // indirect
