@@ -134,6 +134,22 @@ func parseMessagesUsage(body []byte) (Usage, bool) {
 	return u, u.Valid()
 }
 
+// MessagesStream is what CopySSEFor will read from a Messages event stream, for
+// a producer of such a stream (the Bedrock converter) that must know whether
+// its OWN output carries a final usage. It is the tracker CopySSEFor runs,
+// not a second copy of its rules: a copy disagreed twice (#157: counts that
+// overflow when summed; a usage key spelled "usAge", which Go's decoder
+// matches and the tracker's byte search does not), each time calling a stream
+// complete that the reader found no usage in.
+type MessagesStream struct{ t messagesUsageTracker }
+
+// Observe reads one SSE event ("event: ...\ndata: ...\n\n") and reports
+// whether it is the final usage of the stream.
+func (m *MessagesStream) Observe(event []byte) (final bool) {
+	_, ok := m.t.inspect(event)
+	return ok
+}
+
 // messagesUsageTracker merges the usage of a Messages stream: the input
 // counts from message_start, the output count from the last message_delta
 // (cumulative). Each event that carries usage refines it.

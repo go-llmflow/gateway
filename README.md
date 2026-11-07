@@ -3010,11 +3010,17 @@ on the runner, not to the log). The cause: the stream converter took a
 tracker (`openai`) then refused the same delta when the counts, each valid, added up
 past an int64 (`input_tokens` 9223372036854775807 and a `cache_read_input_tokens`
 of 1): a stream reported complete with no usage read. The charge was safe (W), but
-the two disagreed. They now decide with one function,
-`openai.ValidMessagesCounts` (each count in [0, 2^60], so the sums cannot
-overflow), and the input is a committed seed
-(`gateway/testdata/fuzz/FuzzBedrockStream/usage_sum_overflow`). The fuzz-smoke job
-now uploads `testdata/fuzz/<Fuzz>/*` as an artifact when it fails.
+the two disagreed. v0.37.1 first made them share a bound
+(`openai.ValidMessagesCounts`, each count in [0, 2^60], so the sums cannot
+overflow; seed `usage_sum_overflow`); the next fuzz smoke on `main` found a
+second disagreement, now with its input kept by the new artifact upload (the
+upload worked first time): a usage key spelled `usAge`, which Go's decoder
+matches and the tracker's byte search for `"usage"` does not (seed
+`usage_key_case`). Two copies of one rule disagreed twice, so there is no
+second copy: the converter feeds each event it writes to the tracker
+`CopySSEFor` runs (`openai.MessagesStream`) and a stream is complete only when
+the reader finds the final usage in it. The fuzz-smoke job uploads
+`testdata/fuzz/<Fuzz>/*` as an artifact when it fails.
 
 ### vLLM instances as Slurm jobs: elastic pools (#75)
 

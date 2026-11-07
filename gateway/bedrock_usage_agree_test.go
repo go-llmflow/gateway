@@ -18,6 +18,8 @@ func TestTheConverterAndTheUsageTrackerAgreeOnTheFinalUsage(t *testing.T) {
 	for name, delta := range map[string]string{
 		"sum overflows":          `{"type":"message_delta","usage":{"output_tokens":1,"input_tokens":9223372036854775807,"cache_read_input_tokens":1}}`,
 		"three counts overflow":  `{"type":"message_delta","usage":{"output_tokens":1,"input_tokens":4611686018427387904,"cache_read_input_tokens":4611686018427387904,"cache_creation_input_tokens":4611686018427387904}}`,
+		"key in another case":    `{"type":"message_delta","usAge":{"output_tokens":7}}`,
+		"fields in other case":   `{"type":"message_delta","usage":{"Output_Tokens":7,"INPUT_TOKENS":3}}`,
 		"escaped key":            `{"type":"message_delta","usage":{"output_tokens":7}}`,
 		"escaped nested key":     `{"type":"message_delta","usage":{"output_tokens":7}}`,
 		"output tokens overflow": `{"type":"message_delta","usage":{"output_tokens":9223372036854775807}}`,
