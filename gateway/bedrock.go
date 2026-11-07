@@ -564,8 +564,11 @@ func (b *bedrockSSE) chunk(payload []byte) {
 	case "message_start":
 		b.start = true
 	case "message_delta":
-		if u := ev.Usage; b.start && u != nil && u.OutputTokens != nil && *u.OutputTokens >= 0 &&
-			u.InputTokens >= 0 && u.CacheReadInputTokens >= 0 && u.CacheCreationInputTokens >= 0 {
+		// The same test the usage tracker applies (openai.ValidMessagesCounts):
+		// a delta it would not take as the final usage must not make the stream
+		// complete, or a complete stream would have no usage read (#157).
+		if u := ev.Usage; b.start && u != nil && u.OutputTokens != nil &&
+			openai.ValidMessagesCounts(u.InputTokens, *u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens) {
 			b.usage = true
 		}
 	case "message_stop":

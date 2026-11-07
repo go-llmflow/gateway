@@ -315,10 +315,16 @@ key of the organisation `tiers`.
   scores the first bound (0.001: a zero count in each bucket, not -1) and is
   tried again. Before any request the exposition has no bucket line, the
   dispatcher's -1.
-- **Several models**: the dispatcher merges the lines of all models bucket by
-  bucket, the last model (in name order) winning; give the peer one model per
-  node when its score must mean something.
-- **`check-config`** refuses: a prefix that is not 1 to 3 plain segments, one
+- **One model** (since v0.37.1): the dispatcher merges the lines of all models
+  bucket by bucket, the last model (in name order) winning, and a mount answers
+  for every model of the gateway (a fallback included), so with several the
+  node's score would be that of one of them. `check-config` therefore **refuses
+  a `federation` block on a gateway that serves more than one `model`**, naming
+  them. The gateway behind a federation serves one model: run one gateway per
+  model for a peer that needs several. (The alternative, a prefix per model, would
+  need the mount narrowed to a model, which it is not: it serves the inference
+  API of the root.)
+- **`check-config`** refuses: a gateway with several models, a prefix that is not 1 to 3 plain segments, one
   the gateway serves itself, two overlapping prefixes, an unknown `org`, an `org`
   holding a share of a pool a model uses (it would have reserved capacity, and the
   signal describes spare capacity), an empty `metrics_networks` or one that
@@ -2996,6 +3002,19 @@ refusal test per item of the table; the chaos cases above, each charged W;
 `FuzzBedrockStream` (random frames: never a panic, always well-formed SSE, never
 charged less than a complete stream's usage nor less than W for an incomplete
 one), `FuzzBedrockIngress` and `FuzzBedrockModelID`.
+
+**Issue #157 (v0.37.1).** The fuzz smoke of `FuzzBedrockStream` failed on `main`
+with "complete, but the usage was not read", and the input was lost (it is written
+on the runner, not to the log). The cause: the stream converter took a
+`message_delta` as the final usage when each count was non-negative, and the usage
+tracker (`openai`) then refused the same delta when the counts, each valid, added up
+past an int64 (`input_tokens` 9223372036854775807 and a `cache_read_input_tokens`
+of 1): a stream reported complete with no usage read. The charge was safe (W), but
+the two disagreed. They now decide with one function,
+`openai.ValidMessagesCounts` (each count in [0, 2^60], so the sums cannot
+overflow), and the input is a committed seed
+(`gateway/testdata/fuzz/FuzzBedrockStream/usage_sum_overflow`). The fuzz-smoke job
+now uploads `testdata/fuzz/<Fuzz>/*` as an artifact when it fails.
 
 ### vLLM instances as Slurm jobs: elastic pools (#75)
 

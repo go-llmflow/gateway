@@ -1,0 +1,7 @@
+go test fuzz v1
+[]byte("{\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1,\"input_tokens\":9223372036854775807,\"cache_read_input_tokens\":1}}")
+byte('\x03')
+uint32(7)
+uint32(7)
+uint32(7)
+uint32(7)
