@@ -299,6 +299,12 @@ func TestBudgetDeniesAndFailsClosed(t *testing.T) {
 	now := time.Now()
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 	e := newEnv(t, testConfig(up.URL()), WithClock(clock))
+	// A budget needs the model's context length for the worst case, which the
+	// gateway reads from the upstream's /v1/models in the background: until it
+	// has, a request under a budget is refused (503, fail-closed: correctly).
+	// The test sent its first request without waiting for that, so it failed
+	// whenever the read lost the race (GOMAXPROCS=1 reproduces it).
+	eventually(t, 10*time.Second, "the context length is known", func() bool { return e.srv.groups["llama"].contextLen() > 0 })
 	_, key := e.newKey("etabA")
 	// Two requests fit 0.4 at their worst case, not three (budgets_test.go).
 	resp := e.do("PUT", "/admin/budgets", master, `{"kind":"team","name":"etabA","period":"day","max_cost":0.4}`)
@@ -306,12 +312,12 @@ func TestBudgetDeniesAndFailsClosed(t *testing.T) {
 		t.Fatalf("set budget: %d %s", resp.StatusCode, out)
 	}
 	resp = e.do("POST", "/v1/chat/completions", key, chat)
-	if readAll(t, resp); resp.StatusCode != 200 {
-		t.Fatalf("first request %d", resp.StatusCode)
+	if out := readAll(t, resp); resp.StatusCode != 200 {
+		t.Fatalf("first request %d %s", resp.StatusCode, out)
 	}
 	resp = e.do("POST", "/v1/chat/completions", key, chat)
-	if readAll(t, resp); resp.StatusCode != 200 {
-		t.Fatalf("second request %d", resp.StatusCode)
+	if out := readAll(t, resp); resp.StatusCode != 200 {
+		t.Fatalf("second request %d %s", resp.StatusCode, out)
 	}
 	resp = e.do("POST", "/v1/chat/completions", key, chat)
 	if out := readAll(t, resp); resp.StatusCode != http.StatusTooManyRequests || !strings.Contains(out, "insufficient_quota") {
