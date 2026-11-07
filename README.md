@@ -1020,7 +1020,10 @@ When `max_model_len` is not configured, the gateway reads it from each
 upstream's `GET /v1/models` at health check, and sends a held request only to
 an upstream whose length it has read since that upstream last became healthy.
 **Set `max_model_len` on every model a budget can apply to.** It is then never
-learned late, for example from a Slurm instance that just joined.
+learned late, for example from a Slurm instance that just joined. Without it,
+**right after start-up a request under a budget gets a 503** (`the context length
+of this model is unknown`) until `/v1/models` has been read: a refusal, never an
+admission (a client retries; a test that sends a request at once waits first).
 
 `check-config` validates these fields, bounds every price to 1e6 per million
 tokens (so the integers cannot overflow), and refuses a context beta that is

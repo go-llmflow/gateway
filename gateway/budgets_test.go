@@ -66,7 +66,10 @@ func (e *env) waitRecords(n int) {
 	// just after the insert).
 	for len(e.st.Records()) < n || !settled() {
 		if time.Now().After(deadline) {
-			e.t.Fatalf("%d records stored, want %d (settled: %v)", len(e.st.Records()), n, settled())
+			// A request that was refused stores no record: say what the last
+			// request of this env got, so that a refusal reads as one.
+			e.t.Fatalf("%d records stored, want %d (settled: %v); the last request, %s, was answered %d",
+				len(e.st.Records()), n, settled(), e.lastRequest(), e.lastStatusCode())
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
