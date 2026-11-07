@@ -3,6 +3,7 @@ package config
 import (
 	"net/netip"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -55,6 +56,21 @@ func (v *validator) federations(raw []federationHCL, orgs map[string]bool, c *Co
 	if len(raw) > MaxFederations {
 		v.errf(raw[MaxFederations].NameRange, "Too many federation blocks", "at most %d", MaxFederations)
 		return nil
+	}
+	// ⛔ One model. The peer merges the histograms of a node bucket by bucket
+	// (the last series it reads wins), and a mount answers for every model of the
+	// gateway, a fallback included: with several, the node's latency would be
+	// that of whichever model sorts last. The mount cannot be narrowed to a model
+	// (the inference API of the root is what it serves), so the gateway behind a
+	// federation serves one: run one gateway per model for a peer that needs
+	// several.
+	if len(raw) > 0 && len(c.ModelGroups) > 1 {
+		names := make([]string, 0, len(c.ModelGroups))
+		for _, g := range c.ModelGroups {
+			names = append(names, g.Name)
+		}
+		slices.Sort(names)
+		v.errf(raw[0].NameRange, "Federation reaches several models", "federation %q: this gateway serves several models (%s) and the peer dispatcher merges a node's histograms bucket by bucket, so the last model would speak for all of them; a gateway behind a federation serves one model (run one gateway per model for a peer that needs several)", raw[0].Name, strings.Join(names, ", "))
 	}
 	var out []Federation
 	names := map[string]bool{}

@@ -100,7 +100,27 @@ func (a anthropicUsage) usage() Usage {
 }
 
 func (a anthropicUsage) valid() bool {
-	return a.InputTokens >= 0 && a.OutputTokens >= 0 && a.CacheReadInputTokens >= 0 && a.CacheCreationInputTokens >= 0
+	return ValidMessagesCounts(a.InputTokens, a.OutputTokens, a.CacheReadInputTokens, a.CacheCreationInputTokens)
+}
+
+// MaxTokenCount bounds each count of a Messages usage: 2^60 tokens is beyond
+// any real answer, and four counts of it still add up (the prompt is the sum
+// of three, the total adds the output) without overflowing an int64.
+const MaxTokenCount = int64(1) << 60
+
+// ValidMessagesCounts says whether these four counts of a Messages usage are a
+// usage: each in [0, MaxTokenCount]. The tracker above and the Bedrock stream
+// converter decide what a final usage is with this ONE function; before, the
+// converter accepted counts that were not negative and the tracker then
+// refused their sum (an overflow), so a stream was "complete" with no usage
+// read (issue #157).
+func ValidMessagesCounts(input, output, cacheRead, cacheCreate int64) bool {
+	for _, n := range [...]int64{input, output, cacheRead, cacheCreate} {
+		if n < 0 || n > MaxTokenCount {
+			return false
+		}
+	}
+	return true
 }
 
 func parseMessagesUsage(body []byte) (Usage, bool) {

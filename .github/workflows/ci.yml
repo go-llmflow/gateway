@@ -131,6 +131,16 @@ jobs:
           check-latest: true
       - name: fuzz
         run: go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=30s ${{ matrix.pkg }}
+      # The failing input is written to <pkg>/testdata/fuzz/<Fuzz>/ on the
+      # runner and is nowhere in the log: keep it, to reproduce (issue #157 lost
+      # one) and to commit it as a regression test.
+      - name: keep the failing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: "**/testdata/fuzz/${{ matrix.target }}/*"
+          if-no-files-found: warn
 
   build:
     name: cross-build CGO_ENABLED=0 ${{ matrix.goos }}/${{ matrix.goarch }}
