@@ -31,6 +31,9 @@ type env struct {
 	gw  *httptest.Server
 	st  *store.Memory
 	cfg *config.Config
+
+	// ready runs waitContextLengths before the env's first request.
+	ready sync.Once
 }
 
 func testConfig(upstreams ...string) *config.Config {
@@ -110,8 +113,31 @@ func newEnv(t *testing.T, cfg *config.Config, opts ...Option) *env {
 	return e
 }
 
+// waitContextLengths gives every vLLM group the time to learn its model's
+// context length. The gateway reads it from the upstream's /v1/models in the
+// background and, until it has it, REFUSES a request under a budget (503,
+// fail-closed: correct). A test that sets a budget and sends a request at once
+// assumed the read had finished; under load (GOMAXPROCS=1) it had not, and
+// TestBudgetDeniesAndFailsClosed, TestHardBudgetMaxTokens, TestSoftBudget...
+// and TestBudgetsKeepUnitsApart failed with that refusal (one hung for ten
+// minutes in waitRecords, whose request was refused). Not a failure when a
+// group never learns it (a test about an unknown length keeps its premise):
+// the wait is capped.
+func waitContextLengths(srv *Server) {
+	deadline := time.Now().Add(3 * time.Second)
+	for _, g := range srv.groups {
+		if g.cfg.External != nil || g.cfg.MaxModelLen > 0 {
+			continue
+		}
+		for g.contextLen() == 0 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
 func (e *env) do(method, path, token, body string, hdr ...string) *http.Response {
 	e.t.Helper()
+	e.ready.Do(func() { waitContextLengths(e.srv) })
 	req, err := http.NewRequest(method, e.gw.URL+path, strings.NewReader(body))
 	if err != nil {
 		e.t.Fatal(err)
