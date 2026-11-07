@@ -31,6 +31,9 @@ type env struct {
 	gw  *httptest.Server
 	st  *store.Memory
 	cfg *config.Config
+
+	// ready runs waitContextLengths before the env's first request.
+	ready sync.Once
 }
 
 func testConfig(upstreams ...string) *config.Config {
@@ -110,8 +113,31 @@ func newEnv(t *testing.T, cfg *config.Config, opts ...Option) *env {
 	return e
 }
 
+// waitContextLengths gives every vLLM group the time to learn its model's
+// context length. The gateway reads it from the upstream's /v1/models in the
+// background and, until it has it, REFUSES a request under a budget (503,
+// fail-closed: correct). A test that sets a budget and sends a request at once
+// assumed the read had finished; under load (GOMAXPROCS=1) it had not, and
+// TestBudgetDeniesAndFailsClosed, TestHardBudgetMaxTokens, TestSoftBudget...
+// and TestBudgetsKeepUnitsApart failed with that refusal (one hung for ten
+// minutes in waitRecords, whose request was refused). Not a failure when a
+// group never learns it (a test about an unknown length keeps its premise):
+// the wait is capped.
+func waitContextLengths(srv *Server) {
+	deadline := time.Now().Add(3 * time.Second)
+	for _, g := range srv.groups {
+		if g.cfg.External != nil || g.cfg.MaxModelLen > 0 {
+			continue
+		}
+		for g.contextLen() == 0 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
 func (e *env) do(method, path, token, body string, hdr ...string) *http.Response {
 	e.t.Helper()
+	e.ready.Do(func() { waitContextLengths(e.srv) })
 	req, err := http.NewRequest(method, e.gw.URL+path, strings.NewReader(body))
 	if err != nil {
 		e.t.Fatal(err)
@@ -299,6 +325,12 @@ func TestBudgetDeniesAndFailsClosed(t *testing.T) {
 	now := time.Now()
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 	e := newEnv(t, testConfig(up.URL()), WithClock(clock))
+	// A budget needs the model's context length for the worst case, which the
+	// gateway reads from the upstream's /v1/models in the background: until it
+	// has, a request under a budget is refused (503, fail-closed: correctly).
+	// The test sent its first request without waiting for that, so it failed
+	// whenever the read lost the race (GOMAXPROCS=1 reproduces it).
+	eventually(t, 10*time.Second, "the context length is known", func() bool { return e.srv.groups["llama"].contextLen() > 0 })
 	_, key := e.newKey("etabA")
 	// Two requests fit 0.4 at their worst case, not three (budgets_test.go).
 	resp := e.do("PUT", "/admin/budgets", master, `{"kind":"team","name":"etabA","period":"day","max_cost":0.4}`)
@@ -306,12 +338,12 @@ func TestBudgetDeniesAndFailsClosed(t *testing.T) {
 		t.Fatalf("set budget: %d %s", resp.StatusCode, out)
 	}
 	resp = e.do("POST", "/v1/chat/completions", key, chat)
-	if readAll(t, resp); resp.StatusCode != 200 {
-		t.Fatalf("first request %d", resp.StatusCode)
+	if out := readAll(t, resp); resp.StatusCode != 200 {
+		t.Fatalf("first request %d %s", resp.StatusCode, out)
 	}
 	resp = e.do("POST", "/v1/chat/completions", key, chat)
-	if readAll(t, resp); resp.StatusCode != 200 {
-		t.Fatalf("second request %d", resp.StatusCode)
+	if out := readAll(t, resp); resp.StatusCode != 200 {
+		t.Fatalf("second request %d %s", resp.StatusCode, out)
 	}
 	resp = e.do("POST", "/v1/chat/completions", key, chat)
 	if out := readAll(t, resp); resp.StatusCode != http.StatusTooManyRequests || !strings.Contains(out, "insufficient_quota") {
