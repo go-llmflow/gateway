@@ -34,6 +34,24 @@ type env struct {
 
 	// ready runs waitContextLengths before the env's first request.
 	ready sync.Once
+
+	// last is the latest request of the env and its status, for a failure that
+	// waits on a record a refused request never stores (waitRecords).
+	lastMu     sync.Mutex
+	last       string
+	lastStatus int
+}
+
+func (e *env) lastRequest() string {
+	e.lastMu.Lock()
+	defer e.lastMu.Unlock()
+	return e.last
+}
+
+func (e *env) lastStatusCode() int {
+	e.lastMu.Lock()
+	defer e.lastMu.Unlock()
+	return e.lastStatus
 }
 
 func testConfig(upstreams ...string) *config.Config {
@@ -152,6 +170,9 @@ func (e *env) do(method, path, token, body string, hdr ...string) *http.Response
 	if err != nil {
 		e.t.Fatal(err)
 	}
+	e.lastMu.Lock()
+	e.last, e.lastStatus = method+" "+path, resp.StatusCode
+	e.lastMu.Unlock()
 	return resp
 }
 
