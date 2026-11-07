@@ -1,15 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
-  ],
-  "postUpdateOptions": ["gomodTidy"],
-  "packageRules": [
-    {
-      "description": "Auto-merge non-breaking Go dependency updates",
-      "matchManagers": ["gomod"],
-      "matchUpdateTypes": ["minor", "patch"],
-      "automerge": true
-    }
+    "github>go-llmflow/.github"
   ]
 }

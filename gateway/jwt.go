@@ -64,6 +64,9 @@ func (s *Server) jwtIdentity(ctx context.Context, j *config.JWT, tok *oidc.Token
 	if ref := oidc.Check(j.Accept, tok); ref != nil {
 		return store.Key{}, fmt.Errorf("%w: %v", errJWTUnmapped, ref)
 	}
+	if err := tiedToInstitution(tok, j.Accept, j.NameScopes(), j.Domain); err != nil {
+		return store.Key{}, fmt.Errorf("%w: %v", errJWTUnmapped, err)
+	}
 	for _, m := range j.Maps {
 		if !slices.Contains(oidc.ClaimValues(tok, m.Claim), m.Value) {
 			continue

@@ -203,6 +203,66 @@ func scopes(domain string, domains []string, accept []Accept) []string {
 	return out
 }
 
+// DomainsConfigured reports whether any identity source (an sso provider, a jwt
+// issuer, the scim client) names the institutions' domains: names are then
+// local@domain, and a bare name is no one's.
+func (c *Config) DomainsConfigured() bool {
+	for _, p := range c.SSO.providers() {
+		if len(p.NameScopes()) > 0 {
+			return true
+		}
+	}
+	for _, j := range c.JWTIssuers() {
+		if len(j.NameScopes()) > 0 {
+			return true
+		}
+	}
+	return c.SCIM != nil && len(c.SCIM.NameScopes()) > 0
+}
+
+func (s *SSO) providers() []SSOProvider {
+	if s == nil {
+		return nil
+	}
+	return s.ProviderList()
+}
+
+// OrgNameScopes are the domains whose people org may hold: the scopes of the
+// sso providers and jwt issuers bound to org (an unrestricted sso block is
+// bound to every org), and of the scim client when a group it maps lands on one
+// of org's teams. An org administrator creates users in these domains only: a
+// name in another institution's domain would squat a person that institution's
+// provisioning or login is to own.
+func (c *Config) OrgNameScopes(org string) []string {
+	var out []string
+	add := func(ss []string) {
+		for _, s := range ss {
+			if !slices.Contains(out, s) {
+				out = append(out, s)
+			}
+		}
+	}
+	for _, p := range c.SSO.providers() {
+		if !p.Restricted || slices.Contains(p.Orgs, org) {
+			add(p.NameScopes())
+		}
+	}
+	for _, j := range c.JWTIssuers() {
+		if slices.Contains(j.Orgs, org) {
+			add(j.NameScopes())
+		}
+	}
+	if c.SCIM != nil {
+		for _, g := range c.SCIM.Groups {
+			if c.OrgOfTeam(g.Team) == org {
+				add(c.SCIM.NameScopes())
+				break
+			}
+		}
+	}
+	return out
+}
+
 // NameScopes of the provider: see scopes.
 func (p *SSOProvider) NameScopes() []string { return scopes(p.Domain, p.Domains, p.Accept) }
 

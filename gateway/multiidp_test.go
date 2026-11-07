@@ -351,13 +351,23 @@ func TestMultiIdPAccept(t *testing.T) {
 		{"absent claim", with(nil), 403, "did not state your institution"},
 		{"wrong value", with(map[string]any{"schac_home_organization": "univ-z.fr"}), 403, `institution \"univ-z.fr\" is not accepted`},
 		{"right value", with(map[string]any{"schac_home_organization": "univ-a.fr"}), 303, ""},
+		// The name's scope must BE the institution the token states (audit
+		// 2026-11-07): these two state univ-b.fr, so their names carry it.
 		{"domain compared without case", with(map[string]any{"schac_home_organization": "UNIV-B.FR"}), 303, ""},
 		{"multi-valued with one accepted", with(map[string]any{"schac_home_organization": []string{"univ-z.fr", "univ-b.fr"}}), 303, ""},
+		{"the name's scope is another accepted institution", with(map[string]any{"schac_home_organization": "univ-b.fr", "preferred_username": "mallory@univ-a.fr"}), 403, "not the one of your name"},
 		{"multi-valued with none accepted", with(map[string]any{"schac_home_organization": []string{"univ-y.fr", "univ-z.fr"}}), 403, `institution \"univ-y.fr\"`},
 		{"suffix is not a match", with(map[string]any{"schac_home_organization": "evil-univ-a.fr"}), 403, "not accepted"},
 		{"hostile value is shown safely", with(map[string]any{"schac_home_organization": "x\r\n<script>"}), 403, "not accepted"},
 	} {
-		code, body, _ := m.login("fed", m.claims("fed", "f-"+tc.name, "user-"+strings.ReplaceAll(tc.name, " ", "-"), tc.claims))
+		who := "user-" + strings.ReplaceAll(tc.name, " ", "-")
+		if tc.want == 303 {
+			who += "@univ-b.fr" // the institution these cases state
+			if tc.name == "right value" {
+				who = strings.TrimSuffix(who, "@univ-b.fr") + "@univ-a.fr"
+			}
+		}
+		code, body, _ := m.login("fed", m.claims("fed", "f-"+tc.name, who, tc.claims))
 		if code != tc.want || !strings.Contains(body, tc.msg) {
 			t.Errorf("%s: %d %s", tc.name, code, body)
 		}
@@ -394,7 +404,7 @@ func TestMultiIdPJWT(t *testing.T) {
 	rs := map[string]any{"alg": "RS256", "kid": "k1", "typ": "JWT"}
 	lab := map[string]any{"groups": []string{"lab"}}
 	withB := func(extra map[string]any) map[string]any {
-		x := map[string]any{"aud": "other-aud", "groups": []string{"lab"}}
+		x := map[string]any{"aud": "other-aud", "groups": []string{"lab"}, "preferred_username": "alice@univ-b.fr"}
 		for k, v := range extra {
 			x[k] = v
 		}

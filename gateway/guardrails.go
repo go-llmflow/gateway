@@ -163,6 +163,9 @@ type guardReq struct {
 	scope  reqScope
 	rid    string
 	guards []*guardrail
+	// priority is the vLLM priority of the request's own grant: a guard call
+	// runs in the caller's band, not ahead of every owner's work at 0.
+	priority int
 	// msgs are the request's texts after the pre-call guards.
 	msgs []guard.Message
 
@@ -496,13 +499,15 @@ func (s *Server) streamGuardFor(ep openai.Endpoint, ctx context.Context, rq *gua
 // ---- guard models: Llama Guard, Prompt Guard ----
 //
 // A guard model is a model group of class "guard", reached through the
-// gateway's own routing (upstream choice, retries, cooldown) at vLLM
-// priority 0, the highest: the guard is on the critical path of the
-// request it judges. It does not go through the fair-share pool — it is
-// not the team's work but the gateway's check of it, and making it wait
-// behind the team's own requests would add their queueing to every one —
-// but what it costs is charged to the team: a spend record and its
-// budgets, under the guard model's name.
+// gateway's own routing (upstream choice, retries, cooldown) at the vLLM
+// priority of the request it judges (its grant's band; since v0.38.0: it was
+// 0, the highest, which let a spare-only borrower's requests run guard calls
+// ahead of every owner's work): the guard is on the critical path of that
+// request. It does not go through the fair-share pool — it is not the team's
+// work but the gateway's check of it, and making it wait behind the team's
+// own requests would add their queueing to every one — but what it costs is
+// charged to the team: a spend record and its budgets, under the guard
+// model's name.
 
 func (s *Server) callGuardModel(ctx context.Context, rq *guardReq, model, path string, body []byte) ([]byte, error) {
 	g := s.groups[model]
@@ -527,7 +532,7 @@ func (s *Server) callGuardModel(ctx context.Context, rq *guardReq, model, path s
 	sc.overflow = adm.overflow
 	ctx = withBoundOnly(ctx, func() bool { return adm.hold != nil })
 	t0 := time.Now()
-	resp, u, _, err := s.send(ctx, g, path, body, "application/json", 0, rq.rid)
+	resp, u, _, err := s.send(ctx, g, path, body, "application/json", rq.priority, rq.rid)
 	if err != nil {
 		return nil, err
 	}
