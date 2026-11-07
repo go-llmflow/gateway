@@ -37,6 +37,51 @@ func (s *Server) scopedPerson(ctx context.Context, tok *oidc.Token, scopes []str
 	return s.legacyAlias(ctx, name, domain)
 }
 
+var errInstitutionNotTied = errors.New("the name's scope is not the institution the token states")
+
+// tiedToInstitution holds a person to the institution their token states. An
+// issuer that serves a federation filters on the institution claim (accept on
+// schac_home_organization) and takes the name scopes from the same values, but
+// those were two independent checks: a token of univ-d.fr's IdP stating
+// schac_home_organization = univ-c.fr passed the filter, kept its own scope, and
+// the role maps on that claim gave it univ-c.fr's team (audit 2026-11-07). With
+// such an accept, the scope of the person's name (as ScopedName returns it,
+// before any legacy alias) must EQUAL a value of the claim, and that value must
+// be one the accept block accepts; otherwise the person is nobody and is given
+// no team and no role. Without an institution accept there is nothing to tie.
+func tiedToInstitution(tok *oidc.Token, accept []config.Accept, scopes []string, domain string) error {
+	var claims []config.Accept
+	for _, a := range accept {
+		if strings.EqualFold(a.Claim, "schac_home_organization") || strings.EqualFold(a.Claim, "schacHomeOrganization") {
+			claims = append(claims, a)
+		}
+	}
+	if len(claims) == 0 {
+		return nil
+	}
+	name, err := tok.ScopedUsername(scopes, domain)
+	if err != nil {
+		return err
+	}
+	_, scope, _ := strings.Cut(name, "@")
+	for _, a := range claims {
+		stated := oidc.ClaimValues(tok, a.Claim)
+		if !containsInstitution(stated, scope) || !containsInstitution(a.Values, scope) {
+			return errInstitutionNotTied
+		}
+	}
+	return nil
+}
+
+func containsInstitution(values []string, scope string) bool {
+	for _, v := range values {
+		if oidc.EqualASCIIFold(oidc.Normalize("schac_home_organization", v), scope) {
+			return true
+		}
+	}
+	return false
+}
+
 // legacyAlias is name, or, when the issuer has a domain and name is local@domain,
 // the stored user with the unscoped name: the same person, created before scoped
 // names, who keeps their name until renamed. A user stored under the scoped

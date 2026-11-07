@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-authn/oidc"
 	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/store"
 )
@@ -672,6 +673,10 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request, p *principal
 		apiError(w, http.StatusBadRequest, "invalid_request_error", "user name: want [A-Za-z0-9_.@+-]{1,128}")
 		return
 	}
+	if msg := s.userNameProblem(p, in.Name); msg != "" {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", msg)
+		return
+	}
 	// Creating a disabled user re-enables it, with every role binding it
 	// kept. Disabling is a proxy administrator's decision, so only a proxy
 	// administrator may undo it (security audit 2026-10-26, A3).
@@ -690,6 +695,50 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request, p *principal
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"name": in.Name})
+}
+
+// userNameProblem says why p may not create a user of this name ("" when it
+// may). Once institutions' domains are configured a person is local@domain:
+//
+//   - a bare name is refused to everyone unless legacy_unscoped_names is on, and
+//     then only a proxy administrator may create one: Start refuses to run with a
+//     bare stored user once the accounts are migrated, so an org administrator
+//     could stop the next restart of the shared gateway for every institution
+//     (audit 2026-11-07);
+//   - an org administrator creates names only in the domains its own
+//     organisations' providers may assert: another institution's person,
+//     pre-created by a hand-made user (origin ""), is never managed by that
+//     institution's SCIM (scim.go) and is refused by its restricted SSO.
+//
+// A proxy administrator creates any valid name with a domain.
+func (s *Server) userNameProblem(p *principal, name string) string {
+	if !s.cfg.DomainsConfigured() {
+		return ""
+	}
+	local, scope, scoped := strings.Cut(name, "@")
+	if !scoped {
+		if p.proxyAdmin() && s.cfg.LegacyNames {
+			return ""
+		}
+		return "user name: want local@domain (a domain is configured; a bare name is no one's)"
+	}
+	if local == "" || scope == "" || strings.Contains(scope, "@") {
+		return "user name: want exactly one local@domain"
+	}
+	if p.proxyAdmin() {
+		return ""
+	}
+	for _, b := range p.bindings {
+		if b.Role != store.RoleOrgAdmin {
+			continue
+		}
+		for _, d := range s.cfg.OrgNameScopes(b.Org) {
+			if oidc.ASCIILower(strings.TrimSuffix(d, ".")) == oidc.ASCIILower(scope) {
+				return ""
+			}
+		}
+	}
+	return "user name: the domain " + scope + " is not one of your organisations' institutions"
 }
 
 func (s *Server) disableUser(w http.ResponseWriter, r *http.Request, p *principal) {

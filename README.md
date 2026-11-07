@@ -331,9 +331,57 @@ key of the organisation `tiers`.
   contains a `/0`. There are no warnings in `check-config`, so these are errors.
   Use `borrow = "spare"` on the lent pool: with `borrow = "all"` the peer queues
   at vLLM instead of being refused, and its latency shows in the histogram.
+  **`borrow = "spare"` is not required** (decided in v0.38.0): with `borrow =
+  "all"` the peer's requests queue behind every owner at the lowest priority and
+  the time to the first byte grows with the queue, which is a signal a
+  least-busy strategy can read (it just reads later than a +Inf refusal), and a
+  site may prefer queueing to refusing; what the share check does enforce is
+  that the peer holds no share, so it never gets reserved capacity.
 - Example: the end of `examples/b300-ilaas.hcl`. Tests port the dispatcher's
   reading (`Histogram.parse`, `get_percentile`, the window diff) in
   `gateway/federation_test.go`.
+
+### Third-party audit of v0.37.1 (fixed in v0.38.0, breaking)
+
+Proofs: `gateway/secaudit3_schac_test.go`, `secaudit3_spareguard_test.go`,
+`adminusers_scope_test.go`, `guardpriority_test.go`, `sparefallback_test.go`,
+`fairshare_choices_test.go`.
+
+- **A token's institution is its name's scope** (HIGH). An issuer or provider
+  with an `accept` on `schac_home_organization` filtered on the claim and took
+  the name scopes from the same values, but nothing tied the two: a token of
+  univ-d.fr's IdP stating `schac_home_organization = univ-c.fr` (or eve@univ-e.fr
+  stating it) passed the filter and a role map on that claim gave it univ-c.fr's
+  team. Now the scope of the person's name must **equal** a value of the claim,
+  and that value must be one `accept` lists; otherwise the token or login is
+  refused (403 at SSO, no key at JWT): no team, no role. An unscoped name takes
+  the issuer's default domain as its scope, so a federation proxy's token must
+  carry a scoped name (eduPersonPrincipalName, voperson_id) for its institution.
+  go-authn/saml v0.6.0 and bridge v0.23.9 close the other half: the bridge no
+  longer releases a `schacHomeOrganization` that is not one of its IdP's scopes.
+- **`POST /admin/users` is bound to the institutions** (MEDIUM, two findings).
+  Once a domain is configured a name is `local@domain`: a bare name is refused
+  (to the proxy admin too, unless `legacy_unscoped_names` is on: Start refuses to
+  run with a bare stored user once the accounts are migrated, so one org admin
+  could stop the next restart for every institution), and an org administrator
+  creates only names in the domains of the providers and issuers bound to its own
+  organisations (and the SCIM client's, for the organisations of the teams its
+  groups map to). A person pre-created in another institution's domain was never
+  managed by that institution's SCIM and was refused by its restricted SSO
+  (also tested now: a user with no role and no link is refused without `adopt`).
+  A proxy administrator is unrestricted.
+- **A refused request costs no guard call** (MEDIUM). The pool's slot, the spare
+  check included, is taken before the pre-call guardrails, so a spare-only
+  borrower on a full pool is refused 429 without a guard-model call; and a guard
+  call runs at the priority of the request it judges (its band), no longer at 0
+  ahead of the owners' work. The slot is held while the guard judges.
+- **LOW.** The saturation fallback takes its slot through the same test as the
+  first one (a spare-only organisation is not admitted into a pool whose vLLM
+  queue is saturated). Fair share counts every choice: the in-flight estimate is
+  prompt + `max_tokens` x max(`n`, `best_of`) (proven first: 47 tokens for n=4,
+  where the estimate of one choice plus three more is 76). `federation` does not
+  require `borrow = "spare"` (above). Global policies (guardrails, budgets, rate
+  limits that apply to the whole gateway) are documented by design and unchanged.
 
 ### Ordering borrowers: Slurm Fair Tree
 

@@ -83,15 +83,25 @@ func (s *Server) acquireFor(g *group, org string, est int64) (grant *fairshare.G
 		grant, err = g.pool.acquire(org, g.class, est)
 		return grant, false, err
 	}
-	grant, ok := g.pool.tryAcquire(org, g.class, est)
-	if ok && g.queueSaturated() {
-		grant.Release(0)
-		ok = false
-	}
+	grant, ok := s.tryAcquireFor(g, org, est)
 	if !ok {
 		return nil, true, nil
 	}
 	return grant, false, nil
+}
+
+// tryAcquireFor is the non-waiting acquire of a slot in g's pool: it fails when
+// the pool has no room, and, for an organisation served from spare capacity
+// only, when vLLM's queue is saturated too. Every path that takes a slot for
+// such an organisation goes through it, the fallback to another group's pool
+// included (it used to skip the queue test: audit 2026-11-07).
+func (s *Server) tryAcquireFor(g *group, org string, est int64) (*fairshare.Grant, bool) {
+	grant, ok := g.pool.tryAcquire(org, g.class, est)
+	if ok && s.cfg.PoolSpareOnly(g.cfg.Pool, org) && g.queueSaturated() {
+		grant.Release(0)
+		return nil, false
+	}
+	return grant, ok
 }
 
 // refuseSpare answers a spare-only organisation when the pool has no room:
@@ -313,61 +323,21 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			apiError(w, http.StatusTooManyRequests, "rate_limit_exceeded", err.Error())
 			return
 		}
-		// Guardrails, last of the checks before vLLM: a guard model costs
-		// GPU time, not spent on a request refused for cheaper reasons.
-		var guards []*guardrail
-		// A count sent to an external provider still carries the prompt off
-		// the site: it is masked like the request it counts (which also
-		// makes the count that of the prompt actually sent).
-		if ep.Guarded() || g.ext != nil {
-			guards, err = s.guardsFor(key)
-		}
-		if err != nil {
-			s.limiter.release(key.ID, 0)
-			s.met.denied.add(1, key.Team, "guardrail")
-			apiError(w, http.StatusServiceUnavailable, "service_unavailable", err.Error())
-			return
-		}
-		if !s.externalGuarded(g, guards) {
-			// check-config requires them; this catches a scope the
-			// configuration could not see (a team created through the API).
-			s.limiter.release(key.ID, 0)
-			s.met.denied.add(1, key.Team, "guardrail")
-			apiError(w, http.StatusServiceUnavailable, "service_unavailable",
-				"this model sends prompts off the site and needs pre-call pii and hide_secrets guardrails for this key's organisation or team")
-			return
-		}
-		var rq *guardReq
-		if len(guards) > 0 {
-			rq = &guardReq{s: s, key: key, scope: scope, rid: reqID, guards: guards}
-			defer rq.finish()
-			if ep == openai.Responses && req.Stream && rq.hasStage("post") {
-				s.limiter.release(key.ID, 0)
-				apiError(w, http.StatusBadRequest, "invalid_request_error", errStreamGuarded.Error())
-				return
-			}
-			masked, gerr := s.pre(r.Context(), rq, body)
-			if gerr != nil {
-				s.limiter.release(key.ID, 0)
-				s.met.denied.add(1, key.Team, "guardrail")
-				s.guardRefusal(w, gerr)
-				return
-			}
-			if !bytes.Equal(masked, body) {
-				// vLLM gets the masked prompt; so does the request log.
-				body = masked
-				if out, req, err = openai.RewriteFor(ep, body, resolve, s.isoFor(g, key)); err == nil {
-					out, err = adm.apply(ep, out)
-				}
-				if err != nil {
-					s.limiter.release(key.ID, 0)
-					apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
-					return
-				}
-			}
-		}
+		// The pool's slot comes BEFORE any guard call: a spare-only borrower on a
+		// full pool is refused 429 here, and a guard model costs GPU time that a
+		// request refused for lack of room must not spend (audit 2026-11-07: every
+		// refused ILaaS request still made a priority-0 guard call). The slot is
+		// held while the guard judges, so the guard's call runs in the caller's
+		// own priority band (below), not ahead of the owners' work. Every path
+		// out of the guards releases it.
 		promptEst := int64(len(out) / 4)
-		grant, spare, aerr := s.acquireFor(g, key.Org, promptEst+req.MaxTokens)
+		// Every choice generates up to max_tokens (n, and best_of: vLLM samples
+		// that many and keeps n): the share level counts them all.
+		genEst := req.MaxTokens
+		if sh, serr := openai.ShapeOf(ep, out); serr == nil && sh.Choices > 1 {
+			genEst = req.MaxTokens * sh.Choices
+		}
+		grant, spare, aerr := s.acquireFor(g, key.Org, promptEst+genEst)
 		if spare {
 			s.limiter.release(key.ID, 0)
 			s.refuseSpare(w, key, g.cfg.Pool)
@@ -385,6 +355,66 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			apiError(w, http.StatusServiceUnavailable, "service_unavailable", msg)
 			return
 		}
+		// Guardrails, after every admission check (budget, rate limit, spare
+		// capacity): a guard model costs GPU time, not spent on a request refused
+		// for cheaper reasons.
+		var guards []*guardrail
+		// A count sent to an external provider still carries the prompt off
+		// the site: it is masked like the request it counts (which also
+		// makes the count that of the prompt actually sent).
+		if ep.Guarded() || g.ext != nil {
+			guards, err = s.guardsFor(key)
+		}
+		if err != nil {
+			s.limiter.release(key.ID, 0)
+			grant.Release(0)
+			s.met.denied.add(1, key.Team, "guardrail")
+			apiError(w, http.StatusServiceUnavailable, "service_unavailable", err.Error())
+			return
+		}
+		if !s.externalGuarded(g, guards) {
+			// check-config requires them; this catches a scope the
+			// configuration could not see (a team created through the API).
+			s.limiter.release(key.ID, 0)
+			grant.Release(0)
+			s.met.denied.add(1, key.Team, "guardrail")
+			apiError(w, http.StatusServiceUnavailable, "service_unavailable",
+				"this model sends prompts off the site and needs pre-call pii and hide_secrets guardrails for this key's organisation or team")
+			return
+		}
+		var rq *guardReq
+		if len(guards) > 0 {
+			// The guard's calls run in the caller's own priority band.
+			rq = &guardReq{s: s, key: key, scope: scope, rid: reqID, guards: guards, priority: grant.Priority}
+			defer rq.finish()
+			if ep == openai.Responses && req.Stream && rq.hasStage("post") {
+				s.limiter.release(key.ID, 0)
+				grant.Release(0)
+				apiError(w, http.StatusBadRequest, "invalid_request_error", errStreamGuarded.Error())
+				return
+			}
+			masked, gerr := s.pre(r.Context(), rq, body)
+			if gerr != nil {
+				s.limiter.release(key.ID, 0)
+				grant.Release(0)
+				s.met.denied.add(1, key.Team, "guardrail")
+				s.guardRefusal(w, gerr)
+				return
+			}
+			if !bytes.Equal(masked, body) {
+				// vLLM gets the masked prompt; so does the request log.
+				body = masked
+				if out, req, err = openai.RewriteFor(ep, body, resolve, s.isoFor(g, key)); err == nil {
+					out, err = adm.apply(ep, out)
+				}
+				if err != nil {
+					s.limiter.release(key.ID, 0)
+					grant.Release(0)
+					apiError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+					return
+				}
+			}
+		}
 		// The grant: the request holds its slot from here (the lending report
 		// reads [tAcq, end]); the time since arrival is the admission wait.
 		tAcq := time.Now()
@@ -398,7 +428,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			idx := 0
 			for fb := s.nextFallback(r.Context(), ep, g, &idx, key, scope, body, eg.betas, reqID); fb != nil; fb = s.nextFallback(r.Context(), ep, g, &idx, key, scope, body, eg.betas, reqID) {
 				next := fb.g
-				tg, ok := next.pool.tryAcquire(key.Org, next.class, promptEst+req.MaxTokens)
+				tg, ok := s.tryAcquireFor(next, key.Org, promptEst+genEst)
 				if !ok {
 					fb.adm.release(0)
 					continue
@@ -608,7 +638,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			adm.release(0)
 			g, out, adm = next, fb.out, fb.adm
 			scope.model, scope.unit, scope.overflow = g.cfg.Name, g.cfg.Cost.Unit, adm.overflow
-			ng, spare, aerr := s.acquireFor(g, key.Org, promptEst+req.MaxTokens)
+			ng, spare, aerr := s.acquireFor(g, key.Org, promptEst+genEst)
 			if spare {
 				// The target pool lends spare capacity only and has none.
 				status = http.StatusTooManyRequests

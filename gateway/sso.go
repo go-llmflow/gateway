@@ -340,6 +340,11 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request, provider st
 		fail(http.StatusForbidden, "institution not accepted", ref)
 		return
 	}
+	if err := tiedToInstitution(id, prov.cfg.Accept, prov.cfg.NameScopes(), prov.cfg.Domain); err != nil {
+		shown = "your identity provider states an institution that is not the one of your name"
+		fail(http.StatusForbidden, "name scope is not the institution stated", err)
+		return
+	}
 	user, err := s.scopedPerson(ctx, id, prov.cfg.NameScopes(), prov.cfg.Domain)
 	if errors.Is(err, errPersonStore) {
 		apiError(w, http.StatusServiceUnavailable, "service_unavailable", "user store unreachable")

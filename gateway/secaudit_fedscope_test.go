@@ -30,11 +30,11 @@ func TestSecauditFederationScopeNotTiedToInstitution(t *testing.T) {
 	rs := map[string]any{"alg": "RS256", "kid": "k1", "typ": "JWT"}
 	tok := b.sign(t, rs, b.claims(now, map[string]any{"aud": "other-aud", "sub": "b-mallory", "groups": []string{"lab"},
 		"schac_home_organization": "univ-b.fr", "preferred_username": "alice@univ-a.fr"}))
+	// Since v0.38.0 (audit 2026-11-07) the name's scope must BE the institution
+	// the token states, so this token is refused outright: no team, no role, and
+	// no owner (before it was admitted with the synthetic id).
 	k, err := e.srv.lookupJWT(ctx, tok)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if k.Owner == "alice@univ-a.fr" {
-		t.Errorf("EXPLOIT: a univ-b.fr person of issuer b is attributed to alice@univ-a.fr (linked to issuer a): owner %q", k.Owner)
+	if err == nil {
+		t.Errorf("EXPLOIT: a univ-b.fr person of issuer b whose name says univ-a.fr was admitted: team %q, owner %q", k.Team, k.Owner)
 	}
 }
