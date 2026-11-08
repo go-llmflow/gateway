@@ -197,6 +197,13 @@ func TestOneOrganisationCannotFillTheSpoolForTheOthers(t *testing.T) {
 	r.interval = 10 * time.Millisecond
 	r.withSpool(sp, dir, max)
 	r.start()
+	// Under half the file, nobody is refused, however much of the pending
+	// records one organisation holds (A holds all of one).
+	r.record(rec("a0", "A"))
+	time.Sleep(100 * time.Millisecond)
+	if r.orgHoldsTooMuch("A") {
+		t.Error("an organisation was refused with the spool under half full")
+	}
 	for _, id := range []string{"a1", "a2", "a3"} {
 		r.record(rec(id, "A"))
 	}
@@ -234,5 +241,52 @@ func TestEveryRequestIsRefusedWhenTheMemoryOnlyRecordsAreAtTheirBound(t *testing
 	resp := e.do("POST", "/v1/chat/completions", key, chat) // no budget applies
 	if out := readAll(t, resp); resp.StatusCode != 503 || !strings.Contains(out, "accounting spool") {
 		t.Fatalf("an unbudgeted request with the memory-only records at their bound: %d %s", resp.StatusCode, out)
+	}
+}
+
+// The admission side of per-organisation fairness: past half the file, the
+// organisation holding most of the pending records has its budgeted requests
+// refused (503 spool_org_share), another organisation's are served.
+func TestABudgetedRequestOfTheOrganisationThatFillsTheSpoolIsRefused(t *testing.T) {
+	e := newEnv(t, testConfig(newFakeVLLM(t).URL()))
+	_, keyA := e.newKey("etabA")
+	_, keyB := e.newKey("etabB")
+	for _, team := range []string{"etabA", "etabB"} {
+		resp := e.do("PUT", "/admin/budgets", master, `{"kind":"team","name":"`+team+`","period":"day","max_cost":100}`)
+		readAll(t, resp)
+	}
+	dir := t.TempDir()
+	recs := []store.Record{{ID: "a1", Org: "etabA"}, {ID: "a2", Org: "etabA"}, {ID: "a3", Org: "etabA"}}
+	b, _ := spool.Encode(nil, recs)
+	max := int64(len(b)) + 10 // the three records are past half of it
+	sp, err := spool.Open(dir, max)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Append(recs); err != nil {
+		t.Fatal(err)
+	}
+	r := e.srv.rec
+	r.pmu.Lock()
+	r.spool, r.spoolMax = sp, max
+	r.pending = append(r.pending, recs...)
+	for _, x := range recs {
+		r.meta = append(r.meta, pmeta{org: x.Org})
+		r.byOrg[x.Org]++
+	}
+	r.pmu.Unlock()
+	defer func() {
+		r.pmu.Lock()
+		r.spool, r.pending, r.meta, r.byOrg = nil, nil, nil, map[string]int{}
+		r.pmu.Unlock()
+		sp.Close()
+	}()
+	resp := e.do("POST", "/v1/chat/completions", keyA, chat)
+	if out := readAll(t, resp); resp.StatusCode != 503 || !strings.Contains(out, "filling the accounting spool") {
+		t.Fatalf("the organisation that fills the spool: %d %s", resp.StatusCode, out)
+	}
+	resp = e.do("POST", "/v1/chat/completions", keyB, chat)
+	if readAll(t, resp); resp.StatusCode != 200 {
+		t.Fatalf("another organisation: %d", resp.StatusCode)
 	}
 }
