@@ -56,17 +56,28 @@ type recorder struct {
 	// meanwhile waited in memory, outside the spool, and a SIGKILL lost it
 	// (issue #165): the bound is now the spooler's own interval whatever the
 	// store does.
-	pmu        sync.Mutex
-	pending    []store.Record // spooled, not yet stored, oldest first
-	volatile   int            // of pending, the ones the spool could not take (memory only)
-	nextAdopt  time.Time
-	adoptEvery time.Duration
-	wake       chan struct{} // run tells ship there is something to store
-	stopShip   chan struct{}
+	pmu      sync.Mutex
+	pending  []store.Record // spooled, not yet stored, oldest first
+	volatile int            // of pending, the ones the spool could not take (memory only)
+	meta     []pmeta        // parallel to pending
+	byOrg    map[string]int // pending records by organisation
+	// appendFailed: the last Append was refused. Cleared by an Append that fits
+	// or by the spool being emptied.
+	appendFailed bool
+	nextAdopt    time.Time
+	adoptEvery   time.Duration
+	wake         chan struct{} // run tells ship there is something to store
+	stopShip     chan struct{}
 	// degraded is set while the spool refuses records (full or unwritable): the
 	// records are then held in memory only, a request under a budget is refused
 	// (503) rather than admitted unrecorded, and onLost is raised.
 	degraded atomic.Bool
+}
+
+// pmeta says, of one pending record, whether it is memory-only and whose it is.
+type pmeta struct {
+	vol bool
+	org string
 }
 
 // maxVolatile bounds the records held in memory only while the spool is
@@ -75,7 +86,7 @@ const maxVolatile = 100000
 
 func newRecorder(st store.Store, size, batch int, onErr func(error)) *recorder {
 	return &recorder{st: st, queue: make(chan store.Record, size), batch: batch, onErr: onErr, interval: time.Second,
-		adoptEvery: 10 * time.Second}
+		adoptEvery: 10 * time.Second, byOrg: map[string]int{}}
 }
 
 // withSpool makes the recorder durable through sp (in dir).
@@ -154,17 +165,23 @@ func (r *recorder) flush(buf []store.Record) {
 		// this goroutine must not wait on it. The records are held in memory for
 		// the shipper, up to maxVolatile; the gateway stops admitting budgeted
 		// requests (degraded) so that nothing more is answered unrecorded.
-		r.degraded.Store(true)
 		room := max(0, maxVolatile-r.volatile)
 		if len(batch) > room {
 			lost, batch = batch[room:], batch[:room]
 		}
 		r.volatile += len(batch)
-	} else {
-		r.degraded.Store(false)
+	}
+	for _, rec := range batch {
+		r.meta = append(r.meta, pmeta{vol: err != nil, org: rec.Org})
+		r.byOrg[rec.Org]++
 	}
 	r.pending = append(r.pending, batch...)
 	r.spooled.Store(int64(len(r.pending)))
+	// Degraded while the spool refuses records OR records are held in memory
+	// only: a batch that fits again does not clear it while older records are
+	// still only in memory (audit 2026-11-08).
+	r.appendFailed = err != nil
+	r.degraded.Store(r.appendFailed || r.volatile > 0)
 	r.pmu.Unlock()
 	if err != nil && r.onLost != nil {
 		r.onLost(len(lost), err)
@@ -207,16 +224,29 @@ func (r *recorder) drain() {
 		}
 		r.pmu.Lock()
 		// run only appends, so the first n are still the chunk.
+		for _, m := range r.meta[:n] {
+			if m.vol {
+				r.volatile--
+			}
+			if r.byOrg[m.org]--; r.byOrg[m.org] <= 0 {
+				delete(r.byOrg, m.org)
+			}
+		}
 		r.pending = append(r.pending[:0:0], r.pending[n:]...)
-		r.volatile = max(0, r.volatile-n)
+		r.meta = append(r.meta[:0:0], r.meta[n:]...)
 		r.spooled.Store(int64(len(r.pending)))
 		if len(r.pending) == 0 {
 			// Emptied under the lock that run appends under: no record can be
 			// spooled between the check and the truncation.
-			if err := r.spool.Reset(); err != nil && r.onErr != nil {
-				r.onErr(err)
+			if err := r.spool.Reset(); err != nil {
+				if r.onErr != nil {
+					r.onErr(err)
+				}
+			} else {
+				r.appendFailed = false // the file has room again
 			}
 		}
+		r.degraded.Store(r.appendFailed || r.volatile > 0)
 		r.pmu.Unlock()
 	}
 }
@@ -325,6 +355,32 @@ func (r *recorder) ship() {
 // spoolUnavailable says the spool is refusing records (full or unwritable):
 // a request that a budget governs is refused rather than answered unrecorded.
 func (r *recorder) spoolUnavailable() bool { return r.spool != nil && r.degraded.Load() }
+
+// memoryFull says the records held in memory only have reached maxVolatile:
+// the next ones would be lost unbilled, so NO request is admitted (budgeted or
+// not) until the store has taken some.
+func (r *recorder) memoryFull() bool {
+	if r.spool == nil {
+		return false
+	}
+	r.pmu.Lock()
+	defer r.pmu.Unlock()
+	return r.volatile >= maxVolatile
+}
+
+// orgHoldsTooMuch is per-organisation fairness on the per-process spool: once
+// the file is past half its bound, an organisation that holds more than half of
+// the pending records is refused (its budgeted requests), so that one tenant's
+// volume cannot fill the file and 503 everybody else's budgeted requests. The
+// second half of the file is the headroom the others keep.
+func (r *recorder) orgHoldsTooMuch(org string) bool {
+	if r.spool == nil || r.spoolMax <= 0 {
+		return false
+	}
+	r.pmu.Lock()
+	defer r.pmu.Unlock()
+	return r.spool.Size()*2 > r.spoolMax && r.byOrg[org]*2 > len(r.pending)
+}
 
 // close drains the queue and waits for the writer, at most until ctx ends.
 func (r *recorder) close(ctx context.Context) {

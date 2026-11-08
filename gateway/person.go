@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 
 	"github.com/go-authn/oidc"
@@ -39,47 +40,82 @@ func (s *Server) scopedPerson(ctx context.Context, tok *oidc.Token, scopes []str
 
 var errInstitutionNotTied = errors.New("the name's scope is not the institution the token states")
 
-// tiedToInstitution holds a person to the institution their token states. An
-// issuer that serves a federation filters on the institution claim (accept on
-// schac_home_organization) and takes the name scopes from the same values, but
-// those were two independent checks: a token of univ-d.fr's IdP stating
-// schac_home_organization = univ-c.fr passed the filter, kept its own scope, and
-// the role maps on that claim gave it univ-c.fr's team (audit 2026-11-07). With
-// such an accept, the scope of the person's name (as ScopedName returns it,
-// before any legacy alias) must EQUAL a value of the claim, and that value must
-// be one the accept block accepts; otherwise the person is nobody and is given
-// no team and no role. Without an institution accept there is nothing to tie.
-func tiedToInstitution(tok *oidc.Token, accept []config.Accept, scopes []string, domain string) error {
-	var claims []config.Accept
-	for _, a := range accept {
-		if strings.EqualFold(a.Claim, "schac_home_organization") || strings.EqualFold(a.Claim, "schacHomeOrganization") {
-			claims = append(claims, a)
-		}
-	}
-	if len(claims) == 0 {
-		return nil
-	}
+// A person has ONE institution: the scope of their name, which the issuer is
+// allowed to assert (go-authn/oidc ScopedName against the issuer's scopes). It
+// is the only value any mapping keys on. The institution CLAIM of a token
+// (schac_home_organization, in either spelling, possibly several values) is
+// never matched by a map, a role or an accept: it is only cross-checked against
+// the name, because a token that states a different institution than its name
+// carries is not consistent (audit 2026-11-08: a map matched ANY stated value,
+// the tie and the map read two spellings, and an issuer with domains and no
+// accept had no tie at all; the 2026-11-07 fix tied the name to the claim
+// where the mappings still read the claim).
+
+// institutionOf is the person's institution, lower-cased, or an error: the
+// token has no scoped name this issuer may assert, or it states institutions
+// among which its name's scope is not.
+func institutionOf(tok *oidc.Token, scopes []string, domain string) (string, error) {
 	name, err := tok.ScopedUsername(scopes, domain)
 	if err != nil {
-		return err
+		return "", err
 	}
-	_, scope, _ := strings.Cut(name, "@")
-	for _, a := range claims {
-		stated := oidc.ClaimValues(tok, a.Claim)
-		if !containsInstitution(stated, scope) || !containsInstitution(a.Values, scope) {
-			return errInstitutionNotTied
-		}
+	_, inst, _ := strings.Cut(name, "@")
+	if stated := statedInstitutions(tok); len(stated) > 0 && !slices.ContainsFunc(stated, func(v string) bool { return oidc.EqualASCIIFold(v, inst) }) {
+		return "", errInstitutionNotTied
 	}
-	return nil
+	return inst, nil
 }
 
-func containsInstitution(values []string, scope string) bool {
-	for _, v := range values {
-		if oidc.EqualASCIIFold(oidc.Normalize("schac_home_organization", v), scope) {
+// statedInstitutions are the values the token gives for the institution claim,
+// under either spelling, normalised as the claim folds (ASCII lower, no
+// trailing dot).
+func statedInstitutions(tok *oidc.Token) []string {
+	var out []string
+	for _, c := range []string{config.InstitutionClaim, "schacHomeOrganization"} {
+		for _, v := range oidc.ClaimValues(tok, c) {
+			out = append(out, oidc.Normalize(config.InstitutionClaim, v))
+		}
+	}
+	return out
+}
+
+// claimMatches is whether a mapping on claim = value holds for this token. The
+// institution claim holds only for the person's own institution; any other
+// claim reads the token's values.
+func claimMatches(tok *oidc.Token, claim, value, institution string) bool {
+	if config.CanonicalClaim(claim) == config.InstitutionClaim {
+		return institution != "" && oidc.EqualASCIIFold(oidc.Normalize(config.InstitutionClaim, value), institution)
+	}
+	return slices.Contains(oidc.ClaimValues(tok, claim), value)
+}
+
+// institutionAccepted is whether an accept on the institution claim lists the
+// PERSON's institution (their name's scope): the stated claim passing
+// oidc.Check is not enough (it may state several values).
+func institutionAccepted(accept []config.Accept, institution string) bool {
+	for _, a := range accept {
+		if config.CanonicalClaim(a.Claim) != config.InstitutionClaim {
+			continue
+		}
+		if !slices.ContainsFunc(a.Values, func(v string) bool {
+			return oidc.EqualASCIIFold(oidc.Normalize(config.InstitutionClaim, v), institution)
+		}) {
+			return false
+		}
+	}
+	return true
+}
+
+// usesInstitution says whether any accept or mapping keys on the institution
+// claim: then the person must have an institution (a scoped name), accept or
+// not.
+func usesInstitution(accept []config.Accept, claims ...string) bool {
+	for _, a := range accept {
+		if config.CanonicalClaim(a.Claim) == config.InstitutionClaim {
 			return true
 		}
 	}
-	return false
+	return slices.ContainsFunc(claims, func(c string) bool { return config.CanonicalClaim(c) == config.InstitutionClaim })
 }
 
 // legacyAlias is name, or, when the issuer has a domain and name is local@domain,

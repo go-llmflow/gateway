@@ -383,6 +383,67 @@ Proofs: `gateway/secaudit3_schac_test.go`, `secaudit3_spareguard_test.go`,
   require `borrow = "spare"` (above). Global policies (guardrails, budgets, rate
   limits that apply to the whole gateway) are documented by design and unchanged.
 
+### Fourth audit (fixed in v0.39.0, breaking)
+
+Proofs: `secaudit4_schac_test.go`, `secaudit4_usersquat_test.go`,
+`energy/secaudit4_glitch_test.go`, and `slots_test.go`,
+`accounting_spool_test.go`, `config/orgdomains_test.go`.
+
+- **A person has one institution** (MEDIUM). The v0.38.0 tie checked that the
+  name's scope was among the values the token states, but the team and role maps
+  matched ANY stated value (`[univ-d.fr, univ-c.fr]` got C's team), the tie read
+  `schacHomeOrganization` where the map read `schac_home_organization`, and an
+  issuer with `domains` and no `accept` had no tie. Now one function gives the
+  person's institution, **the scope of their name** (checked against what the
+  issuer may assert), and every mapping keys on it: a `map`/`role` on the
+  institution claim holds only for that institution, never for a raw claim
+  value; `accept` on it must list it; the claim, in either spelling (one
+  canonical `schac_home_organization` in the configuration), is only
+  cross-checked (a token stating institutions among which its name's scope is
+  not is refused). The tie applies whenever an accept or a mapping uses the
+  institution claim, accept or not; a token with no scoped name is then refused.
+- **Domains have one owner** (MEDIUM). `POST /admin/users` let an org admin
+  create people in every domain of a SCIM client or provider its organisation
+  shared with others. An organisation owns a domain only by `org { domains =
+  [...] }`, or through a provider/issuer bound to it alone, or a SCIM client all
+  of whose groups map to its teams. A shared source owns nothing; the legacy
+  unrestricted `sso` block owns nothing; a domain claimed by two organisations is
+  refused at load. **Upgrade:** with a SCIM client or an `sso` provider shared by
+  several organisations, claim each domain with `org { domains = [...] }`, or its
+  administrators can no longer create its people (the proxy admin still can).
+- **A counter glitch is never billed as a reset** (MEDIUM, fluids). One low
+  reading was taken as a reset, and the next normal one billed the whole
+  lifetime counter in one interval (722 kWh in 60 s). A decrease is now a
+  candidate: the next reading decides. Back at or above the old baseline: a
+  glitch, discarded, its energy billed once. At or above the candidate and below
+  the baseline: a real reset, confirmed, billed from the new baseline (the
+  reload's own interval is unknown and billed as nothing, like go-redfish). An
+  interval's energy per GPU is capped at `max_gpu_watts` (default 3000) x 2 x the
+  time since its baseline; capped and discarded intervals are logged. A 32-bit
+  wrap is a reset, not a huge delta.
+- **`n` and `best_of` weigh on scheduling** (LOW). Fair share and admission
+  counted requests; n only fed a statistic. A request that runs n sequences now
+  holds n slots (`fairshare.Grant.Join`): counted n times in its team's in-flight,
+  n borrowed slots, the worst priority band of the n, released together; a
+  spare-only borrower needs room for all n or is refused 429 whole. The same for
+  chat, completions and responses (any endpoint with a shape). With no
+  `max_tokens` the token estimate (the statistic) uses what is left of the model's
+  context. Not weighted: the tokens themselves (the ranking charges the consumed
+  cost afterwards), tool calls.
+- **The accounting spool degrades fairly** (LOW). (a) Past half its bound, an
+  organisation holding most of the unstored records is refused (503
+  `spool_org_share`, budgeted requests), so one tenant cannot fill it for all;
+  (b) `degraded` is cleared only when no record is memory-only any more (a batch
+  that fits again no longer clears it); (c) with the memory-only records at
+  their bound (100,000) NO request is admitted, budgeted or not (503
+  `spool_full`), instead of losing unbilled records; `accounting_records_lost`
+  is raised at each loss.
+- **Supply chain** (LOW). The CI PostgreSQL image is pinned by digest. The org
+  Renovate presets no longer auto-merge any Go module branch (go-llmflow/.github#8,
+  go-authn/.github#35): `gomodTidy` pulls v0 minors into branches Renovate calls
+  patches (gateway#131 carried go-ndarray v0.18 to v0.28), which no rule on the
+  update type can see.
+
 ### Ordering borrowers: Slurm Fair Tree
 
 Among borrowers, the rank is the dense rank of the team's **level fairshare**

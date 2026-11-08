@@ -61,14 +61,27 @@ func (s *Server) startJWT(ctx context.Context) error {
 func (s *Server) jwtIdentity(ctx context.Context, j *config.JWT, tok *oidc.Token) (store.Key, error) {
 	ctx, cancel := context.WithTimeout(ctx, storeTimeout)
 	defer cancel()
+	// The person's ONE institution (their name's scope), when anything keys on
+	// the institution claim, accept or not; mappings never read the raw claim.
 	if ref := oidc.Check(j.Accept, tok); ref != nil {
 		return store.Key{}, fmt.Errorf("%w: %v", errJWTUnmapped, ref)
 	}
-	if err := tiedToInstitution(tok, j.Accept, j.NameScopes(), j.Domain); err != nil {
-		return store.Key{}, fmt.Errorf("%w: %v", errJWTUnmapped, err)
+	inst := ""
+	claims := make([]string, 0, len(j.Maps))
+	for _, m := range j.Maps {
+		claims = append(claims, m.Claim)
+	}
+	if usesInstitution(j.Accept, claims...) {
+		var err error
+		if inst, err = institutionOf(tok, j.NameScopes(), j.Domain); err != nil {
+			return store.Key{}, fmt.Errorf("%w: %v", errJWTUnmapped, err)
+		}
+		if !institutionAccepted(j.Accept, inst) {
+			return store.Key{}, fmt.Errorf("%w: the person's institution %q is not accepted", errJWTUnmapped, inst)
+		}
 	}
 	for _, m := range j.Maps {
-		if !slices.Contains(oidc.ClaimValues(tok, m.Claim), m.Value) {
+		if !claimMatches(tok, m.Claim, m.Value, inst) {
 			continue
 		}
 		t, err := s.st.GetTeam(ctx, m.Team)

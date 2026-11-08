@@ -127,7 +127,7 @@ func (v *validator) accepts(in []acceptHCL, where string) []Accept {
 				v.errf(a.ValuesRange, "Empty accept value", "%s: accept %q has an empty value", where, a.Claim)
 			}
 		}
-		out = append(out, Accept{Claim: a.Claim, Values: a.Values})
+		out = append(out, Accept{Claim: CanonicalClaim(a.Claim), Values: a.Values})
 	}
 	return out
 }
@@ -196,7 +196,7 @@ func scopes(domain string, domains []string, accept []Accept) []string {
 		out = append(out, domain)
 	}
 	for _, a := range accept {
-		if strings.EqualFold(a.Claim, "schac_home_organization") || strings.EqualFold(a.Claim, "schacHomeOrganization") {
+		if CanonicalClaim(a.Claim) == InstitutionClaim {
 			out = append(out, a.Values...)
 		}
 	}
@@ -227,40 +227,79 @@ func (s *SSO) providers() []SSOProvider {
 	return s.ProviderList()
 }
 
-// OrgNameScopes are the domains whose people org may hold: the scopes of the
-// sso providers and jwt issuers bound to org (an unrestricted sso block is
-// bound to every org), and of the scim client when a group it maps lands on one
-// of org's teams. An org administrator creates users in these domains only: a
-// name in another institution's domain would squat a person that institution's
-// provisioning or login is to own.
+// OrgNameScopes are the domains org OWNS, the only ones whose people its
+// administrators may create (POST /admin/users): a name in another
+// institution's domain would squat a person that institution's provisioning or
+// login is to own (audit 2026-11-07, then 2026-11-08: a shared SCIM client or
+// sso provider gave EVERY org it served every domain it served). Ownership is
+// explicit:
+//
+//   - org { domains = [...] }, in the configuration;
+//   - the domains of an sso provider or jwt issuer bound to org ALONE;
+//   - those of the scim client when every group it maps lands on org's teams.
+//
+// A source shared by several organisations owns nothing, nor does the legacy
+// unrestricted sso block (it is bound to nobody): their domains are claimed
+// with org { domains }, and a domain claimed by two organisations is refused at
+// load (see orgDomains). Names compare as the scopes do: ASCII lower case, no
+// trailing dot.
 func (c *Config) OrgNameScopes(org string) []string {
 	var out []string
 	add := func(ss []string) {
 		for _, s := range ss {
-			if !slices.Contains(out, s) {
+			s = oidc.ASCIILower(strings.TrimSuffix(s, "."))
+			if s != "" && !slices.Contains(out, s) {
 				out = append(out, s)
 			}
 		}
 	}
+	for i := range c.Orgs {
+		if c.Orgs[i].Name == org {
+			add(c.Orgs[i].Domains)
+		}
+	}
 	for _, p := range c.SSO.providers() {
-		if !p.Restricted || slices.Contains(p.Orgs, org) {
+		if p.Restricted && len(p.Orgs) == 1 && p.Orgs[0] == org {
 			add(p.NameScopes())
 		}
 	}
 	for _, j := range c.JWTIssuers() {
-		if slices.Contains(j.Orgs, org) {
+		if len(j.Orgs) == 1 && j.Orgs[0] == org {
 			add(j.NameScopes())
 		}
 	}
-	if c.SCIM != nil {
+	if c.SCIM != nil && len(c.SCIM.Groups) > 0 {
+		only, any := true, false
 		for _, g := range c.SCIM.Groups {
-			if c.OrgOfTeam(g.Team) == org {
-				add(c.SCIM.NameScopes())
-				break
+			switch o := c.OrgOfTeam(g.Team); o {
+			case "": // a team no organisation declares (created later through the API): nobody's
+			case org:
+				any = true
+			default:
+				only = false
 			}
+		}
+		if only && any {
+			add(c.SCIM.NameScopes())
 		}
 	}
 	return out
+}
+
+// orgDomains refuses a domain that two organisations own, explicitly or through
+// a source bound to them alone: one institution's people belong to one
+// organisation's administrators.
+func (v *validator) orgDomains(raw []orgHCL, c *Config) {
+	owner := map[string]string{}
+	for i, o := range c.Orgs {
+		for _, d := range c.OrgNameScopes(o.Name) {
+			if other, dup := owner[d]; dup && other != o.Name {
+				v.errf(raw[i].DefRange, "Domain owned twice", "domain %q is owned by organisations %q and %q: an institution's people have one organisation's administrators (give it to one with org { domains = [...] }, and bind the shared sources accordingly)", d, other, o.Name)
+				continue
+			}
+			owner[d] = o.Name
+		}
+	}
 }
 
 // NameScopes of the provider: see scopes.
@@ -305,4 +344,21 @@ func (c *Config) LegacyDomain() (string, error) {
 		return ds[0], nil
 	}
 	return "", fmt.Errorf("config: several legacy domains %v: the unscoped names of the old accounts belong to one institution", ds)
+}
+
+// InstitutionClaim is the ONE spelling of the institution claim (SCHAC
+// schacHomeOrganization, AARC-G056 schac_home_organization). The configuration
+// is normalised to it where an accept, a jwt map or an sso role names it
+// (CanonicalClaim), so that no later check can read one spelling and another
+// map on the other (audit 2026-11-08: a tie on schacHomeOrganization and a map
+// on schac_home_organization were two different claims).
+const InstitutionClaim = "schac_home_organization"
+
+// CanonicalClaim returns the canonical spelling of an alias of the institution
+// claim, and every other claim name unchanged.
+func CanonicalClaim(c string) string {
+	if strings.EqualFold(c, "schacHomeOrganization") || strings.EqualFold(c, InstitutionClaim) {
+		return InstitutionClaim
+	}
+	return c
 }
