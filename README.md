@@ -858,15 +858,15 @@ store {
 
 **What a record goes through:**
 
-1. Every batch of usage records is appended to this process's spool file and fsync'd before it is inserted. Batches are flushed every second, or every `batch_size` records.
-2. When the store refuses, the batch stays pending, in order, and is retried every second. `llmflow_accounting_spooled` shows how many records wait.
+1. Every batch of usage records is appended to this process's spool file and fsync'd, every second or every `batch_size` records, by a goroutine that **never waits on the store**. Another goroutine inserts what is spooled. (Until v0.38.1 one goroutine did both: while PostgreSQL hung, records answered meanwhile waited in memory, outside the spool, and a SIGKILL lost them, issue #165. The bound below now holds whatever the store does.)
+2. When the store refuses or hangs, the batch stays pending, in order, and is retried every second. `llmflow_accounting_spooled` shows how many records wait.
 3. Once everything is stored, the file is emptied.
 4. A process that stops cleanly removes its empty file and keeps a non-empty one.
 5. A process that dies (`kill -9`, OOM, power loss) leaves its file locked by nobody. The next process on the directory adopts it, at start and then every 10 s, and stores what it holds. `llmflow_accounting_replayed_total` counts those records.
 
 **No double billing.** Every record has an ID (the request id), and PostgreSQL stores a record ID at most once (`ON CONFLICT DO NOTHING`). A batch stored just before a crash, and replayed after it, is billed once.
 
-**Bounded.** One process's spool holds at most `spool_max_bytes`. Beyond that, a batch is still sent to the store once. If the store refuses it, the batch is lost: counted in `llmflow_accounting_failed_total` and alerted as `accounting_records_lost`.
+**Bounded, and fail closed.** One process's spool holds at most `spool_max_bytes`; it is emptied only when every pending record is stored, so a store that stays down fills it. Beyond that (or when the disk refuses the write), the recorder is *degraded* (v0.38.1): the records are held in memory only, up to 100,000, and shipped when the store is back; `accounting_records_lost` is alerted at once; **a request that a budget governs is refused with 503 `spool_full`** instead of being answered unrecorded (requests under no budget are served, their cost still counted); and records past the 100,000 are lost, counted in `llmflow_accounting_failed_total`. The spool accepts records again as soon as it is emptied.
 
 **Untrusted after a crash.** The spool is read defensively, and the reader is fuzzed (`FuzzRead`):
 
@@ -3452,7 +3452,7 @@ security audit of 2026-10-26):
    isolation need their own vLLM instance.
 6. **Accounting drops records only when its bounds are reached**.
    - A record is dropped when the in-memory queue (`queue_size`) is full.
-   - A record is lost when the durable spool (`spool_max_bytes`) is full or cannot be written, and the store refuses it too. This is counted in `llmflow_accounting_failed_total` and alerted as `accounting_records_lost`.
+   - A record is lost when the durable spool (`spool_max_bytes`) is full or cannot be written for so long that 100,000 records pile up in memory (budgeted requests are refused meanwhile). This is counted in `llmflow_accounting_failed_total` and alerted as `accounting_records_lost`.
    - A record still in the queue when the process dies (at most about 1 s of traffic) is lost. Everything that reached the spool survives a store outage and a crash (see [Durable accounting](#durable-accounting)).
    - Until v0.9.0, a store outage lost every record served meanwhile: 21 of 21 in `TestChaosAccountingOutage`.
 7. No TLS termination in the gateway (put it behind a TLS proxy); the admin API

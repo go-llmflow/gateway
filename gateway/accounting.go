@@ -46,13 +46,32 @@ type recorder struct {
 	// (its budget grants are released).
 	onAdopted func(id string) error
 
-	spool      *spool.Spool
-	spoolDir   string
-	spoolMax   int64
+	spool    *spool.Spool
+	spoolDir string
+	spoolMax int64
+	// pmu guards pending and the spool's emptying. Two goroutines share the
+	// work: run SPOOLS (queue to disk, fsync) and never touches the store; ship
+	// STORES (pending to the store, slow when the database is). Before, one
+	// goroutine did both, so while PostgreSQL hung every record answered
+	// meanwhile waited in memory, outside the spool, and a SIGKILL lost it
+	// (issue #165): the bound is now the spooler's own interval whatever the
+	// store does.
+	pmu        sync.Mutex
 	pending    []store.Record // spooled, not yet stored, oldest first
+	volatile   int            // of pending, the ones the spool could not take (memory only)
 	nextAdopt  time.Time
 	adoptEvery time.Duration
+	wake       chan struct{} // run tells ship there is something to store
+	stopShip   chan struct{}
+	// degraded is set while the spool refuses records (full or unwritable): the
+	// records are then held in memory only, a request under a budget is refused
+	// (503) rather than admitted unrecorded, and onLost is raised.
+	degraded atomic.Bool
 }
+
+// maxVolatile bounds the records held in memory only while the spool is
+// unusable; past it a record is lost (counted, alerted).
+const maxVolatile = 100000
 
 func newRecorder(st store.Store, size, batch int, onErr func(error)) *recorder {
 	return &recorder{st: st, queue: make(chan store.Record, size), batch: batch, onErr: onErr, interval: time.Second,
@@ -87,8 +106,13 @@ func (r *recorder) start() {
 	if r.spool != nil {
 		r.adopt() // what a dead process left, before anything new
 	}
+	r.wake, r.stopShip = make(chan struct{}, 1), make(chan struct{})
 	r.wg.Add(1)
 	go r.run()
+	if r.spool != nil {
+		r.wg.Add(1)
+		go r.ship()
+	}
 }
 
 func (r *recorder) insert(recs []store.Record) error {
@@ -122,50 +146,78 @@ func (r *recorder) flush(buf []store.Record) {
 		return
 	}
 	batch := append([]store.Record(nil), buf...)
-	if err := r.spool.Append(batch); err != nil {
-		// Not durable: still try the store directly, once.
-		if ierr := r.insert(batch); ierr == nil {
-			r.written.Add(int64(len(batch)))
-		} else {
-			r.failed.Add(int64(len(batch)))
-			if r.onLost != nil {
-				r.onLost(len(batch), errors.Join(err, ierr))
-			}
+	r.pmu.Lock()
+	err := r.spool.Append(batch)
+	var lost []store.Record
+	if err != nil {
+		// Not durable (spool full or unwritable). The store is NOT asked here:
+		// this goroutine must not wait on it. The records are held in memory for
+		// the shipper, up to maxVolatile; the gateway stops admitting budgeted
+		// requests (degraded) so that nothing more is answered unrecorded.
+		r.degraded.Store(true)
+		room := max(0, maxVolatile-r.volatile)
+		if len(batch) > room {
+			lost, batch = batch[room:], batch[:room]
 		}
-		if r.done != nil {
-			r.done(batch)
-		}
-		r.drain()
-		return
+		r.volatile += len(batch)
+	} else {
+		r.degraded.Store(false)
 	}
 	r.pending = append(r.pending, batch...)
 	r.spooled.Store(int64(len(r.pending)))
-	r.drain()
+	r.pmu.Unlock()
+	if err != nil && r.onLost != nil {
+		r.onLost(len(lost), err)
+	}
+	if len(lost) > 0 {
+		r.failed.Add(int64(len(lost)))
+		if r.done != nil {
+			r.done(lost)
+		}
+	}
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
 }
 
-// drain inserts the pending records, oldest first, until the store
-// refuses; when nothing is pending the spool is emptied.
+// drain inserts the pending records, oldest first, until the store refuses;
+// when nothing is pending the spool is emptied. Only ship calls it: it may
+// wait on the store, and holds no lock while it does.
 func (r *recorder) drain() {
-	for len(r.pending) > 0 {
+	for {
+		r.pmu.Lock()
 		n := min(len(r.pending), r.batch)
-		chunk := r.pending[:n]
+		chunk := append([]store.Record(nil), r.pending[:n]...)
+		r.pmu.Unlock()
+		if n == 0 {
+			return
+		}
+		// Keyed by record ID: a chunk stored here and spooled again after a
+		// crash (or stored twice by a retry) is billed once.
 		if err := r.insert(chunk); err != nil {
 			if r.onErr != nil {
 				r.onErr(err)
 			}
-			break
+			return
 		}
 		r.written.Add(int64(n))
 		if r.done != nil {
 			r.done(chunk)
 		}
+		r.pmu.Lock()
+		// run only appends, so the first n are still the chunk.
 		r.pending = append(r.pending[:0:0], r.pending[n:]...)
-	}
-	r.spooled.Store(int64(len(r.pending)))
-	if len(r.pending) == 0 {
-		if err := r.spool.Reset(); err != nil && r.onErr != nil {
-			r.onErr(err)
+		r.volatile = max(0, r.volatile-n)
+		r.spooled.Store(int64(len(r.pending)))
+		if len(r.pending) == 0 {
+			// Emptied under the lock that run appends under: no record can be
+			// spooled between the check and the truncation.
+			if err := r.spool.Reset(); err != nil && r.onErr != nil {
+				r.onErr(err)
+			}
 		}
+		r.pmu.Unlock()
 	}
 }
 
@@ -233,8 +285,7 @@ func (r *recorder) run() {
 			if !ok {
 				flush()
 				if r.spool != nil {
-					r.drain()
-					_ = r.spool.Close() // kept on disk when records remain
+					close(r.stopShip) // the shipper's last drain, then the spool is closed
 				}
 				return
 			}
@@ -244,17 +295,36 @@ func (r *recorder) run() {
 			}
 		case <-t.C:
 			flush()
-			if r.spool != nil {
-				if len(r.pending) > 0 {
-					r.drain()
-				}
-				if time.Now().After(r.nextAdopt) {
-					r.adopt()
-				}
+		}
+	}
+}
+
+// ship stores what run spooled, and adopts the spools of dead processes. It is
+// the only goroutine that waits on the store.
+func (r *recorder) ship() {
+	defer r.wg.Done()
+	t := time.NewTicker(r.interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-r.stopShip:
+			r.drain()
+			_ = r.spool.Close() // kept on disk when records remain
+			return
+		case <-r.wake:
+			r.drain()
+		case <-t.C:
+			r.drain()
+			if time.Now().After(r.nextAdopt) {
+				r.adopt()
 			}
 		}
 	}
 }
+
+// spoolUnavailable says the spool is refusing records (full or unwritable):
+// a request that a budget governs is refused rather than answered unrecorded.
+func (r *recorder) spoolUnavailable() bool { return r.spool != nil && r.degraded.Load() }
 
 // close drains the queue and waits for the writer, at most until ctx ends.
 func (r *recorder) close(ctx context.Context) {
