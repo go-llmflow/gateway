@@ -100,6 +100,7 @@ func armingRefusal(k store.BudgetKey) *admitError {
 }
 
 var (
+	errSpoolFull    = errors.New("the accounting spool is full or unwritable; requests under a budget are refused until it is emptied (the store is unreachable for too long, or the disk is full)")
 	errNoContextLen = errors.New("the context length of this model is unknown (set max_model_len, or wait for its upstreams to report it on /v1/models): requests are refused while a budget applies")
 )
 
@@ -116,6 +117,12 @@ var (
 func (s *Server) admitBudget(ctx context.Context, ep openai.Endpoint, g *group, scope reqScope, out []byte, betas []string, id string) (*admission, []byte, error) {
 	if s.budget.stale() {
 		return nil, nil, &admitError{http.StatusServiceUnavailable, "service_unavailable", errStateStale.Error(), "store_unavailable", time.Time{}, store.BudgetKey{}}
+	}
+	// The accounting spool is full or unwritable: what is answered now could be
+	// lost unrecorded, so a request a budget governs is refused (fail closed)
+	// rather than admitted; the others are served (their cost is still counted).
+	if s.rec.spoolUnavailable() && len(s.budget.refs(scope)) > 0 {
+		return nil, nil, &admitError{http.StatusServiceUnavailable, "service_unavailable", errSpoolFull.Error(), "spool_full", time.Time{}, store.BudgetKey{}}
 	}
 	if s.prof == nil || scope.user == "" || s.softBudgets {
 		return s.admitScope(ctx, ep, g, scope, out, betas, id)
