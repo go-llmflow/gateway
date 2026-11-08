@@ -78,16 +78,43 @@ const spareRetryAfter = 5
 // from spare capacity only (borrow = "spare", no share) takes it only if
 // fewer than C requests are in flight and vLLM's queues are not saturated;
 // spare is then false and no grant is held. Anyone else acquires as before.
-func (s *Server) acquireFor(g *group, org string, est int64) (grant *fairshare.Grant, spare bool, err error) {
+//
+// slots is how many slots the request holds: a request that runs n sequences
+// (n, best_of) takes n, as n requests would (fairshare.Grant.Join), for chat,
+// completions and every endpoint alike; spare-only admission needs room for all
+// of them, or none is taken.
+func (s *Server) acquireFor(g *group, org string, est int64, slots int) (grant *fairshare.Grant, spare bool, err error) {
 	if !s.cfg.PoolSpareOnly(g.cfg.Pool, org) {
 		grant, err = g.pool.acquire(org, g.class, est)
-		return grant, false, err
+		if err != nil {
+			return nil, false, err
+		}
+		for i := 1; i < slots; i++ {
+			more, merr := g.pool.acquire(org, g.class, 0)
+			if merr != nil {
+				grant.Release(0)
+				return nil, false, merr
+			}
+			grant.Join(more)
+		}
+		return grant, false, nil
 	}
-	grant, ok := s.tryAcquireFor(g, org, est)
+	grant, ok := s.tryAcquireFor(g, org, est, slots)
 	if !ok {
 		return nil, true, nil
 	}
 	return grant, false, nil
+}
+
+// maxSlots bounds the slots one request holds.
+const maxSlots = 64
+
+// slotsOf is the slots a request of this shape holds.
+func slotsOf(ep openai.Endpoint, out []byte) int {
+	if sh, err := openai.ShapeOf(ep, out); err == nil && sh.Choices > 1 {
+		return int(min(sh.Choices, maxSlots))
+	}
+	return 1
 }
 
 // tryAcquireFor is the non-waiting acquire of a slot in g's pool: it fails when
@@ -95,13 +122,24 @@ func (s *Server) acquireFor(g *group, org string, est int64) (grant *fairshare.G
 // only, when vLLM's queue is saturated too. Every path that takes a slot for
 // such an organisation goes through it, the fallback to another group's pool
 // included (it used to skip the queue test: audit 2026-11-07).
-func (s *Server) tryAcquireFor(g *group, org string, est int64) (*fairshare.Grant, bool) {
+func (s *Server) tryAcquireFor(g *group, org string, est int64, slots int) (*fairshare.Grant, bool) {
 	grant, ok := g.pool.tryAcquire(org, g.class, est)
-	if ok && s.cfg.PoolSpareOnly(g.cfg.Pool, org) && g.queueSaturated() {
+	if !ok {
+		return nil, false
+	}
+	for i := 1; i < slots; i++ {
+		more, ok := g.pool.tryAcquire(org, g.class, 0)
+		if !ok { // no room for the whole request: none of it is taken
+			grant.Release(0)
+			return nil, false
+		}
+		grant.Join(more)
+	}
+	if s.cfg.PoolSpareOnly(g.cfg.Pool, org) && g.queueSaturated() {
 		grant.Release(0)
 		return nil, false
 	}
-	return grant, ok
+	return grant, true
 }
 
 // refuseSpare answers a spare-only organisation when the pool has no room:
@@ -332,12 +370,16 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		// out of the guards releases it.
 		promptEst := int64(len(out) / 4)
 		// Every choice generates up to max_tokens (n, and best_of: vLLM samples
-		// that many and keeps n): the share level counts them all.
-		genEst := req.MaxTokens
-		if sh, serr := openai.ShapeOf(ep, out); serr == nil && sh.Choices > 1 {
-			genEst = req.MaxTokens * sh.Choices
+		// that many and keeps n), and a request with no max_tokens up to what is
+		// left of the model's context: the estimate counts them all, and the
+		// request holds one slot per choice (slotsOf).
+		slots := slotsOf(ep, out)
+		perChoice := req.MaxTokens
+		if perChoice == 0 {
+			perChoice = max(0, g.contextLen()-promptEst)
 		}
-		grant, spare, aerr := s.acquireFor(g, key.Org, promptEst+genEst)
+		genEst := perChoice * int64(slots)
+		grant, spare, aerr := s.acquireFor(g, key.Org, promptEst+genEst, slots)
 		if spare {
 			s.limiter.release(key.ID, 0)
 			s.refuseSpare(w, key, g.cfg.Pool)
@@ -428,7 +470,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			idx := 0
 			for fb := s.nextFallback(r.Context(), ep, g, &idx, key, scope, body, eg.betas, reqID); fb != nil; fb = s.nextFallback(r.Context(), ep, g, &idx, key, scope, body, eg.betas, reqID) {
 				next := fb.g
-				tg, ok := s.tryAcquireFor(next, key.Org, promptEst+genEst)
+				tg, ok := s.tryAcquireFor(next, key.Org, promptEst+genEst, slots)
 				if !ok {
 					fb.adm.release(0)
 					continue
@@ -638,7 +680,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 			adm.release(0)
 			g, out, adm = next, fb.out, fb.adm
 			scope.model, scope.unit, scope.overflow = g.cfg.Name, g.cfg.Cost.Unit, adm.overflow
-			ng, spare, aerr := s.acquireFor(g, key.Org, promptEst+genEst)
+			ng, spare, aerr := s.acquireFor(g, key.Org, promptEst+genEst, slots)
 			if spare {
 				// The target pool lends spare capacity only and has none.
 				status = http.StatusTooManyRequests

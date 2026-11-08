@@ -46,6 +46,12 @@ type Fluids struct {
 	// idle, the rest active. 0: all the energy of an interval with work is
 	// active.
 	IdleWatts float64
+	// MaxGPUWatts is the most one GPU can draw (default 3000, above any on the
+	// market). An interval's energy for a GPU is capped at twice this times the
+	// time since its counter was last trusted, so that a lying or glitching
+	// exporter cannot bill more than the device could have used; a capped
+	// interval is logged.
+	MaxGPUWatts float64
 	// Interval is the scrape period; Settle how long an interval waits before
 	// its energy is attributed, so that the accounting of its requests has
 	// reached the store.
@@ -153,6 +159,7 @@ const (
 	MaxPricePerKWh        = 100
 	MaxWeight             = 1e6
 	MaxIdleWatts          = 2000
+	DefaultMaxGPUWatts    = 3000
 )
 
 // Params returns the price terms of the month "YYYY-MM".
@@ -191,6 +198,8 @@ type fluidsHCL struct {
 	WDecodeRange   hcl.Range         `hcl:"w_decode,attr_value_range"`
 	IdleWatts      *float64          `hcl:"idle_watts,optional"`
 	IdleWattsRange hcl.Range         `hcl:"idle_watts,attr_value_range"`
+	MaxWatts       *float64          `hcl:"max_gpu_watts,optional"`
+	MaxWattsRange  hcl.Range         `hcl:"max_gpu_watts,attr_value_range"`
 	Interval       *string           `hcl:"interval,optional"`
 	IntervalRange  hcl.Range         `hcl:"interval,attr_value_range"`
 	Settle         *string           `hcl:"settle,optional"`
@@ -328,6 +337,14 @@ func (v *validator) fluids(raw *fileHCL, c *Config) {
 		v.errf(f.DefRange, "Invalid weights", "w_prefill and w_decode are both 0: no work could be weighed")
 	}
 	out.IdleWatts = pos(f.IdleWatts, f.IdleWattsRange, "idle_watts", 0, MaxIdleWatts)
+	out.MaxGPUWatts = DefaultMaxGPUWatts
+	if f.MaxWatts != nil {
+		if w := pos(f.MaxWatts, f.MaxWattsRange, "max_gpu_watts", 0, 1e6); w > 0 {
+			out.MaxGPUWatts = w
+		} else {
+			v.errf(f.MaxWattsRange, "Invalid max_gpu_watts", "max_gpu_watts must be above 0")
+		}
+	}
 	out.Interval = v.dur(f.Interval, f.IntervalRange, "interval", DefaultFluidsInterval)
 	if out.Interval < time.Second || out.Interval > 10*time.Minute {
 		v.errf(f.IntervalRange, "Invalid interval", "interval = %s: want 1s..10m", out.Interval)

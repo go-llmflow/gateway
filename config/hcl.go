@@ -613,6 +613,8 @@ type orgHCL struct {
 	Share      float64             `hcl:"share"`
 	ShareRange hcl.Range           `hcl:"share,attr_value_range"`
 	Teams      []orgTeamHCL        `hcl:"team,block"`
+	Domains    []string            `hcl:"domains,optional"`
+	DomainsRng hcl.Range           `hcl:"domains,attr_value_range"`
 	SoftQuotas *softQuotasLevelHCL `hcl:"soft_quotas,block"`
 	// General-ledger codes of the chargeback (#97).
 	CostCenter      *string        `hcl:"cost_center,optional"`
@@ -1018,6 +1020,16 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		}
 		sum += o.Share
 		org := Org{Name: o.Name, Share: o.Share}
+		for _, d := range o.Domains {
+			d = strings.ToLower(strings.TrimSuffix(d, "."))
+			if d == "" || strings.ContainsAny(d, "@ /") {
+				v.errf(o.DomainsRng, "Invalid domain", "org %q domains: %q is not a DNS name", o.Name, d)
+				continue
+			}
+			if !slices.Contains(org.Domains, d) {
+				org.Domains = append(org.Domains, d)
+			}
+		}
 		if o.SoftQuotas != nil {
 			org.WarnAt = v.warnAt(o.SoftQuotas.WarnAt, "org "+strconv.Quote(o.Name))
 		}
@@ -1382,7 +1394,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			v.errf(j.LimitsRange, "No map", "a jwt block needs at least one map { value, team } block")
 		}
 		for _, m := range j.Maps {
-			cm := JWTMap{Claim: strOr(m.Claim, "groups"), Value: m.Value, Team: m.Team, Project: strOr(m.Project, "")}
+			cm := JWTMap{Claim: CanonicalClaim(strOr(m.Claim, "groups")), Value: m.Value, Team: m.Team, Project: strOr(m.Project, "")}
 			if !ValidName(m.Team) || cm.Project != "" && !ValidName(cm.Project) || m.Value == "" {
 				v.errf(m.DefRange, "Invalid map", "map needs a value and a valid team (and project) name")
 			} else {
@@ -1457,7 +1469,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			v.errf(o.SessionTTLRange, "Session too long", "session_ttl %v: at most 168h", cs.SessionTTL)
 		}
 		for _, r := range o.Roles {
-			cr := SSORole{Claim: strOr(r.Claim, "groups"), Value: r.Value, Role: r.Role, Org: strOr(r.Org, ""), Team: strOr(r.Team, "")}
+			cr := SSORole{Claim: CanonicalClaim(strOr(r.Claim, "groups")), Value: r.Value, Role: r.Role, Org: strOr(r.Org, ""), Team: strOr(r.Team, "")}
 			if r.Value == "" || !validRoleScope(cr.Role, cr.Org, cr.Team) {
 				v.errf(r.DefRange, "Invalid role", "role %q needs a value and its scope (proxy roles: none; org_admin: org; team_admin, member: team; viewer: org or team)", r.Role)
 			} else {
@@ -1515,7 +1527,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			cp.Accept = v.accepts(p.Accepts, where)
 			cp.Domain, cp.Domains = v.domains(p.Domain, p.Domains, p.DomainRange, p.DomainsRange, where, p.Issuer, domainOwner)
 			for _, r := range p.Roles {
-				cr := SSORole{Claim: strOr(r.Claim, "groups"), Value: r.Value, Role: r.Role, Org: strOr(r.Org, ""), Team: strOr(r.Team, "")}
+				cr := SSORole{Claim: CanonicalClaim(strOr(r.Claim, "groups")), Value: r.Value, Role: r.Role, Org: strOr(r.Org, ""), Team: strOr(r.Team, "")}
 				if r.Value == "" || !validRoleScope(cr.Role, cr.Org, cr.Team) {
 					v.errf(r.DefRange, "Invalid role", "role %q needs a value and its scope (proxy roles: none; org_admin: org; team_admin, member: team; viewer: org or team)", r.Role)
 				} else {
@@ -1771,6 +1783,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	v.redfishNodes(raw, c)
 	v.dcgmPools(raw, c)
 	c.Federations = v.federations(raw.Federations, orgs, c)
+	v.orgDomains(raw.Orgs, c)
 	v.adoptionPrivacy(raw, c)
 	v.decisionReport(raw, c)
 	v.profiles(raw, c)

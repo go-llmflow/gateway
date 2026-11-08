@@ -251,6 +251,36 @@ type Grant struct {
 	// called once by Release instead of updating a local pool.
 	remote     func(consumed float64)
 	remoteDone atomic.Bool
+	// extra are the further slots of a request that runs several sequences at
+	// once (n, best_of): see Join.
+	extra []*Grant
+}
+
+// Join adds o, a further slot of the same request, to g. A request that asks
+// for n completions runs n sequences in vLLM at once, so it holds n slots, as n
+// requests would: it is counted n times in its team's in-flight, may borrow n
+// slots, and takes the worst priority band of the n. Releasing g releases all
+// of them; the consumption is charged once, to g. Before this, n and best_of
+// changed a statistic and nothing about scheduling (audit 2026-11-08).
+func (g *Grant) Join(o *Grant) {
+	if o == nil {
+		return
+	}
+	g.extra = append(g.extra, o)
+	g.Priority = max(g.Priority, o.Priority)
+	g.Borrowing = g.Borrowing || o.Borrowing
+	g.Saturated = g.Saturated || o.Saturated
+}
+
+// Slots is how many slots the request holds.
+func (g *Grant) Slots() int { return 1 + len(g.extra) }
+
+// releaseExtra releases the joined slots, charging nothing.
+func (g *Grant) releaseExtra() {
+	for _, o := range g.extra {
+		o.Release(0)
+	}
+	g.extra = nil
 }
 
 // NewRemoteGrant returns a grant decided elsewhere (by the replica that
@@ -452,11 +482,23 @@ func (p *Pool) acquire(teamName string, class Class, estTokens int64, needRoom b
 func (g *Grant) Release(consumed float64) {
 	if g.remote != nil {
 		if g.remoteDone.CompareAndSwap(false, true) {
+			g.releaseExtra()
 			g.remote(consumed)
 		}
 		return
 	}
 	p := g.pool
+	p.mu.Lock()
+	if g.released {
+		p.mu.Unlock()
+		return
+	}
+	extra := g.extra
+	g.extra = nil
+	p.mu.Unlock()
+	for _, o := range extra {
+		o.Release(0)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if g.released {

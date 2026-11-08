@@ -111,11 +111,68 @@ func TestMeterCounterReset(t *testing.T) {
 	if !ok || iv.MJ != 800 || iv.Resets != 0 {
 		t.Fatalf("%+v", iv)
 	}
-	// Driver reload on a: the counter restarts, the new value is the energy since.
+	// Driver reload on a: a decrease is a candidate, billed as nothing; the next
+	// reading, still below the old baseline, confirms the reset and the energy
+	// since the new baseline (300) is billed. (The reload's own interval is
+	// unknown, like go-redfish's: never bill a decrease.)
 	iv, _ = m.Observe(rd(20, map[string]uint64{"a": 300, "b": 5300}))
-	if iv.Resets != 1 || iv.PerGPU["a"] != 300 || iv.PerGPU["b"] != 100 || iv.MJ != 400 {
-		t.Fatalf("%+v", iv)
+	if iv.Resets != 0 || iv.PerGPU["a"] != 0 || iv.PerGPU["b"] != 100 || iv.MJ != 100 {
+		t.Fatalf("candidate: %+v", iv)
 	}
+	iv, _ = m.Observe(rd(30, map[string]uint64{"a": 350, "b": 5400}))
+	if iv.Resets != 1 || iv.PerGPU["a"] != 50 || iv.PerGPU["b"] != 100 || iv.MJ != 150 {
+		t.Fatalf("confirmed: %+v", iv)
+	}
+}
+
+// The audit of 2026-11-08: a transient low reading, a real reset, a counter
+// that wraps, and a lying exporter.
+func TestMeterGlitchResetWrapAndLiar(t *testing.T) {
+	const kw = uint64(60_000_000) // 1 kW for 60 s, in mJ
+	min := func(n int) int { return 60 * n }
+	t.Run("a transient 0 is discarded, its energy billed once", func(t *testing.T) {
+		var m Meter
+		const life = uint64(2_600_000_000_000)
+		m.Observe(rd(min(0), map[string]uint64{"g": life}))
+		iv, _ := m.Observe(rd(min(1), map[string]uint64{"g": 0}))
+		if iv.MJ != 0 || iv.Resets != 0 {
+			t.Fatalf("the glitch billed %+v", iv)
+		}
+		iv, _ = m.Observe(rd(min(2), map[string]uint64{"g": life + 2*kw}))
+		if iv.Glitches != 1 || iv.Resets != 0 || iv.MJ != int64(2*kw) {
+			t.Fatalf("recovery: %+v, want the 2 minutes' energy once", iv)
+		}
+	})
+	t.Run("a real reset is confirmed by the next reading", func(t *testing.T) {
+		var m Meter
+		m.Observe(rd(0, map[string]uint64{"g": 9 * kw}))
+		m.Observe(rd(min(1), map[string]uint64{"g": 10 * kw}))
+		iv, _ := m.Observe(rd(min(2), map[string]uint64{"g": kw / 2})) // reload
+		if iv.MJ != 0 {
+			t.Fatalf("the reload billed %+v", iv)
+		}
+		iv, _ = m.Observe(rd(min(3), map[string]uint64{"g": kw/2 + kw}))
+		if iv.Resets != 1 || iv.MJ != int64(kw) {
+			t.Fatalf("after the reload: %+v", iv)
+		}
+	})
+	t.Run("a 32-bit wrap is a reset, not a huge delta", func(t *testing.T) {
+		var m Meter
+		m.Observe(rd(0, map[string]uint64{"g": 1<<32 - 1000}))
+		m.Observe(rd(min(1), map[string]uint64{"g": 500})) // wrapped
+		iv, _ := m.Observe(rd(min(2), map[string]uint64{"g": 500 + kw}))
+		if iv.Resets != 1 || iv.MJ != int64(kw) {
+			t.Fatalf("%+v", iv)
+		}
+	})
+	t.Run("a lying exporter is capped at the device's power", func(t *testing.T) {
+		m := Meter{MaxWatts: 1000}
+		m.Observe(rd(0, map[string]uint64{"g": 0}))
+		iv, _ := m.Observe(rd(min(1), map[string]uint64{"g": 50_000 * kw})) // 50 MW for a minute
+		if iv.Capped != 1 || iv.MJ > int64(2*kw) {
+			t.Fatalf("a liar was billed %+v (cap: 1 kW x margin 2 x 60 s = %d)", iv, 2*kw)
+		}
+	})
 }
 
 func TestMeterMissingScrape(t *testing.T) {

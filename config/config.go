@@ -529,6 +529,14 @@ type Org struct {
 	Name  string
 	Share float64
 	Teams []string
+	// Domains are the institutions' domains this organisation OWNS (org { domains
+	// = [...] }): the only domains its administrators may create people in
+	// (POST /admin/users). A domain is owned by at most one organisation. An
+	// organisation also owns the domains of an sso provider or jwt issuer bound
+	// to it alone, and of the scim client when every group it maps lands on
+	// this organisation's teams (see OrgNameScopes); a shared source owns
+	// nothing, and the legacy unrestricted sso block owns nothing.
+	Domains []string
 	// Labs maps a configured team to its lab (team "t" { lab = "x" }): an
 	// optional accounting level between the organisation and its teams,
 	// for reports only (RBAC does not use it). Teams without a lab, and

@@ -74,6 +74,7 @@ func energyNodes(cfg *config.Config, secrets Secrets) []*energyNode {
 			if n == nil {
 				n = &energyNode{key: redactURL(u.DcgmURL), url: u.DcgmURL, pool: g.Pool, factor: cfg.Fluids.NodeOverheadFactor, preemptPrev: map[string]float64{}}
 				n.meter.MaxGap = 3 * cfg.Fluids.Interval
+				n.meter.MaxWatts = cfg.Fluids.MaxGPUWatts
 				n.bmcMeter.MaxGap = 3 * cfg.Fluids.Interval
 				by[u.DcgmURL] = n
 				nodes = append(nodes, n)
@@ -258,6 +259,12 @@ func (s *Server) fluidsRound(ctx context.Context, es store.EnergyStore, nodes []
 		}
 		s.scrapePreemptions(ctx, n)
 		if iv, ok := n.meter.Observe(rd); ok {
+			if iv.Glitches > 0 || iv.Capped > 0 {
+				// Where an operator reads it: a counter that dipped and came back
+				// (discarded), or an interval cut to the device's power.
+				s.log.Warn("fluids: an exporter's counter was not trusted", "node", n.key,
+					"glitches_discarded", iv.Glitches, "capped_at_max_gpu_watts", iv.Capped, "resets", iv.Resets)
+			}
 			if len(n.pending) >= maxPendingIntervals { // the store has been failing for hours
 				s.log.Error("fluids: too many unstored intervals; dropping the oldest", "node", n.key)
 				n.pending = n.pending[1:]

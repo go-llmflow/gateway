@@ -63,6 +63,9 @@ func fluidsConfig(vllm, dcgm string) *config.Config {
 		PUE: 1.4, PricePerKWh: 0.18, Currency: "EUR", IdleEnergy: energy.IdleByShare,
 		WPrefill: 1, WDecode: 1, Interval: time.Hour, Settle: 0,
 		Periods: map[string]config.FluidsPeriod{},
+		// The fake DCGM adds whole kWh per simulated interval, which is above any
+		// real GPU's power: the cap is lifted here, tested in energy/.
+		MaxGPUWatts: 1e9,
 	}
 	return cfg
 }
@@ -137,11 +140,18 @@ func TestFluidsEndToEnd(t *testing.T) {
 	dc.setFail(true)
 	round(5 * time.Minute)
 	dc.setFail(false)
-	dc.set("GPU-aaa", kWhMJ)
+	dc.set("GPU-aaa", kWhMJ/2) // the counter restarted: 0.5 kWh, below the 1.5 it had
 	dc.add("GPU-bbb", kWhMJ)
 	round(5 * time.Minute)
+	// The meter does not take a decrease as a reset on sight (audit 2026-11-08):
+	// that interval billed GPU-aaa nothing (a candidate), and the next reading,
+	// still below the old baseline, confirms the reload and bills the energy
+	// since it.
+	dc.add("GPU-aaa", kWhMJ/2)
+	dc.add("GPU-bbb", kWhMJ/2)
+	round(5 * time.Minute)
 
-	const measured = 5.0 // kWh: 2 + 1 + 2 (the reload interval: 1 kWh since the reload, 1 kWh on the other GPU)
+	const measured = 5.0 // kWh: 2 + 1 + 1 (GPU-bbb, the reload interval) + 1 (both, once the reload is confirmed)
 	code, a := e.fluids(master, "&group_by=org")
 	if code != 200 || len(a.Rows) != 2 {
 		t.Fatalf("%d %+v", code, a)

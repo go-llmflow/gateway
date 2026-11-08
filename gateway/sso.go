@@ -335,15 +335,31 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request, provider st
 		return
 	}
 	// The institution filter comes before anything else.
+	// The person's ONE institution (their name's scope) when anything keys on the
+	// institution claim, accept or not (see person.go); roles never read the raw
+	// claim.
 	if ref := oidc.Check(prov.cfg.Accept, id); ref != nil {
 		shown = acceptMessage(ref)
 		fail(http.StatusForbidden, "institution not accepted", ref)
 		return
 	}
-	if err := tiedToInstitution(id, prov.cfg.Accept, prov.cfg.NameScopes(), prov.cfg.Domain); err != nil {
-		shown = "your identity provider states an institution that is not the one of your name"
-		fail(http.StatusForbidden, "name scope is not the institution stated", err)
-		return
+	inst := ""
+	claims := make([]string, 0, len(prov.cfg.Roles))
+	for _, m := range prov.cfg.Roles {
+		claims = append(claims, m.Claim)
+	}
+	if usesInstitution(prov.cfg.Accept, claims...) {
+		var ierr error
+		if inst, ierr = institutionOf(id, prov.cfg.NameScopes(), prov.cfg.Domain); ierr != nil {
+			shown = "your identity provider states an institution that is not the one of your name"
+			fail(http.StatusForbidden, "name scope is not the institution stated", ierr)
+			return
+		}
+		if !institutionAccepted(prov.cfg.Accept, inst) {
+			shown = "your institution is not accepted by this gateway"
+			fail(http.StatusForbidden, "institution not accepted", errors.New(inst))
+			return
+		}
 	}
 	user, err := s.scopedPerson(ctx, id, prov.cfg.NameScopes(), prov.cfg.Domain)
 	if errors.Is(err, errPersonStore) {
@@ -360,7 +376,7 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request, provider st
 		fail(http.StatusBadRequest, "no usable subject in the ID token", nil)
 		return
 	}
-	bindings := s.ssoBindings(prov, id, user)
+	bindings := s.ssoBindings(prov, id, user, inst)
 	u, err := s.st.GetUser(ctx, user)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -417,10 +433,10 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request, provider st
 // provider's role blocks. A role outside the organisations the provider may
 // vouch for is refused and logged: an institution's provider never makes
 // anyone an administrator of another institution.
-func (s *Server) ssoBindings(p *ssoProvider, id *oidc.Token, user string) []store.Binding {
+func (s *Server) ssoBindings(p *ssoProvider, id *oidc.Token, user, institution string) []store.Binding {
 	var out []store.Binding
 	for _, m := range p.cfg.Roles {
-		if !slices.Contains(oidc.ClaimValues(id, m.Claim), m.Value) {
+		if !claimMatches(id, m.Claim, m.Value, institution) {
 			continue
 		}
 		if !p.cfg.MayGrant(s.cfg, m) {

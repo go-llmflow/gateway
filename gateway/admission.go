@@ -100,8 +100,9 @@ func armingRefusal(k store.BudgetKey) *admitError {
 }
 
 var (
-	errSpoolFull    = errors.New("the accounting spool is full or unwritable; requests under a budget are refused until it is emptied (the store is unreachable for too long, or the disk is full)")
-	errNoContextLen = errors.New("the context length of this model is unknown (set max_model_len, or wait for its upstreams to report it on /v1/models): requests are refused while a budget applies")
+	errSpoolFull     = errors.New("the accounting spool is full or unwritable; requests under a budget are refused until it is emptied (the store is unreachable for too long, or the disk is full)")
+	errSpoolOrgShare = errors.New("this organisation's usage records are filling the accounting spool (the store has not taken them): requests under a budget are refused until it has, so that the other organisations keep room in it")
+	errNoContextLen  = errors.New("the context length of this model is unknown (set max_model_len, or wait for its upstreams to report it on /v1/models): requests are refused while a budget applies")
 )
 
 // admitBudget holds a request's worst-case cost and returns the body to
@@ -121,8 +122,19 @@ func (s *Server) admitBudget(ctx context.Context, ep openai.Endpoint, g *group, 
 	// The accounting spool is full or unwritable: what is answered now could be
 	// lost unrecorded, so a request a budget governs is refused (fail closed)
 	// rather than admitted; the others are served (their cost is still counted).
-	if s.rec.spoolUnavailable() && len(s.budget.refs(scope)) > 0 {
+	budgeted := len(s.budget.refs(scope)) > 0
+	switch {
+	case s.rec.memoryFull():
+		// The records held in memory only are at their bound: the next answer
+		// would be lost unbilled, budgeted or not. Everybody is refused until the
+		// store has taken some.
 		return nil, nil, &admitError{http.StatusServiceUnavailable, "service_unavailable", errSpoolFull.Error(), "spool_full", time.Time{}, store.BudgetKey{}}
+	case budgeted && s.rec.spoolUnavailable():
+		return nil, nil, &admitError{http.StatusServiceUnavailable, "service_unavailable", errSpoolFull.Error(), "spool_full", time.Time{}, store.BudgetKey{}}
+	case budgeted && s.rec.orgHoldsTooMuch(scope.org):
+		// Per-organisation fairness: this organisation's unstored records fill the
+		// spool, and the other organisations keep the rest of it.
+		return nil, nil, &admitError{http.StatusServiceUnavailable, "service_unavailable", errSpoolOrgShare.Error(), "spool_org_share", time.Time{}, store.BudgetKey{}}
 	}
 	if s.prof == nil || scope.user == "" || s.softBudgets {
 		return s.admitScope(ctx, ep, g, scope, out, betas, id)

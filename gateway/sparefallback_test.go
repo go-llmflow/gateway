@@ -70,17 +70,17 @@ model "llama-small" {
 	}
 
 	small.members()[0].waiting.Store(5) // as the health loop scraped it: vLLM queues
-	if g, ok := e.srv.tryAcquireFor(small, "etabB", 10); ok {
+	if g, ok := e.srv.tryAcquireFor(small, "etabB", 10, 1); ok {
 		g.Release(0)
 		t.Fatal("a spare-only organisation took a slot in a pool whose vLLM queue is saturated")
 	}
-	if g, ok := e.srv.tryAcquireFor(small, "etabA", 10); !ok { // an owner is not held to it
+	if g, ok := e.srv.tryAcquireFor(small, "etabA", 10, 1); !ok { // an owner is not held to it
 		t.Fatal("an owner was refused")
 	} else {
 		g.Release(0)
 	}
 	small.members()[0].waiting.Store(-1) // unknown: never saturated
-	g, ok := e.srv.tryAcquireFor(small, "etabB", 10)
+	g, ok := e.srv.tryAcquireFor(small, "etabB", 10, 1)
 	if !ok {
 		t.Fatal("a spare-only organisation was refused with room and no queue")
 	}
