@@ -141,7 +141,13 @@ func (s *Server) startSSO(ctx context.Context) error {
 	if s.shared != nil {
 		// Several replicas: a login started on one finishes on another, a
 		// session outlives the replica that created it.
-		se, err := newSealer([]byte(s.secrets.HASecret))
+		// The replicas' secret, or alone the master key: sessions are sealed
+		// under a key derived from it (domain-separated, never the secret).
+		secret := s.secrets.HASecret
+		if secret == "" {
+			secret = s.secrets.MasterKey
+		}
+		se, err := newSealer([]byte(secret))
 		if err != nil {
 			return err
 		}

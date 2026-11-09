@@ -238,6 +238,11 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 		if err := s.buildHA(); err != nil {
 			return nil, err
 		}
+	} else if sh, ok := st.(store.HAStateStore); ok {
+		// One gateway on PostgreSQL: its SSO sessions and its alert and
+		// notification retries survive a restart, as they survive a failover
+		// with an ha block (since v0.44.0; they were held in memory).
+		s.shared = sh
 	}
 	// An upstream shared by several model groups (same URL, same key) is
 	// one object, so its in-flight count and cooldown are shared too.
