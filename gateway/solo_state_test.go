@@ -98,8 +98,10 @@ func TestSoloAlertRetrySurvivesARestart(t *testing.T) {
 	direct, _ := freshDB(t, "")
 	e1, stop1 := soloEnv(t, cfg, direct)
 	e1.srv.alerts.backoff = func(int) time.Duration { return 100 * time.Millisecond }
-	e1.srv.onSoftLimit([]softAlert{{b: store.Budget{BudgetKey: store.BudgetKey{Kind: store.ScopeTeam, Name: "etabA"}, Period: store.Day, MaxCost: 10, SoftLimit: 8},
-		spent: 8.5, start: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)}})
+	// What onSoftLimit does once the store says this alert is the first of its
+	// period, with the outbox a gateway on PostgreSQL now has.
+	e1.srv.enqueueAlert(softAlert{b: store.Budget{BudgetKey: store.BudgetKey{Kind: store.ScopeTeam, Name: "etabA"}, Period: store.Day, MaxCost: 10, SoftLimit: 8},
+		spent: 8.5, start: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)})
 	// The delivery fails while the hook is down; the gateway is stopped mid-retry.
 	time.Sleep(1500 * time.Millisecond)
 	if hits.Load() != 0 {
