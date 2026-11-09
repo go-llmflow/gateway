@@ -2166,8 +2166,9 @@ sso {
   carry the session's token in `X-CSRF-Token` and must not be marked
   cross-site (`Sec-Fetch-Site`) or come from another `Origin` than
   `redirect_url`'s. Requests with a bearer token are unaffected.
-- Without an `ha` block, sessions live in the memory of the replica that
-  created them (behind several replicas, use sticky sessions); with one,
+- On PostgreSQL sessions are sealed in the store and survive a restart (since
+  v0.44.0; with the memory store they live in the process, and behind several
+  replicas without an `ha` block they are per replica: use sticky sessions); with `ha`,
   they are sealed in PostgreSQL and shared (see
   [High availability](#high-availability-several-replicas-since-v0140)).
 
@@ -3646,20 +3647,25 @@ security audit of 2026-10-26):
 9. **Admin principals are read from the store on every admin request** (no
    cache): fine for admin traffic, but the admin API fails with the store
    (503, within 60 s at most). Role changes therefore apply at once.
-10. **Soft-budget alert retries live in memory**: each channel (webhook,
+10. **Soft-budget alert retries are persistent on PostgreSQL** (v0.44.0; with
+    the memory store they live in the process): each channel (webhook,
     SMTP) is retried on its own, up to 6 attempts with exponential backoff
     (2 s doubling, 2 min cap, 25 % jitter), a 4xx other than 408/429 is not
     retried, every webhook attempt carries the same `Idempotency-Key`
     (budget and period) so a receiver can de-duplicate, and give-ups and
     retries are counted (`llmflow_alert_failures_total`,
-    `llmflow_alert_retries_total`). Without an `ha` block a gateway stopped
-    mid-retry does not resume (the period is already marked as alerted);
-    with one, retries live in a PostgreSQL outbox and resume on any
-    replica, delivered at least once.
+    `llmflow_alert_retries_total`). The retries live in a PostgreSQL outbox and
+    resume after a restart, and on any replica with an `ha` block, delivered
+    at least once. Until v0.43.x a single gateway stopped mid-retry did not
+    resume (the period was already marked as alerted): the evidence was this
+    paragraph, and `TestSoloAlertRetrySurvivesARestart` now covers it.
 
-11. **SSO sessions live in one replica's memory without an `ha` block**:
-    behind several replicas, use sticky sessions or the `ha` block (sessions
-    and logins in progress sealed in PostgreSQL).
+11. **SSO sessions are persistent on PostgreSQL** (v0.44.0; with the memory
+    store they live in the process): sessions and logins in progress are sealed
+    in PostgreSQL (AES-256-GCM under a key derived from the `ha` secret, or,
+    with one gateway, from the master key), so a restart no longer logs
+    everyone out (`TestSoloSSOSessionSurvivesARestart`), and behind several
+    replicas the `ha` block shares them.
 12. **A person holding a JWT cannot be revoked individually**: disable the
     team (this cuts their cached tokens at once on the replica that serves
     the request), change the `map` blocks, or revoke at the identity
