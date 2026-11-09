@@ -51,6 +51,9 @@ func (v *validator) decisionReport(raw *fileHCL, c *Config) {
 	known := false
 	for _, e := range raw.Exports {
 		known = known || e.Name == d.Destination
+		if e.Name == d.Destination && e.Kind == "syslog" {
+			v.errf(d.DestinationRange, "Report on syslog", "decision_report: destination %q is a syslog export, which carries log lines, not report files", d.Destination)
+		}
 	}
 	if !known {
 		v.errf(d.DestinationRange, "Unknown export", "decision_report: destination %q names no export block", d.Destination)

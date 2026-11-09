@@ -254,6 +254,15 @@ func TestParseRejectsWithPosition(t *testing.T) {
 		{"rotation bad prefix", valid + "key_rotation { vault_prefix = \"secret/../x\" }\n", "Invalid vault_prefix"},
 		{"rotation interval", valid + "key_rotation {\n  vault_prefix = \"secret/k\"\n  check_interval = \"1s\"\n}\n", "Invalid check_interval"},
 		{"jwt negative rpm", valid + strings.Replace(jwtBlock("https://idp.example", "a"), "jwt {", "jwt {\n  rpm = -1", 1), "Invalid limit"},
+		{"syslog plain", valid + "export \"x\" {\n  kind = \"syslog\"\n  transport = \"tcp\"\n  address = \"10.0.0.1:514\"\n}\n", "Plain syslog"},
+		{"syslog transport", valid + "export \"x\" {\n  kind = \"syslog\"\n  transport = \"sctp\"\n  address = \"h:1\"\n}\n", "Invalid transport"},
+		{"syslog address", valid + "export \"x\" {\n  kind = \"syslog\"\n  address = \"nohost\"\n}\n", "Invalid address"},
+		{"syslog facility", valid + "export \"x\" {\n  kind = \"syslog\"\n  address = \"h:6514\"\n  facility = 24\n}\n", "Invalid facility"},
+		{"syslog size", valid + "export \"x\" {\n  kind = \"syslog\"\n  address = \"h:6514\"\n  max_message_bytes = 10\n}\n", "Invalid max_message_bytes"},
+		{"syslog retention", valid + "export \"x\" {\n  kind = \"syslog\"\n  address = \"h:6514\"\n  retention = \"24h\"\n}\n", "Retention on syslog"},
+		{"syslog anchor", valid + "export \"x\" {\n  kind = \"syslog\"\n  address = \"h:6514\"\n}\naudit {\n  signing_key_file = \"/k\"\n  anchor = \"x\"\n}\n", "Anchor on syslog"},
+		{"syslog lock", valid + "export \"x\" {\n  kind = \"syslog\"\n  address = \"h:6514\"\n}\nlogging \"l\" {\n  teams = [\"etabA\"]\n  destination = \"x\"\n  lock = true\n}\n", "Lock on syslog"},
+		{"syslog report", valid + "export \"x\" {\n  kind = \"syslog\"\n  address = \"h:6514\"\n}\ndecision_report {\n  destination = \"x\"\n}\n", "Report on syslog"},
 		{"syntax", valid + "team {", "test.hcl:"},
 		{"string for number", strings.Replace(valid, "capacity = 256", `capacity = "many"`, 1), "Unsuitable value type"},
 	}
@@ -271,6 +280,21 @@ func TestParseRejectsWithPosition(t *testing.T) {
 				t.Fatalf("error %q does not contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestSyslogExportConfig(t *testing.T) {
+	c, err := parse(valid + "export \"siem\" {\n  kind = \"syslog\"\n  address = \"siem.example:6514\"\n  tls_ca_file = \"file:/etc/ca.pem\"\n  facility = 13\n  app_name = \"gw\"\n}\n" +
+		"export \"lan\" {\n  kind = \"syslog\"\n  transport = \"udp\"\n  address = \"10.0.0.5:514\"\n  insecure_plain = true\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := c.Exports[0]
+	if e.Kind != "syslog" || e.Transport != "tls" || e.Address != "siem.example:6514" || e.Facility != 13 || e.AppName != "gw" || e.TLSCAFile != "file:/etc/ca.pem" {
+		t.Fatalf("%+v", e)
+	}
+	if l := c.Exports[1]; l.Transport != "udp" || !l.InsecurePlain {
+		t.Fatalf("%+v", l)
 	}
 }
 

@@ -220,6 +220,17 @@ type Export struct {
 	Directory string
 	// QueueSize bounds the objects waiting to be written (default 1024).
 	QueueSize int
+	// Syslog (kind "syslog", RFC 5424): Transport is tls (default, RFC 5425),
+	// tcp or udp; Address is host:port; InsecurePlain allows tcp and udp, to
+	// loopback and private addresses only. TLSCAFile, TLSCertFile and
+	// TLSKeyFile are secret references (PEM); TLSServerName defaults to the
+	// address's host.
+	Transport, Address                 string
+	InsecurePlain                      bool
+	TLSCAFile, TLSCertFile, TLSKeyFile string
+	TLSServerName                      string
+	Hostname, AppName, SDID            string
+	Facility, MaxMessageBytes          int
 }
 
 // Policy is a request policy: fields an inference request must carry, and

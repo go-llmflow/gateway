@@ -156,6 +156,15 @@ func readSecrets(c *config.Config) (gateway.Secrets, error) {
 		if err := get("export "+e.Name+" secret_key_file", e.SecretKeyFile, &cr.SecretKey); err != nil {
 			return s, err
 		}
+		if err := get("export "+e.Name+" tls_ca_file", e.TLSCAFile, &cr.CA); err != nil {
+			return s, err
+		}
+		if err := get("export "+e.Name+" tls_cert_file", e.TLSCertFile, &cr.ClientCert); err != nil {
+			return s, err
+		}
+		if err := get("export "+e.Name+" tls_key_file", e.TLSKeyFile, &cr.ClientKey); err != nil {
+			return s, err
+		}
 		s.ExportCredentials[e.Name] = cr
 	}
 	if c.Tracing != nil {
