@@ -58,7 +58,12 @@ type Sink interface {
 }
 
 // Credentials are an S3 export's keys, resolved by the caller.
-type Credentials struct{ AccessKey, SecretKey string }
+type Credentials struct {
+	AccessKey, SecretKey string
+	// Syslog over TLS: the PEM of the CA bundle, and of the client
+	// certificate and key.
+	CA, ClientCert, ClientKey string
+}
 
 // Open returns the sink an export block describes. An S3 sink reads the
 // bucket's Object Lock configuration now.
@@ -83,6 +88,14 @@ func Open(ctx context.Context, e config.Export, creds Credentials, now func() ti
 			return nil, fmt.Errorf("export %s: %w", e.Name, err)
 		}
 		return &fileSink{name: e.Name, dir: e.Directory, prefix: e.Prefix}, nil
+	case "syslog":
+		s, err := newSyslogSink(SyslogConfig{Name: e.Name, Transport: e.Transport, Address: e.Address, InsecurePlain: e.InsecurePlain,
+			CA: []byte(creds.CA), Cert: []byte(creds.ClientCert), Key: []byte(creds.ClientKey), ServerName: e.TLSServerName,
+			Hostname: e.Hostname, AppName: e.AppName, SDID: e.SDID, Facility: e.Facility, MaxMessageBytes: e.MaxMessageBytes}, now)
+		if err != nil {
+			return nil, err
+		}
+		return s, nil
 	case "gcs", "azure":
 		return nil, fmt.Errorf("export %s: kind %s: %w", e.Name, e.Kind, ErrNotImplemented)
 	}

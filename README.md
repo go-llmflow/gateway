@@ -813,6 +813,42 @@ at 8 MiB compressed. They go through the export's bounded queue: a batch
 dropped or given up is counted and alerted like any export write
 (`export_dropped`, `export_failed`).
 
+**Syslog (RFC 5424).** A logging block can also point at a `syslog` export,
+for a SIEM or a log collector (v0.41.0):
+
+```hcl
+export "siem" {
+  kind        = "syslog"
+  address     = "siem.example.org:6514"   # host:port
+  transport   = "tls"                     # tls (RFC 5425, default) | tcp | udp
+  tls_ca_file = "vault:secret/llmflow#siem_ca"        # PEM; default: system roots
+  # tls_cert_file / tls_key_file: client certificate (mutual TLS), secret references
+  facility    = 16                        # local0; severity is always 6 (informational)
+  app_name    = "llmflow-gateway"         # hostname defaults to the machine's
+  # sd_id = "llmflow@32473"               # structured-data ID: name@enterprise-number
+  # max_message_bytes = 8192              # default 8192 (2048 for udp), 1024 to 65000
+}
+logging "research" { teams = ["lab-med"]  destination = "siem" }
+```
+
+Each record is one message: header, a structured-data element
+`[llmflow@32473 object="requests/research/…" seq="1" of="500"]` and the JSON
+record as MSG (UTF-8 with the byte order mark the RFC requires). Control
+characters are escaped (`#` and three digits), so a record can never end a
+frame or forge another message. TCP and TLS frames are octet-counted (RFC 6587
+section 3.4.1). TLS needs TLS 1.2 or later and a verified certificate; `tcp`
+and `udp` send log lines in clear text, so they need `insecure_plain = true`
+and are refused for anything but a loopback or private address (checked on the
+address actually dialled). A record larger than the message limit is replaced
+by a marker with its original size, never cut into invalid JSON. Content is
+logged only where the block says `content = true`. **What syslog is not**:
+there is no acknowledgement (RFC 6587 section 3), so a message written into a
+connection that the peer has already dropped can be lost, and a retried batch
+can be delivered twice; and it cannot be read back or written once, so it is
+refused as an audit `anchor`, as a `decision_report` destination, and with
+`lock = true`. Tests: `TestFormatSyslogRFC5424`, `TestFormatSyslogInjection`,
+`TestSyslogTLS`, `TestRequestLogToSyslog`, `FuzzFormatSyslog`, `FuzzSplitLines`.
+
 ### Guardrails
 
 Guardrails check prompts before vLLM (stage `pre`) and completions after it (stage `post`, streams included). A request gets the guardrails of its key's organisation, of its team, and of the key itself. A key can add guardrails, `POST /admin/keys {"guardrails": ["pii"]}`, but it can never remove one.
@@ -2545,7 +2581,7 @@ audit {
 }
 
 export "archive" {
-  kind            = "s3"                               # s3, file; gcs and azure answer "not implemented"
+  kind            = "s3"                               # s3, file, syslog (logs only); gcs and azure answer "not implemented"
   endpoint        = "https://minio.example.org:9000"   # https (http only to loopback)
   bucket          = "llmflow-audit"                    # create it with Object Lock enabled
   path_style      = true                               # MinIO, Ceph RGW

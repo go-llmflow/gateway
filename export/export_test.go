@@ -111,7 +111,7 @@ func TestS3Sink(t *testing.T) {
 	for _, lock := range []bool{false, true} {
 		f := NewFakeS3(t)
 		f.Lock = lock
-		s, err := Open(ctx, s3Config(f.URL()), Credentials{"ak", "sk"}, func() time.Time { return now })
+		s, err := Open(ctx, s3Config(f.URL()), Credentials{AccessKey: "ak", SecretKey: "sk"}, func() time.Time { return now })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -151,7 +151,7 @@ func TestS3Sink(t *testing.T) {
 	}
 	f := NewFakeS3(t)
 	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) })
-	if _, err := Open(ctx, s3Config(f.URL()), Credentials{"ak", "sk"}, nil); err == nil {
+	if _, err := Open(ctx, s3Config(f.URL()), Credentials{AccessKey: "ak", SecretKey: "sk"}, nil); err == nil {
 		t.Fatal("a bucket that refuses access opened")
 	}
 }
@@ -213,7 +213,7 @@ func TestNotImplemented(t *testing.T) {
 func TestQueue(t *testing.T) {
 	ctx := context.Background()
 	f := NewFakeS3(t)
-	s, err := Open(ctx, s3Config(f.URL()), Credentials{"ak", "sk"}, nil)
+	s, err := Open(ctx, s3Config(f.URL()), Credentials{AccessKey: "ak", SecretKey: "sk"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

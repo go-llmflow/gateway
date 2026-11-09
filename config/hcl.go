@@ -146,7 +146,22 @@ type exportHCL struct {
 	RetentionRange hcl.Range `hcl:"retention,attr_value_range"`
 	Directory      *string   `hcl:"directory,optional"`
 	QueueSize      *int      `hcl:"queue_size,optional"`
-	DefRange       hcl.Range `hcl:",def_range"`
+	// Syslog.
+	Transport       *string   `hcl:"transport,optional"`
+	TransportRange  hcl.Range `hcl:"transport,attr_value_range"`
+	Address         *string   `hcl:"address,optional"`
+	AddressRange    hcl.Range `hcl:"address,attr_value_range"`
+	InsecurePlain   *bool     `hcl:"insecure_plain,optional"`
+	TLSCAFile       *string   `hcl:"tls_ca_file,optional"`
+	TLSCertFile     *string   `hcl:"tls_cert_file,optional"`
+	TLSKeyFile      *string   `hcl:"tls_key_file,optional"`
+	TLSServerName   *string   `hcl:"tls_server_name,optional"`
+	Hostname        *string   `hcl:"hostname,optional"`
+	AppName         *string   `hcl:"app_name,optional"`
+	SDID            *string   `hcl:"sd_id,optional"`
+	Facility        *int      `hcl:"facility,optional"`
+	MaxMessageBytes *int      `hcl:"max_message_bytes,optional"`
+	DefRange        hcl.Range `hcl:",def_range"`
 }
 
 // ValidObjectKey reports whether s may start or name an object: printable
@@ -1581,7 +1596,9 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		}
 	}
 	exports := map[string]bool{}
+	syslogs := map[string]bool{} // exports of kind syslog: write-only streams
 	for _, x := range raw.Exports {
+		syslogs[x.Name] = x.Kind == "syslog"
 		e := Export{Name: x.Name, Kind: x.Kind, Endpoint: strOr(x.Endpoint, ""), Region: strOr(x.Region, "us-east-1"),
 			Bucket: strOr(x.Bucket, ""), AccessKeyFile: strOr(x.AccessKeyFile, ""), SecretKeyFile: strOr(x.SecretKeyFile, ""),
 			Prefix: strOr(x.Prefix, ""), LockMode: strOr(x.LockMode, "COMPLIANCE"), Directory: strOr(x.Directory, ""),
@@ -1624,8 +1641,39 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		case "gcs", "azure":
 			// Declared so that a configuration can name them; New refuses
 			// them with "not implemented".
+		case "syslog":
+			e.Transport, e.Address = strOr(x.Transport, "tls"), strOr(x.Address, "")
+			e.TLSCAFile, e.TLSCertFile, e.TLSKeyFile = strOr(x.TLSCAFile, ""), strOr(x.TLSCertFile, ""), strOr(x.TLSKeyFile, "")
+			e.TLSServerName, e.Hostname, e.AppName, e.SDID = strOr(x.TLSServerName, ""), strOr(x.Hostname, ""), strOr(x.AppName, ""), strOr(x.SDID, "")
+			if x.InsecurePlain != nil {
+				e.InsecurePlain = *x.InsecurePlain
+			}
+			if x.Facility != nil {
+				e.Facility = *x.Facility
+			}
+			if x.MaxMessageBytes != nil {
+				e.MaxMessageBytes = *x.MaxMessageBytes
+			}
+			if e.Transport != "tls" && e.Transport != "tcp" && e.Transport != "udp" {
+				v.errf(x.TransportRange, "Invalid transport", "export %q: transport %q: want tls, tcp or udp", x.Name, e.Transport)
+			}
+			if h, port, err := net.SplitHostPort(e.Address); err != nil || h == "" || port == "" {
+				v.errf(x.AddressRange, "Invalid address", "export %q: address %q: want host:port", x.Name, e.Address)
+			}
+			if e.Transport != "tls" && !e.InsecurePlain {
+				v.errf(x.TransportRange, "Plain syslog", "export %q: %s sends log lines in clear text: set insecure_plain = true (loopback and private addresses only) or use tls", x.Name, e.Transport)
+			}
+			if e.Facility < 0 || e.Facility > 23 {
+				v.errf(x.DefRange, "Invalid facility", "export %q: facility between 0 and 23", x.Name)
+			}
+			if e.MaxMessageBytes != 0 && (e.MaxMessageBytes < 1024 || e.MaxMessageBytes > 65000) {
+				v.errf(x.DefRange, "Invalid max_message_bytes", "export %q: max_message_bytes between 1024 and 65000", x.Name)
+			}
+			if e.Retention != 0 {
+				v.errf(x.RetentionRange, "Retention on syslog", "export %q: a syslog destination has no write-once retention", x.Name)
+			}
 		default:
-			v.errf(x.KindRange, "Invalid export kind", "export %q: kind %q: want s3, file, gcs or azure", x.Name, e.Kind)
+			v.errf(x.KindRange, "Invalid export kind", "export %q: kind %q: want s3, file, syslog, gcs or azure", x.Name, e.Kind)
 		}
 		c.Exports = append(c.Exports, e)
 	}
@@ -1654,6 +1702,9 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		if !exports[l.Destination] {
 			v.errf(l.DestinationRange, "Unknown export", "logging %q: destination %q names no export block", l.Name, l.Destination)
 		}
+		if syslogs[l.Destination] && cl.Lock {
+			v.errf(l.DefRange, "Lock on syslog", "logging %q: lock = true needs write-once storage, and syslog destination %q has none", l.Name, l.Destination)
+		}
 		if len(l.Teams) == 0 {
 			v.errf(l.TeamsRange, "No team", "logging %q names no team", l.Name)
 		}
@@ -1679,6 +1730,9 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		c.Audit.AnchorMaxLag = v.dur(a.AnchorMaxLag, a.AnchorMaxLagRange, "anchor_max_lag", 3*c.Audit.CheckpointInterval)
 		if c.Audit.Anchor != "" && !exports[c.Audit.Anchor] {
 			v.errf(a.AnchorRange, "Unknown export", "audit anchor %q names no export block", c.Audit.Anchor)
+		}
+		if syslogs[c.Audit.Anchor] {
+			v.errf(a.AnchorRange, "Anchor on syslog", "audit anchor %q is a syslog export: a stream cannot be read back nor written once, so it cannot anchor the log", c.Audit.Anchor)
 		}
 		if c.Audit.Anchor != "" && c.Audit.SigningKeyFile == "" {
 			v.errf(a.AnchorRange, "Anchor without signing key", "an anchor exports signed checkpoints: set signing_key_file")
@@ -1834,6 +1888,9 @@ func (c *Config) SecretRefs() []string {
 	for _, e := range c.Exports {
 		add(e.AccessKeyFile)
 		add(e.SecretKeyFile)
+		add(e.TLSCAFile)
+		add(e.TLSCertFile)
+		add(e.TLSKeyFile)
 	}
 	if c.Alerts.SMTP != nil {
 		add(c.Alerts.SMTP.PasswordFile)
