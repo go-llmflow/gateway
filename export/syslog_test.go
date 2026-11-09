@@ -473,8 +473,9 @@ func TestSyslogTLS(t *testing.T) {
 		}
 		defer c.Close()
 		c.SetReadDeadline(time.Now().Add(10 * time.Second))
-		got <- readFrames(t, c, 1)[0]
-		state = c.(*tls.Conn).ConnectionState()
+		fr := readFrames(t, c, 1)[0]
+		state = c.(*tls.Conn).ConnectionState() // before the hand-over: the receive below orders the read after it
+		got <- fr
 	}()
 	cfg := testCfg()
 	cfg.Transport, cfg.Address, cfg.CA = "tls", ln.Addr().String(), caPEM
