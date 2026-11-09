@@ -193,12 +193,26 @@ type Audit struct {
 	// AnchorMaxLag is how old the newest exported checkpoint may get
 	// before an alert (default 3 × CheckpointInterval).
 	AnchorMaxLag time.Duration
+	// AnchorSync closes the window between checkpoints for the entries that
+	// matter (kinds admin, auth, scim and system, see AnchorSyncKinds): after
+	// each one the gateway signs a checkpoint and waits, up to
+	// AnchorSyncTimeout, until it is on the anchor export. "alert": a failure
+	// raises an alert (audit_anchor_sync_failed). "refuse": it also refuses
+	// administrative writes (503) until the anchor takes a checkpoint again.
+	// Empty: off.
+	AnchorSync        string
+	AnchorSyncTimeout time.Duration
 	// Retention is how long entries of each kind are kept (absent: for
 	// ever). Pruning removes whole segments, up to a signed checkpoint,
 	// whose every entry is past its kind's retention.
 	Retention     map[string]time.Duration
 	PruneInterval time.Duration
 }
+
+// AnchorSyncKinds are the entries anchor_sync anchors before going on: the
+// ones a person or an attacker would want to erase. The high-volume kinds
+// (guardrail decisions, tool calls) wait for the next checkpoint.
+var AnchorSyncKinds = []string{"admin", "auth", "scim", "system"}
 
 // Export is a destination outside the database.
 type Export struct {

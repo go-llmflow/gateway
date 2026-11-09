@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/store"
 )
 
@@ -146,6 +147,13 @@ func (s *Server) audited(pattern string, f adminHandler) adminHandler {
 			f(w, r, p)
 			return
 		}
+		// anchor_sync = "refuse": the anchor store did not take the last
+		// checkpoint, so what happens now could be erased without trace.
+		if s.anchor != nil && s.anchor.broken.Load() {
+			apiError(w, http.StatusServiceUnavailable, "audit_anchor_unreachable",
+				"administrative writes are refused until the audit anchor holds a checkpoint again")
+			return
+		}
 		// The body is read once here (bounded as readJSON bounds it) and
 		// given back to the handler.
 		body, _ := io.ReadAll(io.LimitReader(r.Body, maxAuditBody))
@@ -180,9 +188,14 @@ func (s *Server) audited(pattern string, f adminHandler) adminHandler {
 func (s *Server) appendAudit(ctx context.Context, e store.AuditEntry) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if _, err := s.auditLog.Append(ctx, e); err != nil {
+	got, err := s.auditLog.Append(ctx, e)
+	if err != nil {
 		s.met.auditFailures.add(1, e.Kind)
 		s.log.Error("audit: append failed", "err", err, "action", e.Action, "actor", e.Actor, "target", e.Target)
+		return
+	}
+	if s.cfg.Audit.AnchorSync != "" && slices.Contains(config.AnchorSyncKinds, e.Kind) {
+		s.syncAnchor(ctx, got.Seq)
 	}
 }
 

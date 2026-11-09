@@ -254,6 +254,9 @@ func TestParseRejectsWithPosition(t *testing.T) {
 		{"rotation bad prefix", valid + "key_rotation { vault_prefix = \"secret/../x\" }\n", "Invalid vault_prefix"},
 		{"rotation interval", valid + "key_rotation {\n  vault_prefix = \"secret/k\"\n  check_interval = \"1s\"\n}\n", "Invalid check_interval"},
 		{"jwt negative rpm", valid + strings.Replace(jwtBlock("https://idp.example", "a"), "jwt {", "jwt {\n  rpm = -1", 1), "Invalid limit"},
+		{"anchor_sync without anchor", valid + "audit {\n  signing_key_file = \"/k\"\n  anchor_sync = \"alert\"\n}\n", "anchor_sync without anchor"},
+		{"anchor_sync value", valid + "export \"x\" {\n  kind = \"file\"\n  directory = \"/d\"\n}\naudit {\n  signing_key_file = \"/k\"\n  anchor = \"x\"\n  anchor_sync = \"maybe\"\n}\n", "Invalid anchor_sync"},
+		{"anchor_sync timeout", valid + "export \"x\" {\n  kind = \"file\"\n  directory = \"/d\"\n}\naudit {\n  signing_key_file = \"/k\"\n  anchor = \"x\"\n  anchor_sync = \"alert\"\n  anchor_sync_timeout = \"1ms\"\n}\n", "Invalid anchor_sync_timeout"},
 		{"syslog plain", valid + "export \"x\" {\n  kind = \"syslog\"\n  transport = \"tcp\"\n  address = \"10.0.0.1:514\"\n}\n", "Plain syslog"},
 		{"syslog transport", valid + "export \"x\" {\n  kind = \"syslog\"\n  transport = \"sctp\"\n  address = \"h:1\"\n}\n", "Invalid transport"},
 		{"syslog address", valid + "export \"x\" {\n  kind = \"syslog\"\n  address = \"nohost\"\n}\n", "Invalid address"},
@@ -280,6 +283,16 @@ func TestParseRejectsWithPosition(t *testing.T) {
 				t.Fatalf("error %q does not contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestAnchorSyncConfig(t *testing.T) {
+	c, err := parse(valid + "export \"x\" {\n  kind = \"file\"\n  directory = \"/d\"\n}\naudit {\n  signing_key_file = \"/k\"\n  anchor = \"x\"\n  anchor_sync = \"refuse\"\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Audit.AnchorSync != "refuse" || c.Audit.AnchorSyncTimeout != 5*time.Second {
+		t.Fatalf("%+v", c.Audit)
 	}
 }
 

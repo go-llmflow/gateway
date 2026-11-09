@@ -93,7 +93,7 @@ func (s *Server) verifyAudit(w http.ResponseWriter, r *http.Request, p *principa
 	if s.anchor != nil {
 		var a store.AuditCheckpoint
 		if a, err = NewestAnchor(r.Context(), s.anchor.q.Sink()); err == nil {
-			rep, err = audit.VerifyAnchored(r.Context(), s.st, keys, a)
+			rep, err = audit.VerifyAnchoredLocked(r.Context(), s.st, keys, a, TailLockOf(s.cfg.Audit, s.now()))
 			status.Anchored, status.AnchorSeq = true, a.Seq
 		}
 	} else {
