@@ -30,6 +30,9 @@ type fakeVLLM struct {
 	// reply, when set, is the answer's content: joined for a JSON answer,
 	// one delta per element for a stream (default "hi"; t0, t1, t2).
 	reply []string
+	// rawStream, when set, is what a chat stream carries: each element is the
+	// data of one SSE event, sent as it is (tool calls, reasoning, usage).
+	rawStream []string
 	// classify answers /classify (a guard classifier) when set.
 	classify func(inputs []string) string
 }
@@ -38,6 +41,12 @@ func (f *fakeVLLM) setReply(parts ...string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reply = parts
+}
+
+func (f *fakeVLLM) setRawStream(events ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rawStream = events
 }
 
 type recorded struct {
@@ -172,6 +181,17 @@ func (f *fakeVLLM) serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		fl := w.(http.Flusher)
+		f.mu.Lock()
+		raw := f.rawStream
+		f.mu.Unlock()
+		if raw != nil {
+			for _, ev := range raw {
+				fmt.Fprintf(w, "data: %s\n\n", ev)
+				fl.Flush()
+			}
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
 		deltas := reply
 		if deltas == nil {
 			deltas = []string{"t0", "t1", "t2"}

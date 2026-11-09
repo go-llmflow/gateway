@@ -413,9 +413,15 @@ func (s *Server) streamFilter(ctx context.Context, rq *guardReq, dst io.Writer) 
 	}
 	f := &guard.StreamFilter{Dst: dst}
 	var finders []guard.Finder
+	var hold func(string, int) int
 	for _, g := range rq.guards {
 		if g.find != nil && g.cfg.Post {
 			finders = append(finders, g.find)
+			if g.cfg.Type == config.GuardSecrets {
+				// A URL's userinfo has no maximum length: hold what may still
+				// become one, however far back it began.
+				hold = guard.HoldURLUserinfo
+			}
 		}
 		if g.classify != nil && g.cfg.Post {
 			if f.CheckEvery == 0 || g.cfg.StreamCheckBytes < f.CheckEvery {
@@ -425,7 +431,19 @@ func (s *Server) streamFilter(ctx context.Context, rq *guardReq, dst io.Writer) 
 	}
 	if len(finders) > 0 {
 		f.NewHoldback = func() *guard.Holdback {
-			return &guard.Holdback{Window: streamWindow, Finders: finders, Repl: guard.Placeholder}
+			return &guard.Holdback{Window: streamWindow, Finders: finders, Repl: guard.Placeholder, Hold: hold}
+		}
+		// Tool calls and their arguments are masked whole, through every
+		// JSON layer, and sent when the choice ends.
+		var blocked error
+		mask := rq.maskWith("post", &blocked)
+		f.MaskJSON = func(input string) (string, error) {
+			blocked = nil
+			out := mask(input)
+			if blocked != nil {
+				return "", blocked
+			}
+			return out, nil
 		}
 		f.Spans = func(spans []guard.Span) error {
 			var err error
@@ -478,19 +496,7 @@ func (s *Server) streamGuardFor(ep openai.Endpoint, ctx context.Context, rq *gua
 	if ep == openai.Messages {
 		af := &guard.AnthropicStreamFilter{Dst: dst, NewHoldback: f.NewHoldback, Spans: f.Spans,
 			CheckEvery: f.CheckEvery, Check: f.Check, BlockEvent: f.BlockEvent}
-		if f.NewHoldback != nil {
-			// Tool inputs are masked whole, through every JSON layer.
-			var blocked error
-			mask := rq.maskWith("post", &blocked)
-			af.MaskJSON = func(input string) (string, error) {
-				blocked = nil
-				out := mask(input)
-				if blocked != nil {
-					return "", blocked
-				}
-				return out, nil
-			}
-		}
+		af.MaskJSON = f.MaskJSON // tool inputs are masked whole
 		return af
 	}
 	return f

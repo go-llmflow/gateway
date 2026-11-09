@@ -933,7 +933,7 @@ The retention kind `guardrail` applies to these entries.
 
 Classifiers on a stream gate the text: the completion is judged every `stream_check_bytes` new bytes, and those bytes are released only once accepted. The text therefore arrives in bursts of that size, each one delayed by one classifier call. A refusal ends the stream with an error event (`guardrail_violation`) and `[DONE]`. Text already released stays released, but nothing that was not checked has been sent.
 
-Guarded answers keep only the fields the guardrails know. Log probabilities, reasoning text and unknown fields are removed (see limitation 15).
+Guarded answers keep only the fields the guardrails know. Log probabilities and unknown fields are removed; reasoning text is inspected, and tool calls in a stream are masked whole and sent at the end of the choice (see limitation 15).
 
 **Guard models are local.** Llama Guard is served by vLLM as a chat model whose chat template builds the classification prompt. Prompt Guard 2 is served on vLLM's `/classify` endpoint (a pooling model); input longer than its 512 tokens is sent as up to 64 segments of 1500 bytes. The gateway reaches both through its own routing (upstream choice, retries, cooldown) at **vLLM priority 0**.
 
@@ -3661,9 +3661,9 @@ security audit of 2026-10-26):
     the key in OpenBao/Vault, verify with a public key kept elsewhere, and
     keep an anchor on write-once storage.
 15. **What guardrails do not inspect**, and how each gap is handled:
-    - Streamed tool-call arguments cannot be masked, so a guarded stream that carries them is stopped. Ask for tool calls without `stream`.
-    - Reasoning text (`reasoning_content`), refusals and any field the guards do not know are removed from guarded answers, not inspected. The same goes for log probabilities.
-    - A secret whose start appears more than 256 bytes before it can match is not seen in a stream. One example is a URL userinfo longer than about 250 bytes before its `@`.
+    - Streamed tool calls (v0.43.0): the arguments of each call are held until the choice ends, masked whole through every JSON layer as for a whole answer, and sent in **one** chunk before the one that ends the choice. A client that renders arguments as they arrive sees them at once. A stream whose tool calls hold more than 1 MiB, or a field the filter does not know, is stopped. Responses-API streams under post-call guardrails are still refused.
+    - Reasoning text (`reasoning_content`, `reasoning`) is inspected since v0.43.0: masked like the content in a whole answer and, when a masking guardrail applies, in a stream, where it has its own hold-back; classifiers read it in a whole answer but gate only the content of a stream. Refusals, audio, log probabilities and any field the guards do not know are removed, not inspected. With only classifying guardrails, a stream's reasoning text is removed.
+    - A secret whose start is more than 256 bytes before it can match: the one shape with no maximum length, a URL's userinfo (`://user:secret@`), is now held from its `://` until the span has ended 256 bytes behind (v0.43.0: `guard.HoldURLUserinfo`; `TestGuardedStreamInspectsToolCallsReasoningAndLongUserinfo` fails without it, `FuzzHoldbackURL`). It holds nothing for text without a `://` that has not yet met a `/` or a space, so it costs no latency elsewhere. Any other pattern with a long beginning would need the same rule.
     - A span still open after 64 KiB is released masked as far as it has reached. Its tail goes out in clear if that tail no longer matches on its own.
     - Audit entries of guardrail decisions are written asynchronously. When the queue is full they are dropped, counted (`llmflow_guardrail_audit_dropped_total`) and alerted.
 16. **Phone numbers have no checksum**: a PII guardrail that masks them also masks 10-digit references that start with 0. This was measured in go-llmflow/pii.

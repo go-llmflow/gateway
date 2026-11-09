@@ -90,9 +90,13 @@ func TestMapResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The reasoning text is inspected (v0.43.0): masked like the content, and
+	// part of what the classifiers read. The log probabilities, which are not
+	// text the guards read, are removed.
 	if strings.Contains(string(out), "hello") || strings.Contains(string(out), "think") || !strings.Contains(string(out), `"HELLO"`) ||
-		!strings.Contains(string(out), `"prompt_tokens":1`) || len(texts) != 1 {
-		t.Fatalf("%s", out)
+		!strings.Contains(string(out), `"reasoning_content":"THINK"`) || strings.Contains(string(out), `"logprobs":{`) ||
+		!strings.Contains(string(out), `"prompt_tokens":1`) || len(texts) != 2 {
+		t.Fatalf("%s %v", out, texts)
 	}
 	out, _, err = MapResponse([]byte(`{"choices":[{"text":"abc"}]}`), false, strings.ToUpper)
 	if err != nil || string(out) != `{"choices":[{"text":"ABC"}]}` {
