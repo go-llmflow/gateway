@@ -70,6 +70,8 @@ func (s *Server) uiRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /ui/reports/export", page(s.uiExport))
 	mux.Handle("POST "+uiUploadPath, page(s.uiReconcile))
 	mux.Handle("GET /ui/fairshare", page(s.uiFairshare))
+	mux.Handle("GET /ui/models", page(s.uiModels))
+	mux.Handle("GET /ui/orgs", page(s.uiOrgs))
 	mux.Handle("GET /ui/audit", page(s.uiAudit))
 	mux.Handle("POST /ui/audit/verify", page(s.uiVerify))
 	mux.Handle("POST /ui/logout", page(s.uiLogout))
