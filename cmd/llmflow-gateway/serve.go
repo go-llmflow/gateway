@@ -247,6 +247,11 @@ func serveCmd() *cobra.Command {
 			}
 			defer st.Close()
 			opts := []gateway.Option{gateway.WithLogger(log)}
+			clockOpts, err := testClockOptions(log)
+			if err != nil {
+				return err
+			}
+			opts = append(opts, clockOpts...)
 			if c.KeyRotation != nil {
 				res, err := resolver(c)
 				if err != nil {

@@ -3883,4 +3883,14 @@ LLMFLOW_TEST_PG_DSN=postgres://… go test ./store   # PostgreSQL contract test
 go test -run '^$' -fuzz FuzzRewrite -fuzztime 1m ./openai
 ```
 
+**A movable clock, for chaos testing only.** A binary built with
+`go build -tags chaosclock ./cmd/llmflow-gateway` moves its clock (`WithClock`)
+by the number of seconds, negative allowed, that the file named by
+`LLMFLOW_TEST_CLOCK_FILE` holds (re-read every 20 ms), so that a DST change, an
+NTP step or a month boundary can be reached from outside the process (the
+`llmchaos` campaign of go-llmflow/bench does). A default build has no such seam
+and **refuses to start** when the variable is set, rather than ignore it; a
+chaos build logs a `TEST CLOCK` warning at start. Never ship a `chaosclock`
+build.
+
 License: BSD-3-Clause.
