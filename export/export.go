@@ -1,22 +1,29 @@
 // Package export writes objects outside the gateway's database: to
 // S3-compatible storage (MinIO and Ceph RGW first, AWS too) through
-// github.com/go-volumes/s3, or to a local directory. GCS and Azure Blob are
-// behind the same interface and answer "not implemented".
+// github.com/go-volumes/s3, to Google Cloud Storage (JSON API) and Azure Blob
+// Storage (REST API) with the standard library, to a local directory, or as
+// RFC 5424 syslog messages (TLS, RFC 5425; plain TCP and UDP to private
+// peers only). Neither go-volumes nor go-authn holds a GCS or Azure client.
 //
 // Objects are written once. On S3 they go under Object Lock retention when
 // the bucket has Object Lock enabled (it must be enabled when the bucket is
-// created, and needs versioning: MinIO and Ceph RGW both say so); a local
-// directory refuses to overwrite a file. A Queue writes in the background,
-// bounded, with retries; what it drops or gives up on is counted, never
-// silent.
+// created, and needs versioning: MinIO and Ceph RGW both say so); GCS (a
+// create-only precondition and object retention), Azure (If-None-Match: *
+// and an immutability policy) and a local directory (a hard link) refuse to
+// overwrite. IsWriteOnce says which sink does; syslog is a stream, not an
+// object store: it cannot be read back and cannot hold audit anchors. A Queue
+// writes in the background, bounded, with retries; what it drops or gives up
+// on is counted, never silent.
 package export
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -30,7 +37,8 @@ import (
 // MaxObject bounds an object read back (checkpoints, anchors).
 const MaxObject = 1 << 20
 
-// ErrNotImplemented is what GCS and Azure answer.
+// ErrNotImplemented was what GCS and Azure answered before they were
+// implemented; kept for callers that still compare against it.
 var ErrNotImplemented = errors.New("export: not implemented")
 
 // PutOptions describe an object.
@@ -57,8 +65,17 @@ type Sink interface {
 	Locked() bool
 }
 
-// Credentials are an S3 export's keys, resolved by the caller.
-type Credentials struct{ AccessKey, SecretKey string }
+// Credentials are an export's secrets, resolved by the caller from secret
+// references: an S3 export's keys; for GCS the service-account key file's
+// content or a bearer token, for Azure the shared key, the SAS token, a
+// bearer token or the client secret (Credential); for syslog over TLS the PEM
+// of the CA bundle and of the client certificate and key.
+type Credentials struct {
+	AccessKey, SecretKey string
+	Credential           string
+	CA, ClientCert       string
+	ClientKey            string
+}
 
 // Open returns the sink an export block describes. An S3 sink reads the
 // bucket's Object Lock configuration now.
@@ -83,10 +100,122 @@ func Open(ctx context.Context, e config.Export, creds Credentials, now func() ti
 			return nil, fmt.Errorf("export %s: %w", e.Name, err)
 		}
 		return &fileSink{name: e.Name, dir: e.Directory, prefix: e.Prefix}, nil
-	case "gcs", "azure":
-		return nil, fmt.Errorf("export %s: kind %s: %w", e.Name, e.Kind, ErrNotImplemented)
+	case "gcs":
+		return openGCS(e, creds, now)
+	case "azure":
+		return openAzure(e, creds, now)
+	case "syslog":
+		s, err := newSyslogSink(SyslogConfig{Name: e.Name, Transport: e.Transport, Address: e.Address, InsecurePlain: e.InsecurePlain,
+			CA: []byte(creds.CA), Cert: []byte(creds.ClientCert), Key: []byte(creds.ClientKey), ServerName: e.TLSServerName,
+			Hostname: e.Hostname, AppName: e.AppName, SDID: e.SDID, Facility: e.Facility, MaxMessageBytes: e.MaxMessageBytes}, now)
+		if err != nil {
+			return nil, err
+		}
+		return s, nil
 	}
 	return nil, fmt.Errorf("export %s: unknown kind %q", e.Name, e.Kind)
+}
+
+func openGCS(e config.Export, creds Credentials, now func() time.Time) (Sink, error) {
+	base := e.Endpoint
+	if base == "" {
+		base = "https://storage.googleapis.com"
+	}
+	base, err := cleanBase(base)
+	if err != nil {
+		return nil, fmt.Errorf("export %s: %w", e.Name, err)
+	}
+	g := &gcsSink{name: e.Name, bucket: e.Bucket, prefix: e.Prefix, base: base, hc: httpClient(), retention: e.Retention, now: now,
+		mode: map[string]string{"COMPLIANCE": "Locked", "GOVERNANCE": "Unlocked"}[e.LockMode]}
+	if g.retention > 0 && g.mode == "" {
+		return nil, fmt.Errorf("export %s: lock_mode %q: GOVERNANCE or COMPLIANCE", e.Name, e.LockMode)
+	}
+	switch e.Auth {
+	case "service_account", "":
+		sa, err := ParseServiceAccount([]byte(creds.Credential))
+		if err != nil {
+			return nil, fmt.Errorf("export %s: %w", e.Name, err)
+		}
+		tu := e.TokenEndpoint
+		if tu == "" {
+			tu = DefaultGoogleTokenURL
+		}
+		if tu, err = cleanBase2(tu); err != nil {
+			return nil, fmt.Errorf("export %s: token_endpoint: %w", e.Name, err)
+		}
+		g.tok = newServiceAccountSource(g.hc, sa, tu, now)
+	case "bearer":
+		if !validToken(creds.Credential) {
+			return nil, fmt.Errorf("export %s: the bearer token is empty or not a token", e.Name)
+		}
+		g.tok = staticToken(creds.Credential)
+	default:
+		return nil, fmt.Errorf("export %s: auth %q: want service_account or bearer", e.Name, e.Auth)
+	}
+	return g, nil
+}
+
+// cleanBase2 validates a token endpoint like an endpoint, keeping its path.
+func cleanBase2(raw string) (string, error) {
+	if _, err := cleanBase(raw); err != nil {
+		return "", err
+	}
+	return raw, nil
+}
+
+func openAzure(e config.Export, creds Credentials, now func() time.Time) (Sink, error) {
+	raw := e.Endpoint
+	if raw == "" {
+		raw = "https://" + e.Account + ".blob.core.windows.net"
+	}
+	raw, err := cleanBase(raw)
+	if err != nil {
+		return nil, fmt.Errorf("export %s: %w", e.Name, err)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("export %s: %w", e.Name, err)
+	}
+	a := &azureSink{name: e.Name, account: e.Account, container: e.Container, prefix: e.Prefix, base: u, hc: httpClient(), authMode: e.Auth,
+		appendBlob: e.BlobType == "append", retention: e.Retention, now: now,
+		mode: map[string]string{"COMPLIANCE": "locked", "GOVERNANCE": "unlocked"}[e.LockMode]}
+	if a.retention > 0 && a.mode == "" {
+		return nil, fmt.Errorf("export %s: lock_mode %q: GOVERNANCE or COMPLIANCE", e.Name, e.LockMode)
+	}
+	switch e.Auth {
+	case "shared_key":
+		k, err := base64.StdEncoding.DecodeString(strings.TrimSpace(creds.Credential))
+		if err != nil || len(k) == 0 {
+			return nil, fmt.Errorf("export %s: the shared key is not base64", e.Name)
+		}
+		a.key = k
+	case "sas":
+		q, err := url.ParseQuery(strings.TrimPrefix(strings.TrimSpace(creds.Credential), "?"))
+		if err != nil || q.Get("sig") == "" || q.Get("se") == "" {
+			return nil, fmt.Errorf("export %s: the SAS token needs sig and se (an expiry)", e.Name)
+		}
+		a.sas = q
+	case "bearer":
+		if !validToken(creds.Credential) {
+			return nil, fmt.Errorf("export %s: the bearer token is empty or not a token", e.Name)
+		}
+		a.tok = staticToken(creds.Credential)
+	case "client_credentials":
+		tu := e.TokenEndpoint
+		if tu == "" {
+			tu = "https://login.microsoftonline.com/" + url.PathEscape(e.TenantID) + "/oauth2/v2.0/token"
+		}
+		if tu, err = cleanBase2(tu); err != nil {
+			return nil, fmt.Errorf("export %s: token_endpoint: %w", e.Name, err)
+		}
+		if !validToken(creds.Credential) || e.ClientID == "" {
+			return nil, fmt.Errorf("export %s: client_credentials needs client_id and a client secret", e.Name)
+		}
+		a.tok = newClientCredentialsSource(a.hc, tu, e.ClientID, creds.Credential, now)
+	default:
+		return nil, fmt.Errorf("export %s: auth %q: want shared_key, sas, bearer or client_credentials", e.Name, e.Auth)
+	}
+	return a, nil
 }
 
 // ValidKey reports whether a key is safe on every destination: segments
