@@ -86,6 +86,36 @@ func Apply(text string, spans []Span, repl func(Span) string) string {
 	return b.String()
 }
 
+// HoldURLUserinfo is a Holdback.Hold for secrets. A `://` after which no `/` or
+// space has been seen may be the start of `://user:secret@` (gitsafe's redact
+// shape: its user and secret have no maximum length, and the match needs the
+// `://`), so the text from that `://` on is kept while the `@` has not come,
+// and after it until the span ends at least window bytes behind the end of the
+// buffer: a cut inside the span would move back to its start, which is after
+// the `://`, and release the `://` the match needs. Only the last `://` matters:
+// an earlier one is followed by the later one's `/`.
+func HoldURLUserinfo(buf string, window int) int {
+	i := strings.LastIndex(buf, "://")
+	if i < 0 {
+		return -1
+	}
+	tail := buf[i+3:]
+	if end := strings.IndexAny(tail, "/ \t\r\n\f"); end >= 0 {
+		tail = tail[:end]
+	}
+	at := strings.IndexByte(tail, '@')
+	if at < 0 {
+		if len(tail) == len(buf)-i-3 {
+			return i // no `@` and the run has not ended: open
+		}
+		return -1 // the run ended without an `@`: not a userinfo
+	}
+	if len(buf)-window <= i+3+at {
+		return i // the span ends within the window: a cut could land in it
+	}
+	return -1
+}
+
 // Placeholder is the default replacement: "[CATEGORY]".
 func Placeholder(s Span) string { return "[" + strings.ToUpper(s.Category) + "]" }
 
@@ -118,7 +148,16 @@ type Holdback struct {
 	Window  int
 	Finders []Finder
 	Repl    func(Span) string
-	buf     string
+	// Hold, when set, returns the offset in buf of text that may still become
+	// a match however far back it began (-1: none), so that a secret whose
+	// beginning is further back than Window is held until it ends or is
+	// ruled out. It is what closes the "start more than Window bytes before
+	// it can match" gap: a URL's userinfo has no maximum length, and the
+	// `://` that opens it may be thousands of bytes before the `@` that makes
+	// it a secret. Nothing is held for text that holds no such opening. The
+	// hold is bounded by MaxHold like any open span.
+	Hold func(buf string, window int) int
+	buf  string
 }
 
 // Push adds text and returns what can be released, masked, with the spans
@@ -141,7 +180,13 @@ func (h *Holdback) release(final bool) (string, []Span) {
 	spans := Combine(h.buf, h.Finders)
 	cut := len(h.buf)
 	if !final {
-		cut = cutDown(h.buf, max(len(h.buf)-h.Window, 0), spans)
+		cut = max(len(h.buf)-h.Window, 0)
+		if h.Hold != nil && len(h.buf) <= MaxHold {
+			if k := h.Hold(h.buf, h.Window); k >= 0 && k < cut {
+				cut = k
+			}
+		}
+		cut = cutDown(h.buf, cut, spans)
 		if cut == 0 && len(h.buf) > MaxHold {
 			// One span open for MaxHold bytes: release it masked as far as
 			// it goes now.

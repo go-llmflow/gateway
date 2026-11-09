@@ -42,6 +42,11 @@ type StreamFilter struct {
 	// BlockEvent is the data of the event written when the stream is
 	// blocked.
 	BlockEvent func(err error) []byte
+	// MaskJSON, when set, lets streamed tool calls through: the arguments of
+	// each call are held until the choice ends, masked whole (every JSON
+	// layer, as for a non-streamed answer) and sent in one chunk. Without it
+	// a stream that carries tool calls is stopped.
+	MaskJSON func(input string) (string, error)
 
 	pending []byte
 	choices map[int]*choiceState
@@ -54,7 +59,25 @@ type choiceState struct {
 	gate     []byte // released by the holdback, not yet checked
 	sent     []byte // checked and sent
 	finished bool
+
+	// Reasoning text (reasoning_content, or reasoning) has its own holdback:
+	// it is masked like the content, and sent under the field it came in.
+	rhb    *Holdback
+	rfield string
+	// Tool calls held until the choice ends (MaskJSON), in the order they
+	// first appeared.
+	tools     map[int]*toolAcc
+	toolOrder []int
+	toolBytes int
 }
+
+type toolAcc struct {
+	id, typ, name string
+	args          []byte
+}
+
+// reasoningKeys are the delta fields that carry a model's reasoning text.
+var reasoningKeys = []string{"reasoning_content", "reasoning"}
 
 // Write accepts SSE bytes; it returns ErrBlocked once a guardrail refused.
 func (f *StreamFilter) Write(p []byte) (int, error) {
@@ -115,6 +138,7 @@ func (f *StreamFilter) state(i int) *choiceState {
 		c = &choiceState{}
 		if f.NewHoldback != nil {
 			c.hb = f.NewHoldback()
+			c.rhb = f.NewHoldback()
 		}
 		f.choices[i] = c
 	}
@@ -173,6 +197,7 @@ func (f *StreamFilter) event(ev []byte) error {
 		return f.block(errors.New("guard: unreadable stream choices"))
 	}
 	keep := false
+	var toolChunks []int // choices that end in this chunk with tool calls held
 	for _, c := range choices {
 		if c == nil {
 			return f.block(errors.New("guard: unreadable stream choice"))
@@ -186,14 +211,29 @@ func (f *StreamFilter) event(ev []byte) error {
 		if lp, ok := c["logprobs"]; ok && !isNull(lp) {
 			c["logprobs"] = json.RawMessage("null")
 		}
-		if err := keepOnlyIn(c, "delta", deltaFields); err != nil {
+		fields := deltaFields
+		if st.rhb != nil {
+			fields = deltaFieldsReasoning
+		}
+		if err := keepOnlyIn(c, "delta", fields); err != nil {
 			return f.block(err)
+		}
+		finished := c["finish_reason"] != nil && !isNull(c["finish_reason"])
+		if f.MaskJSON != nil {
+			if err := f.takeTools(c, st); err != nil {
+				return f.block(err)
+			}
+		}
+		if err := f.passReasoning(c, st, finished); err != nil {
+			return err
 		}
 		text, field, err := choiceText(c)
 		if err != nil {
 			return f.block(err)
 		}
-		finished := c["finish_reason"] != nil && !isNull(c["finish_reason"])
+		if finished && len(st.toolOrder) > 0 {
+			toolChunks = append(toolChunks, idx)
+		}
 		out, err := f.pass(idx, st, text, finished)
 		if err != nil {
 			return err
@@ -207,6 +247,13 @@ func (f *StreamFilter) event(ev []byte) error {
 			keep = true
 		}
 	}
+	// The tool calls of a choice go out, masked, just before the chunk that
+	// ends it.
+	for _, idx := range toolChunks {
+		if err := f.emitTools(idx, f.choices[idx], chunk); err != nil {
+			return err
+		}
+	}
 	if !keep && len(choices) > 0 {
 		return nil
 	}
@@ -216,6 +263,220 @@ func (f *StreamFilter) event(ev []byte) error {
 	}
 	chunk["choices"] = b
 	return f.emit(chunk)
+}
+
+// mayHave reports whether the raw JSON object d may hold the key name: its
+// bytes are there, or any backslash is (a key can be written with escapes).
+func mayHave(d []byte, name string) bool {
+	return bytes.Contains(d, []byte(name)) || bytes.IndexByte(d, '\\') >= 0
+}
+
+// maxToolHold bounds the tool calls held for one choice.
+const maxToolHold = 1 << 20
+
+// takeTools removes the tool-call deltas of a choice from the chunk and keeps
+// them in st until the choice ends.
+func (f *StreamFilter) takeTools(c map[string]json.RawMessage, st *choiceState) error {
+	d, ok := c["delta"]
+	if !ok || isNull(d) || !mayHave(d, "tool_calls") {
+		return nil // (the common delta: no decoding for nothing)
+	}
+	var delta map[string]json.RawMessage
+	if err := json.Unmarshal(d, &delta); err != nil || delta == nil {
+		return errors.New("guard: a stream delta is not an object")
+	}
+	raw, ok := delta["tool_calls"]
+	if !ok || isNull(raw) {
+		return nil
+	}
+	var calls []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &calls); err != nil {
+		return errors.New("guard: streamed tool_calls is not a list of objects")
+	}
+	for pos, call := range calls {
+		if call == nil {
+			return errors.New("guard: a streamed tool call is not an object")
+		}
+		idx := pos
+		if ib, ok := call["index"]; ok && !isNull(ib) {
+			if err := json.Unmarshal(ib, &idx); err != nil || idx < 0 || idx > 1023 {
+				return errors.New("guard: a streamed tool call has a bad index")
+			}
+		}
+		acc := st.tools[idx]
+		if acc == nil {
+			if st.tools == nil {
+				st.tools = map[int]*toolAcc{}
+			}
+			if len(st.tools) >= 128 {
+				return errors.New("guard: too many streamed tool calls to inspect")
+			}
+			acc = &toolAcc{}
+			st.tools[idx] = acc
+			st.toolOrder = append(st.toolOrder, idx)
+		}
+		for k, v := range call {
+			switch k {
+			case "index":
+			case "id", "type":
+				var s string
+				if err := json.Unmarshal(v, &s); err != nil || !metaRE.MatchString(s) {
+					return errors.New("guard: a streamed tool call has a malformed " + k)
+				}
+				if k == "id" {
+					acc.id += s
+				} else {
+					acc.typ += s
+				}
+			case "function":
+				var fn map[string]json.RawMessage
+				if err := json.Unmarshal(v, &fn); err != nil || fn == nil {
+					return errors.New("guard: a streamed tool call has a malformed function")
+				}
+				for fk, fv := range fn {
+					var s string
+					if isNull(fv) {
+						continue
+					}
+					if err := json.Unmarshal(fv, &s); err != nil {
+						return errors.New("guard: a streamed tool call has a malformed function " + fk)
+					}
+					switch fk {
+					case "name":
+						if !metaRE.MatchString(s) {
+							return errors.New("guard: a streamed tool call has a malformed name")
+						}
+						acc.name += s
+					case "arguments":
+						acc.args = append(acc.args, s...)
+					default:
+						return errors.New("guard: a streamed tool call has an unknown function field")
+					}
+					if st.toolBytes += len(s); st.toolBytes > maxToolHold {
+						return errors.New("guard: streamed tool calls too long to inspect")
+					}
+				}
+			default:
+				// Anything else could carry text nobody read.
+				return errors.New("guard: a streamed tool call has an unknown field")
+			}
+		}
+	}
+	delete(delta, "tool_calls")
+	b, err := json.Marshal(delta)
+	c["delta"] = b
+	return err
+}
+
+// emitTools sends the held tool calls of a choice, their arguments masked
+// whole, in one chunk built on env, and forgets them.
+func (f *StreamFilter) emitTools(idx int, st *choiceState, env map[string]json.RawMessage) error {
+	if len(st.toolOrder) == 0 {
+		return nil
+	}
+	var calls []map[string]any
+	for _, ti := range st.toolOrder {
+		acc := st.tools[ti]
+		args := string(acc.args)
+		if args != "" {
+			masked, err := f.MaskJSON(args)
+			if err != nil {
+				return f.block(err)
+			}
+			args = masked
+		}
+		fn := map[string]any{"arguments": args}
+		if acc.name != "" {
+			fn["name"] = acc.name
+		}
+		call := map[string]any{"index": ti, "function": fn}
+		if acc.id != "" {
+			call["id"] = acc.id
+		}
+		if acc.typ != "" {
+			call["type"] = acc.typ
+		}
+		calls = append(calls, call)
+	}
+	st.tools, st.toolOrder, st.toolBytes = nil, nil, 0
+	chunk := map[string]json.RawMessage{}
+	for k, v := range env {
+		if k != "choices" && k != "usage" {
+			chunk[k] = v
+		}
+	}
+	cb, err := json.Marshal([]map[string]any{{"index": idx, "delta": map[string]any{"tool_calls": calls}, "finish_reason": nil}})
+	if err != nil {
+		return f.block(err)
+	}
+	chunk["choices"] = cb
+	return f.emit(chunk)
+}
+
+// passReasoning runs the reasoning text of a delta through the choice's
+// reasoning holdback, and puts back what may be sent now (nothing: the field is
+// removed). At the end of the choice what is held is released with it.
+func (f *StreamFilter) passReasoning(c map[string]json.RawMessage, st *choiceState, final bool) error {
+	if st.rhb == nil {
+		return nil
+	}
+	d, ok := c["delta"]
+	if !ok || isNull(d) {
+		return nil
+	}
+	// (The common delta needs no decoding. A key written with escapes could
+	// hide the name from this test, so any backslash decodes.)
+	if !mayHave(d, "reasoning") && !(final && st.rhb.Held() > 0) {
+		return nil
+	}
+	var delta map[string]json.RawMessage
+	if err := json.Unmarshal(d, &delta); err != nil || delta == nil {
+		return errors.New("guard: a stream delta is not an object")
+	}
+	var text string
+	seen := ""
+	for _, k := range reasoningKeys {
+		v, ok := delta[k]
+		if !ok {
+			continue
+		}
+		delete(delta, k)
+		if isNull(v) {
+			continue
+		}
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return f.block(errors.New("guard: a reasoning text is not a string"))
+		}
+		if seen != "" && seen != k {
+			return f.block(errors.New("guard: reasoning under two names"))
+		}
+		seen, text = k, text+s
+	}
+	if seen != "" {
+		st.rfield = seen
+	}
+	if seen == "" && !(final && st.rhb.Held() > 0) {
+		return nil
+	}
+	out, spans := st.rhb.Push(text)
+	if final {
+		rest, more := st.rhb.Flush()
+		out += rest
+		spans = append(spans, more...)
+	}
+	if len(spans) > 0 && f.Spans != nil {
+		if err := f.Spans(spans); err != nil {
+			return f.block(err)
+		}
+	}
+	if out != "" {
+		b, _ := json.Marshal(out)
+		delta[st.rfield] = b
+	}
+	b, err := json.Marshal(delta)
+	c["delta"] = b
+	return err
 }
 
 // pass runs one choice's new text through its holdback and gate and
@@ -269,17 +530,28 @@ func (f *StreamFilter) flushAll() error {
 	sort.Ints(idx)
 	var choices []map[string]json.RawMessage
 	for _, i := range idx {
-		out, err := f.pass(i, f.choices[i], "", true)
+		st := f.choices[i]
+		ib, _ := json.Marshal(i)
+		c := map[string]json.RawMessage{"index": ib, "delta": json.RawMessage("{}")}
+		if err := f.passReasoning(c, st, true); err != nil {
+			return err
+		}
+		out, err := f.pass(i, st, "", true)
 		if err != nil {
 			return err
 		}
-		if out == "" {
+		if len(st.toolOrder) > 0 && f.env != nil {
+			if err := f.emitTools(i, st, f.env); err != nil {
+				return err
+			}
+		}
+		if out == "" && string(c["delta"]) == "{}" {
 			continue
 		}
-		ib, _ := json.Marshal(i)
-		c := map[string]json.RawMessage{"index": ib}
-		if err := setChoiceText(c, "", out); err != nil {
-			return err
+		if out != "" {
+			if err := setChoiceText(c, "", out); err != nil {
+				return err
+			}
 		}
 		choices = append(choices, c)
 	}
@@ -361,14 +633,16 @@ func setChoiceText(c map[string]json.RawMessage, field, text string) error {
 }
 
 // The fields that pass a guarded answer, at each level. Everything else
-// (vLLM's reasoning_content, a refusal, audio, a field added by a later
-// version) is text the guards did not inspect, so it is removed rather than
-// let through.
+// (a refusal, audio, a field added by a later version) is text the guards did
+// not inspect, so it is removed rather than let through. Reasoning text
+// (reasoning_content, reasoning) is inspected: always in a whole answer, and in
+// a stream when masking guards give it a holdback (deltaFieldsReasoning).
 var (
-	chunkFields   = []string{"id", "object", "created", "model", "choices", "usage", "system_fingerprint", "service_tier", "prompt_logprobs"}
-	choiceFields  = []string{"index", "delta", "text", "message", "finish_reason", "stop_reason", "logprobs"}
-	deltaFields   = []string{"role", "content", "tool_calls"}
-	messageFields = []string{"role", "content", "tool_calls"}
+	chunkFields          = []string{"id", "object", "created", "model", "choices", "usage", "system_fingerprint", "service_tier", "prompt_logprobs"}
+	choiceFields         = []string{"index", "delta", "text", "message", "finish_reason", "stop_reason", "logprobs"}
+	deltaFields          = []string{"role", "content", "tool_calls"}
+	deltaFieldsReasoning = []string{"role", "content", "tool_calls", "reasoning_content", "reasoning"}
+	messageFields        = []string{"role", "content", "tool_calls", "reasoning_content", "reasoning"}
 )
 
 func keepOnly(m map[string]json.RawMessage, allowed []string) {

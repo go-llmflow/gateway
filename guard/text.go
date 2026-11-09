@@ -571,6 +571,24 @@ func MapResponse(body []byte, strip bool, f func(text string) string) ([]byte, [
 				msg["content"], mch = nc, true
 			}
 		}
+		// Reasoning text is inspected like the content (vLLM's reasoning_content;
+		// some servers say reasoning).
+		for _, k := range reasoningKeys {
+			rv, ok := msg[k]
+			if !ok || isNull(rv) {
+				continue
+			}
+			nr, out, ch, err := mapStrings(rv, "assistant", g)
+			if err != nil {
+				return nil, nil, err
+			}
+			for _, m := range out {
+				texts = append(texts, m.Content)
+			}
+			if ch {
+				msg[k], mch = nr, true
+			}
+		}
 		if tc, ok := msg["tool_calls"]; ok && !isNull(tc) {
 			ntc, out, ch, err := mapToolCalls(tc, g)
 			if err != nil {
