@@ -117,6 +117,10 @@ type auditHCL struct {
 	AnchorRange        hcl.Range         `hcl:"anchor,attr_value_range"`
 	AnchorMaxLag       *string           `hcl:"anchor_max_lag,optional"`
 	AnchorMaxLagRange  hcl.Range         `hcl:"anchor_max_lag,attr_value_range"`
+	AnchorSync         *string           `hcl:"anchor_sync,optional"`
+	AnchorSyncRange    hcl.Range         `hcl:"anchor_sync,attr_value_range"`
+	AnchorSyncTimeout  *string           `hcl:"anchor_sync_timeout,optional"`
+	AnchorSyncTORange  hcl.Range         `hcl:"anchor_sync_timeout,attr_value_range"`
 	Retention          map[string]string `hcl:"retention,optional"`
 	RetentionRange     hcl.Range         `hcl:"retention,attr_value_range"`
 	PruneInterval      *string           `hcl:"prune_interval,optional"`
@@ -1736,6 +1740,20 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 		}
 		if c.Audit.Anchor != "" && c.Audit.SigningKeyFile == "" {
 			v.errf(a.AnchorRange, "Anchor without signing key", "an anchor exports signed checkpoints: set signing_key_file")
+		}
+		c.Audit.AnchorSync = strOr(a.AnchorSync, "")
+		c.Audit.AnchorSyncTimeout = v.dur(a.AnchorSyncTimeout, a.AnchorSyncTORange, "anchor_sync_timeout", 5*time.Second)
+		switch c.Audit.AnchorSync {
+		case "":
+		case "alert", "refuse":
+			if c.Audit.Anchor == "" {
+				v.errf(a.AnchorSyncRange, "anchor_sync without anchor", "anchor_sync = %q needs an anchor export to write to", c.Audit.AnchorSync)
+			}
+		default:
+			v.errf(a.AnchorSyncRange, "Invalid anchor_sync", "anchor_sync = %q: want \"alert\" or \"refuse\" (or leave it out)", c.Audit.AnchorSync)
+		}
+		if c.Audit.AnchorSyncTimeout < 100*time.Millisecond || c.Audit.AnchorSyncTimeout > time.Minute {
+			v.errf(a.AnchorSyncTORange, "Invalid anchor_sync_timeout", "anchor_sync_timeout %v: between 100ms and 1m", c.Audit.AnchorSyncTimeout)
 		}
 		c.Audit.PruneInterval = v.dur(a.PruneInterval, a.PruneIntervalRange, "prune_interval", 24*time.Hour)
 		if c.Audit.PruneInterval < time.Minute {

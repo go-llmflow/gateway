@@ -30,10 +30,16 @@ func auditCmd() *cobra.Command {
 // verifyLog checks the log and writes a report; it fails when the log does
 // not verify.
 func verifyLog(ctx context.Context, st audit.Store, keys []ed25519.PublicKey, anchor *store.AuditCheckpoint, w io.Writer) error {
+	return verifyLogLocked(ctx, st, keys, anchor, audit.TailLock{}, w)
+}
+
+// verifyLogLocked is verifyLog with the tail lock of an anchor_sync
+// configuration.
+func verifyLogLocked(ctx context.Context, st audit.Store, keys []ed25519.PublicKey, anchor *store.AuditCheckpoint, tl audit.TailLock, w io.Writer) error {
 	var r audit.Report
 	var err error
 	if anchor != nil {
-		r, err = audit.VerifyAnchored(ctx, st, keys, *anchor)
+		r, err = audit.VerifyAnchoredLocked(ctx, st, keys, *anchor, tl)
 	} else {
 		r, err = audit.Verify(ctx, st, keys)
 	}
@@ -119,7 +125,7 @@ func auditVerifyCmd() *cobra.Command {
 				}
 				a = &cp
 			}
-			return verifyLog(ctx, st, keys, a, cmd.OutOrStdout())
+			return verifyLogLocked(ctx, st, keys, a, gateway.TailLockOf(c.Audit, time.Now()), cmd.OutOrStdout())
 		},
 	}
 	cmd.Flags().StringVarP(&path, "config", "c", "", "configuration file (HCL)")

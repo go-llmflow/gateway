@@ -2578,6 +2578,8 @@ audit {
   checkpoint_interval = "5m"
   anchor              = "archive"                      # an export block: where checkpoints also go
   anchor_max_lag      = "15m"                          # default 3 × checkpoint_interval
+  anchor_sync         = "refuse"                       # "alert" | "refuse": tail lock, see below (off by default)
+  anchor_sync_timeout = "5s"                           # how long an admin entry waits for its checkpoint
 }
 
 export "archive" {
@@ -2628,8 +2630,29 @@ three fail verification, and so does a log rewritten and re-signed with a
 stolen key **up to the anchor**. What happened after the newest exported
 checkpoint (at most `checkpoint_interval` plus the export lag) can still be
 removed without trace, and whoever holds the signing key can sign new history
-after the anchor. Failed appends are logged and counted
-(`llmflow_audit_failures_total`).
+after the anchor, **unless `anchor_sync` is set** (v0.42.0). Failed appends are
+logged and counted (`llmflow_audit_failures_total`).
+
+**The tail lock (`anchor_sync`).** After each entry of kind `admin`, `auth`,
+`scim` or `system` (the ones someone would want to erase; guardrail decisions
+and tool calls are too frequent and wait for the next checkpoint), the gateway
+signs a checkpoint and waits, up to `anchor_sync_timeout`, until the anchor
+export holds it. So an administrative entry is on the anchor within moments,
+not within `checkpoint_interval`: it cannot be removed (the anchored hash
+would be missing), nor rewritten and re-signed (another hash), and an entry of
+those kinds that someone adds after the anchor with a stolen key, without being
+able to write the anchor store, is still unanchored once `anchor_max_lag`
+has passed: `audit verify --anchor export` (and `POST /admin/audit/verify`)
+then report `entry N (admin) is past the newest anchor …`. If the anchor does
+not take the checkpoint in time, `audit_anchor_sync_failed` is raised; with
+`anchor_sync = "refuse"`, administrative writes then answer 503
+`audit_anchor_unreachable` until the anchor holds a checkpoint again (reads
+are not refused). The write that found the anchor down was already done and is
+answered: the refusal protects what comes after it. What stays open: the
+guardrail and tool entries between two checkpoints, and an attacker who holds
+the signing key **and** can write the anchor store (use Object Lock, with a
+key the gateway cannot delete under). Tests:
+`TestAnchorSyncClosesTheTail`, `TestTailLockCatchesHistoryAddedAfterTheAnchor`.
 
 The canonical form hashed is version 2: every field's raw bytes, each
 preceded by its length (big-endian uint64). Version 1, the JSON of the
@@ -3632,8 +3655,11 @@ security audit of 2026-10-26):
     anchor export, truncation, rollback and deletion of the database go
     undetected; with one, what happened after the newest exported checkpoint
     can still be removed, and a stolen signing key can sign new history after
-    it. Keep the key in OpenBao/Vault, verify with a public key kept
-    elsewhere, and keep an anchor on write-once storage.
+    it, except for the administrative kinds under `anchor_sync` (see the tail
+    lock above), which are anchored before the gateway goes on. The guardrail
+    and tool entries of the last checkpoint interval stay in that window. Keep
+    the key in OpenBao/Vault, verify with a public key kept elsewhere, and
+    keep an anchor on write-once storage.
 15. **What guardrails do not inspect**, and how each gap is handled:
     - Streamed tool-call arguments cannot be masked, so a guarded stream that carries them is stopped. Ask for tool calls without `stream`.
     - Reasoning text (`reasoning_content`), refusals and any field the guards do not know are removed from guarded answers, not inspected. The same goes for log probabilities.

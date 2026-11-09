@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-llmflow/gateway/audit"
+	"github.com/go-llmflow/gateway/config"
 	"github.com/go-llmflow/gateway/export"
 	"github.com/go-llmflow/gateway/store"
 )
@@ -50,6 +51,66 @@ type anchorState struct {
 	written  atomic.Int64        // unix micro of the newest written checkpoint's time
 	seq      atomic.Int64        // seq of the newest written checkpoint
 	lagged   atomic.Bool         // an alert is out for this lag episode
+
+	// anchor_sync: syncMu serialises the waits (one checkpoint covers every
+	// entry appended before it); failedSeq is the entry whose anchor did not
+	// arrive in time, and broken says administrative writes are refused until
+	// the anchor holds a checkpoint at least that new.
+	syncMu    sync.Mutex
+	failedSeq atomic.Int64
+	broken    atomic.Bool
+}
+
+// TailLockOf is the tail lock the configuration promises: with anchor_sync,
+// an entry of a synced kind is anchored within anchor_sync_timeout, so one
+// still unanchored after the larger of that and anchor_max_lag is a problem.
+// Without anchor_sync it is empty.
+func TailLockOf(a config.Audit, now time.Time) audit.TailLock {
+	if a.AnchorSync == "" {
+		return audit.TailLock{}
+	}
+	return audit.TailLock{Kinds: config.AnchorSyncKinds, Now: now, Grace: max(a.AnchorMaxLag, a.AnchorSyncTimeout)}
+}
+
+// syncAnchor signs a checkpoint covering seq and waits until the anchor export
+// holds it (anchor_sync). A failure raises audit_anchor_sync_failed; with
+// anchor_sync = "refuse" it also stops administrative writes until a later
+// checkpoint reaches the anchor.
+func (s *Server) syncAnchor(ctx context.Context, seq int64) {
+	a := s.anchor
+	if a == nil || s.auditLog == nil || seq <= a.seq.Load() {
+		return
+	}
+	a.syncMu.Lock()
+	defer a.syncMu.Unlock()
+	if seq <= a.seq.Load() {
+		return // another entry's wait covered this one
+	}
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.Audit.AnchorSyncTimeout)
+	defer cancel()
+	_, err := s.auditLog.Checkpoint(wctx)
+	if err == nil {
+		s.anchorUpTo(wctx)
+		for a.seq.Load() < seq {
+			select {
+			case <-wctx.Done():
+				err = fmt.Errorf("the checkpoint covering entry %d did not reach the anchor within %v", seq, s.cfg.Audit.AnchorSyncTimeout)
+			case <-time.After(5 * time.Millisecond):
+				continue
+			}
+			break
+		}
+	}
+	if err == nil {
+		return
+	}
+	s.met.auditFailures.add(1, "anchor_sync")
+	a.failedSeq.Store(seq)
+	if s.cfg.Audit.AnchorSync == "refuse" {
+		a.broken.Store(true)
+	}
+	s.raise(ctx, "audit_anchor_sync_failed", map[string]any{"export": a.q.Sink().Name(), "entry": seq, "error": err.Error(),
+		"refusing_admin_writes": s.cfg.Audit.AnchorSync == "refuse"})
 }
 
 // entryJSON is an exported entry: everything the hash covers, plus the
@@ -116,6 +177,9 @@ func (s *Server) startAnchor(ctx context.Context, q *export.Queue) error {
 		}
 		if n > a.seq.Load() {
 			a.seq.Store(n)
+		}
+		if a.broken.Load() && n >= a.failedSeq.Load() {
+			a.broken.Store(false) // the anchor holds what it missed
 		}
 	}
 	s.anchor = a

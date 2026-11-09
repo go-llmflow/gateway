@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -451,6 +452,45 @@ func VerifyAnchored(ctx context.Context, st Store, keys []ed25519.PublicKey, anc
 		}
 	}
 	return r, nil
+}
+
+// TailLock says which entries the gateway anchors before it goes on (the
+// audit block's anchor_sync): an entry of one of Kinds has its checkpoint on
+// the anchor export within moments of being appended, so an entry of those
+// kinds that is still past the newest anchor after Grace was either never
+// anchored (the export failed) or added by someone who could write the
+// database and sign, but not write the anchor store.
+type TailLock struct {
+	Kinds []string
+	Now   time.Time
+	Grace time.Duration
+}
+
+// VerifyAnchoredLocked is VerifyAnchored plus the tail lock: every entry of a
+// locked kind after the anchor that is older than Grace is a problem. What
+// remains unprotected is the entries of the other kinds, and the locked ones
+// younger than Grace, past the newest anchor: at most one checkpoint interval
+// of them.
+func VerifyAnchoredLocked(ctx context.Context, st Store, keys []ed25519.PublicKey, anchor store.AuditCheckpoint, tl TailLock) (Report, error) {
+	r, err := VerifyAnchored(ctx, st, keys, anchor)
+	if err != nil || len(tl.Kinds) == 0 {
+		return r, err
+	}
+	for from := anchor.Seq + 1; ; {
+		es, err := st.AuditRange(ctx, from, 1000)
+		if err != nil {
+			return r, err
+		}
+		if len(es) == 0 {
+			return r, nil
+		}
+		for _, e := range es {
+			if slices.Contains(tl.Kinds, e.Kind) && tl.Now.Sub(e.Time) > tl.Grace {
+				r.problem("entry %d (%s) is past the newest anchor %d and older than %v: it was never anchored, or it was added without the anchor store's knowledge", e.Seq, e.Kind, anchor.Seq, tl.Grace)
+			}
+		}
+		from = es[len(es)-1].Seq + 1
+	}
 }
 
 // PruneExpired applies a retention policy: it deletes the longest prefix
