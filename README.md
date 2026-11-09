@@ -2719,7 +2719,7 @@ state is stale and fail-closed is on.
 
 ### Regions
 
-Several gateways can share one PostgreSQL (the `ha` block shares the pools' fair share; keys, budgets and the audit chain are in the store). A gateway can be given a **region**, and its upstreams too, so that each gateway serves from the GPUs near it (v0.45.0):
+Several gateways can share one PostgreSQL (the `ha` block shares the pools' fair share; keys, budgets and the audit chain are in the store). A gateway can be given a **region**, and its upstreams too, so that each gateway serves from the GPUs near it (v0.44.0, with the persistence of SSO sessions and alert retries):
 
 ```hcl
 region = "eu-west"                 # this gateway's region: 1 to 32 characters of [a-z0-9._-]
