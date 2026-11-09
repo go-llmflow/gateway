@@ -126,6 +126,20 @@ func CopySSE(dst io.Writer, flush func(), src io.Reader, dropUsage bool) (Stream
 // carries its usage in the final response.completed (or .incomplete,
 // .failed) event, and its text in response.output_text.delta events.
 func CopySSEFor(ep Endpoint, dst io.Writer, flush func(), src io.Reader, dropUsage bool) (res StreamResult, _ error) {
+	return CopySSELimit(ep, dst, flush, src, dropUsage, 0)
+}
+
+// ErrStreamLimit is what CopySSELimit returns when the next write would take
+// the bytes delivered past its limit.
+var ErrStreamLimit = errors.New("openai: stream exceeds its byte limit")
+
+// CopySSELimit is CopySSEFor that delivers at most limit bytes to dst (0: no
+// limit). It checks before each write and writes nothing of a write that would
+// cross the bound, so a stream is cut between events (a held event of more
+// than 1 MiB, which is streamed through, may be cut inside one line). It then
+// returns ErrStreamLimit, with res.Bytes the bytes delivered; the usage chunk,
+// which comes last, has not been read, so the caller estimates.
+func CopySSELimit(ep Endpoint, dst io.Writer, flush func(), src io.Reader, dropUsage bool, limit int64) (res StreamResult, _ error) {
 	inspectEvent, countDeltas := inspectEvent, countDeltas
 	var partial func() (Usage, bool)
 	switch ep {
@@ -157,6 +171,9 @@ func CopySSEFor(ep Endpoint, dst io.Writer, flush func(), src io.Reader, dropUsa
 	write := func(b []byte) error {
 		if len(b) == 0 {
 			return nil
+		}
+		if limit > 0 && res.Bytes+int64(len(b)) > limit {
+			return ErrStreamLimit
 		}
 		n, err := dst.Write(b)
 		res.Bytes += int64(n)

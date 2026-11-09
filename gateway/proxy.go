@@ -801,7 +801,19 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 					dst = sf
 				}
 			}
-			st, err = openai.CopySSEFor(ep, dst, func() { _ = rc.Flush() }, events, !req.ClientWantsUsage)
+			limit := s.maxResponse(pol)
+				st, err = openai.CopySSELimit(ep, dst, func() { _ = rc.Flush() }, events, !req.ClientWantsUsage, limit)
+				if errors.Is(err, openai.ErrStreamLimit) {
+					// The bound policy sets for a response holds for a stream
+					// too: it ends here, between events, with a final error
+					// event the client can tell from a dropped connection. The
+					// usage chunk was not reached: the deferred settlement
+					// charges the estimate and flags it.
+					st.Bytes += int64(streamLimitEvent(w, ep))
+					_ = rc.Flush()
+					s.audit("response.limit", "key", key.ID, "team", key.Team, "model", g.cfg.Name, "request_id", rid,
+						"limit", limit, "delivered", st.Bytes, "stream", true)
+				}
 			if sf != nil && err == nil {
 				err = sf.Close()
 				_ = rc.Flush()

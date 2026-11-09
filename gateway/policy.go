@@ -2,9 +2,11 @@ package gateway
 
 import (
 	"encoding/json"
+	"io"
 	"strings"
 
 	"github.com/go-llmflow/gateway/config"
+	"github.com/go-llmflow/gateway/openai"
 	"github.com/go-llmflow/gateway/store"
 )
 
@@ -39,6 +41,18 @@ func (s *Server) maxResponse(p *config.Policy) int64 {
 		return p.MaxResponseBytes
 	}
 	return s.cfg.Limits.MaxResponseBytes
+}
+
+// streamLimitEvent writes the last event of a stream cut at the response
+// bound and returns the bytes written. The text is constant: nothing of the
+// request or the limit's value reaches the client.
+func streamLimitEvent(w io.Writer, ep openai.Endpoint) int {
+	ev := `data: {"error":{"message":"response exceeds the configured size limit","type":"response_too_large","code":"response_limit"}}` + "\n\n"
+	if ep == openai.Messages {
+		ev = `event: error` + "\n" + `data: {"type":"error","error":{"type":"api_error","message":"response exceeds the configured size limit"}}` + "\n\n"
+	}
+	n, _ := io.WriteString(w, ev)
+	return n
 }
 
 // missingFields lists the policy's required fields the body lacks: absent,
