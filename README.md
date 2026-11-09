@@ -770,7 +770,7 @@ policy "attributed" {
 }
 policy "long-context" {
   max_body_bytes     = 33554432    # replaces limits.max_body_bytes (up to 1 GiB)
-  max_response_bytes = 134217728   # replaces limits.max_response_bytes (non-streamed answers)
+  max_response_bytes = 134217728   # replaces limits.max_response_bytes; a stream is cut at it too (final error event `response_limit`, audit kind `response.limit`, usage estimated)
 }
 ```
 
