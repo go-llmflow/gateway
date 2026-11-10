@@ -2360,8 +2360,8 @@ third-party asset is loaded.
 | Spend | GPU-hours (or a provider's currency), requests and tokens over a period, grouped by org, team, project, key, model, pool or tag |
 | Reports (since v0.12.1) | see below |
 | Fair share | live state per pool: reservation, in flight, borrowing, LF and rank |
-| Models (v0.46.0) | the model catalogue: class, context length, price per million tokens and unit, upstreams up out of configured, regions, fallbacks, and whether a provider outside the site serves it. The same data as JSON: `GET /admin/models`. The gateway's own guard models are shown to proxy roles only, and so are the organisations and teams allowed to use an external provider's model. What a key may call stays `GET /v1/models`. Tests: `TestModelCatalogue`, `TestUIModelsPage` |
-| Teams (v0.46.0) | the organisations and teams the signed-in role can see, read-only (they are managed through the API or SCIM) |
+| Models (v0.45.0) | the model catalogue: class, context length, price per million tokens and unit, upstreams up out of configured, regions, fallbacks, and whether a provider outside the site serves it. The same data as JSON: `GET /admin/models`. The gateway's own guard models are shown to proxy roles only, and so are the organisations and teams allowed to use an external provider's model. What a key may call stays `GET /v1/models`. Tests: `TestModelCatalogue`, `TestUIModelsPage` |
+| Teams (v0.45.0) | the organisations and teams the signed-in role can see, read-only (they are managed through the API or SCIM) |
 | Audit | entries page by page, and a button that verifies the chain (status of the checkpoints and the anchor) |
 
 **Reports** (`/ui/reports`) is the finance view of the spend report:
@@ -2711,7 +2711,7 @@ entries, and checkpoints sign a self-describing message
 | `GET /admin/spend?from=&to=&group_by=&format=` | spend report: requests, prompt / completion / cached tokens, GPU-hours and estimated requests, grouped by any of `org`, `lab`, `team`, `project`, `user`, `key`, `model`, `pool`, `tag` (default `org,team`), as `json`, `csv` or `parsable2` (pipe-delimited like `sreport --parsable2`). Filtered to what the caller may see: an org admin sees their organisation, a member their own keys. A request with several tags counts once under each tag |
 | `GET /admin/usage.csv?from=&to=` | the v0.1 export: `group_by=team,pool`, CSV |
 | `GET /admin/fairshare` | reservations, in-flight, borrowing, usage, LF and rank per pool and organisation |
-| `GET /admin/models` | the model catalogue (v0.46.0): class, context length, prices, upstreams up, regions, fallbacks, external provider |
+| `GET /admin/models` | the model catalogue (v0.45.0): class, context length, prices, upstreams up, regions, fallbacks, external provider |
 | `GET /admin/audit?from=&limit=` | audit entries with sequence ≥ `from` (default 1), at most `limit` (default 50, ≤ 200), as a JSON list; proxy admins and viewers only |
 | `POST /admin/audit/verify` | recomputes the chain and checks the signed checkpoints with the gateway's own key, and the newest anchored checkpoint when an anchor export is configured: `{"ok","first","last","entries","checkpoints","unsigned","anchored","anchor_seq","signed","problems"}`. One verification at a time (429 otherwise); proxy admins and viewers only. For an independent check use `llmflow-gateway audit verify` with a public key kept elsewhere |
 
