@@ -238,12 +238,17 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 		if err := s.buildHA(); err != nil {
 			return nil, err
 		}
+	} else if sh, ok := st.(store.HAStateStore); ok {
+		// One gateway on PostgreSQL: its SSO sessions and its alert and
+		// notification retries survive a restart, as they survive a failover
+		// with an ha block (since v0.44.0; they were held in memory).
+		s.shared = sh
 	}
 	// An upstream shared by several model groups (same URL, same key) is
 	// one object, so its in-flight count and cooldown are shared too.
 	ups := map[[2]string]*upstream{}
 	for _, g := range cfg.ModelGroups {
-		gr := &group{cfg: g, pool: s.pools[g.Pool], class: fairshare.Interactive, prices: pricesFor(g.Cost)}
+		gr := &group{cfg: g, pool: s.pools[g.Pool], class: fairshare.Interactive, prices: pricesFor(g.Cost), region: cfg.Region}
 		if g.Class == config.Batch {
 			gr.class = fairshare.Batch
 		}
@@ -284,6 +289,7 @@ func New(cfg *config.Config, st store.Store, secrets Secrets, opts ...Option) (*
 			if u == nil {
 				u = newUpstream(cu.BaseURL, key)
 				u.external = g.External != nil
+				u.region = cu.Region
 				ups[id] = u
 			}
 			members = append(members, u)
@@ -877,6 +883,7 @@ func (s *Server) writeMetrics(w *bufio.Writer) {
 	s.met.cost.write(w)
 	s.met.denied.write(w)
 	s.met.retries.write(w)
+	s.met.crossRegion.write(w)
 	s.met.fallbacks.write(w)
 	s.met.estimated.write(w)
 	s.met.softAlerts.write(w)

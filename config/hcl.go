@@ -28,6 +28,8 @@ import (
 type fileHCL struct {
 	Listen               *string         `hcl:"listen,optional"`
 	ListenRange          hcl.Range       `hcl:"listen,attr_value_range"`
+	Region               *string         `hcl:"region,optional"`
+	RegionRange          hcl.Range       `hcl:"region,attr_value_range"`
 	MasterKeyFile        string          `hcl:"master_key_file"`
 	MasterKeyFileRange   hcl.Range       `hcl:"master_key_file,attr_value_range"`
 	MetricsTokenFile     *string         `hcl:"metrics_token_file,optional"`
@@ -708,7 +710,10 @@ type upstreamHCL struct {
 	BaseURLRange hcl.Range `hcl:"base_url,attr_value_range"`
 	KeyFile      *string   `hcl:"key_file,optional"`
 	// DcgmURL is the NVIDIA DCGM exporter of this node (fluids, #97).
-	DcgmURL      *string   `hcl:"dcgm_url,optional"`
+	DcgmURL *string `hcl:"dcgm_url,optional"`
+	// Region labels where this server is (region-aware routing).
+	Region       *string   `hcl:"region,optional"`
+	RegionRange  hcl.Range `hcl:"region,attr_value_range"`
 	DcgmURLRange hcl.Range `hcl:"dcgm_url,attr_value_range"`
 	// The node's BMC and overhead factor (nodeenergy.go).
 	RedfishURL          *string   `hcl:"redfish_url,optional"`
@@ -738,6 +743,8 @@ type modelHCL struct {
 	FallbackOnRange    hcl.Range     `hcl:"fallback_on,attr_value_range"`
 	SatWaiting         *int          `hcl:"saturation_waiting,optional"`
 	SatWaitingRange    hcl.Range     `hcl:"saturation_waiting,attr_value_range"`
+	RegionPolicy       *string       `hcl:"region_policy,optional"`
+	RegionPolicyRange  hcl.Range     `hcl:"region_policy,attr_value_range"`
 	Cost               *costHCL      `hcl:"cost,block"`
 	Upstreams          []upstreamHCL `hcl:"upstream,block"`
 	// Upstreams discovered from Slurm jobs (slurm.go).
@@ -892,6 +899,10 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	}
 	if c.MasterKeyFile == "" {
 		v.errf(raw.MasterKeyFileRange, "Missing master key file", "master_key_file must name a file")
+	}
+	c.Region = strOr(raw.Region, "")
+	if c.Region != "" && !ValidRegionLabel(c.Region) {
+		v.errf(raw.RegionRange, "Invalid region", "region %q: want %s", c.Region, regionLabelRule)
 	}
 	c.CacheIsolation = strOr(raw.CacheIsolation, "org")
 	c.CacheSaltKeyFile = strOr(raw.CacheSaltKeyFile, "")
@@ -1180,7 +1191,11 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			if key == "" && m.Provider == nil { // an external provider's keys: external.go
 				v.errf(u.DefRange, "Missing key file", "upstream %q of model %q has no key_file (set it on the upstream or the model)", u.Name, m.Name)
 			}
-			g.Upstreams = append(g.Upstreams, Upstream{Name: u.Name, BaseURL: u.BaseURL, KeyFile: key})
+			ur := Upstream{Name: u.Name, BaseURL: u.BaseURL, KeyFile: key, Region: strOr(u.Region, "")}
+			if ur.Region != "" && !ValidRegionLabel(ur.Region) {
+				v.errf(u.RegionRange, "Invalid region", "upstream %q of model %q: region %q: want %s", u.Name, m.Name, ur.Region, regionLabelRule)
+			}
+			g.Upstreams = append(g.Upstreams, ur)
 		}
 		c.ModelGroups = append(c.ModelGroups, g)
 	}
@@ -1206,6 +1221,16 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 			v.errf(m.FallbackOnRange, "Invalid fallback_on", "%s: an empty fallback_on would never fall back; remove fallbacks instead", where)
 		}
 		c.ModelGroups[i].FallbackOn = m.FallbackOn
+		c.ModelGroups[i].RegionPolicy = strOr(m.RegionPolicy, "prefer")
+		switch c.ModelGroups[i].RegionPolicy {
+		case "prefer":
+		case "require":
+			if c.Region == "" {
+				v.errf(m.RegionPolicyRange, "region_policy without region", "%s: region_policy = \"require\" keeps requests in the gateway's region, and the gateway has none: set region", where)
+			}
+		default:
+			v.errf(m.RegionPolicyRange, "Invalid region_policy", "%s: region_policy %q: want \"prefer\" or \"require\"", where, c.ModelGroups[i].RegionPolicy)
+		}
 		if m.SatWaiting != nil {
 			if *m.SatWaiting < 0 || *m.SatWaiting > 1_000_000 {
 				v.errf(m.SatWaitingRange, "Invalid saturation_waiting", "%s: saturation_waiting %d: want 0..1000000", where, *m.SatWaiting)
