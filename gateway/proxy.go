@@ -945,6 +945,9 @@ func (s *Server) sendTyped(ctx context.Context, g *group, path string, body []by
 		if attempt > 0 {
 			s.met.retries.add(1, g.cfg.Name)
 		}
+		if g.region != "" && u.region != g.region {
+			s.met.crossRegion.add(1, g.cfg.Name, regionLabel(u.region))
+		}
 		target, sendBody := u.joinURL(path), body
 		var br *bedrockRuntime
 		if g.ext != nil {

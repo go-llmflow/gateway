@@ -2718,6 +2718,22 @@ Client routes: `POST /v1/chat/completions`, `/v1/completions`,
 `/v1/audio/transcriptions`, `/tokenize`, `/detokenize`, `GET /v1/models`, `GET /v1/me/usage` (the caller's own soft-quota windows), and `POST /mcp` with `mcp_server` blocks. `GET /healthz` returns 503 when the budget
 state is stale and fail-closed is on.
 
+### Regions
+
+Several gateways can share one PostgreSQL (the `ha` block shares the pools' fair share; keys, budgets and the audit chain are in the store). A gateway can be given a **region**, and its upstreams too, so that each gateway serves from the GPUs near it (v0.44.0, with the persistence of SSO sessions and alert retries):
+
+```hcl
+region = "eu-west"                 # this gateway's region: 1 to 32 characters of [a-z0-9._-]
+
+model "llama" {
+  region_policy = "prefer"         # "prefer" (default) | "require"
+  upstream "paris-1"   { base_url = "http://gpu-fr:8000" region = "eu-west" }
+  upstream "chicago-1" { base_url = "http://gpu-us:8000" region = "us-central" }
+}
+```
+
+A gateway with a region sends to the upstreams of its region first: an available one (the least loaded), then, with `prefer`, an available one elsewhere, then the last resort in the region, then the last resort elsewhere. With `require` (data residency) nothing outside the region is ever used, not even as the last resort: a request with no upstream in the region fails (502/503) instead of leaving it. Requests that left the region are counted: `llmflow_cross_region_total{group,region}`. A gateway without a region ignores the labels. **What this is not**: the gateway does not steer clients to a region (DNS, anycast or your load balancer does, to the nearest gateway), does not forward a request to another region's gateway, and does not place data: `require` is about where inference runs. An upstream discovered from Slurm has no region (it is outside the region under `require`). Tests: `TestPickByRegion`, `TestRegionRoutingEndToEnd`, `TestRegionRequireStaysInTheRegion`, `TestRegionConfig`.
+
 ### Fallbacks
 
 A model group can name fallback groups, tried in order:

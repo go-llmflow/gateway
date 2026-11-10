@@ -159,15 +159,16 @@ func formatFloat(v float64) string {
 
 // metrics groups the gateway's instruments.
 type metrics struct {
-	requests   *counterVec // team, model, code
-	tokens     *counterVec // team, model, kind
-	gpuHours   *counterVec // team, pool
-	cost       *counterVec // team, pool, unit: costs in a currency (external providers)
-	denied     *counterVec // team, reason
-	retries    *counterVec // group
-	fallbacks  *counterVec // from, to
-	estimated  *counterVec // team, model
-	softAlerts *counterVec // kind
+	requests    *counterVec // team, model, code
+	tokens      *counterVec // team, model, kind
+	gpuHours    *counterVec // team, pool
+	cost        *counterVec // team, pool, unit: costs in a currency (external providers)
+	denied      *counterVec // team, reason
+	retries     *counterVec // group
+	crossRegion *counterVec // group, region
+	fallbacks   *counterVec // from, to
+	estimated   *counterVec // team, model
+	softAlerts  *counterVec // kind
 	// revocations received from other replicas (ha), by kind.
 	revocations *counterVec
 	// auditFailures counts audit entries or checkpoints that could not be
@@ -207,6 +208,9 @@ func newMetrics() *metrics {
 		cost:     newCounterVec("llmflow_cost_total", "Cost charged in a currency (external providers), by unit; GPU-hours are in llmflow_gpu_hours_total.", "team", "pool", "unit"),
 		denied:   newCounterVec("llmflow_denied_total", "Requests refused before reaching vLLM, by reason.", "team", "reason"),
 		retries:  newCounterVec("llmflow_upstream_retries_total", "Retries to another upstream before the first byte.", "group"),
+		crossRegion: newCounterVec("llmflow_cross_region_total",
+			"Requests sent to an upstream outside this gateway's region (region_policy prefer), by group and the upstream's region.",
+			"group", "region"),
 		fallbacks: newCounterVec("llmflow_fallbacks_total",
 			"Requests moved to a fallback model group before the first byte, by group left, group used and reason (unavailable, saturated).",
 			"from", "to", "reason"),

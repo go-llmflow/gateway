@@ -33,7 +33,10 @@ const (
 
 // Config is the validated configuration.
 type Config struct {
-	Listen            string
+	Listen string
+	// Region labels where this gateway runs (region-aware routing, with
+	// several gateways sharing one PostgreSQL); "" for none.
+	Region            string
 	MasterKeyFile     string
 	MetricsTokenFile  string
 	Store             Store
@@ -691,10 +694,33 @@ type Cost struct {
 	PriceDate string
 }
 
+// regionLabelRule is what a region label may be.
+const regionLabelRule = "1 to 32 characters of [a-z0-9._-], starting with a letter or digit"
+
+// ValidRegionLabel reports whether s is a region label (a gateway's, or an
+// upstream's).
+func ValidRegionLabel(s string) bool {
+	if s == "" || len(s) > 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		ok := c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || i > 0 && (c == '.' || c == '_' || c == '-')
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // Upstream is one vLLM server of a model group.
 type Upstream struct {
 	Name    string
 	BaseURL string
+	// Region is where the server is (a label of the operator's choosing, e.g.
+	// "eu-west"); "" for unspecified. A gateway with a region sends to the
+	// upstreams of its own region first (model region_policy).
+	Region string
 	// KeyFile holds the vLLM --api-key of this server (the model's
 	// key_file when the upstream block does not set one).
 	KeyFile string
@@ -740,6 +766,11 @@ type ModelGroup struct {
 	// on each upstream's /metrics (at the health interval, with its timeout)
 	// and calls the group saturated when their sum reaches it.
 	SaturationWaiting int
+	// RegionPolicy: "prefer" (default) sends to the upstreams of the gateway's
+	// region first and to the others only when none of them can take the
+	// request; "require" never sends outside the region (data residency):
+	// without an upstream there, the request fails with 503.
+	RegionPolicy string
 	// External is set for a model served by an external provider
 	// (external.go); nil for vLLM.
 	External *External

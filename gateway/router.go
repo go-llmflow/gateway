@@ -42,6 +42,8 @@ type upstream struct {
 	// under a budget on a learned context length goes only to an upstream
 	// whose cards are known (#87, review F2).
 	cards atomic.Pointer[[]modelCard]
+	// region is the upstream's region label ("" unspecified).
+	region string
 }
 
 // cardLen is the max_model_len the upstream reported for model, and
@@ -70,6 +72,9 @@ type group struct {
 	disc *slurmDiscovery
 	// prices are the cost's prices as integers (bound.go).
 	prices groupPrices
+	// region is this gateway's region (config region), "" for none: the group
+	// then routes by region (pick).
+	region string
 }
 
 // contextLen is the context length that bounds a request's input: the
@@ -145,10 +150,51 @@ func (g *group) queueSaturated() bool {
 //
 // With known set (a request held on a learned context length), only the
 // upstreams whose cards are known qualify, even as the last resort.
+//
+// With a gateway region (region-aware routing), the upstreams of that region
+// come first: an available one, then (region_policy "prefer" only) an
+// available one elsewhere, then the last resort in the region, then the last
+// resort elsewhere. With region_policy "require" nothing outside the region
+// is ever returned, not even as the last resort: no upstream there, no answer.
 func (g *group) pick(tried map[*upstream]bool, now time.Time, known bool) *upstream {
-	var best, fallback *upstream
+	if g.region == "" {
+		best, fallback := g.scan(tried, now, known, nil)
+		if best != nil {
+			return best
+		}
+		return fallback
+	}
+	local := func(u *upstream) bool { return u.region == g.region }
+	lb, lf := g.scan(tried, now, known, local)
+	if lb != nil {
+		return lb
+	}
+	if g.cfg.RegionPolicy == "require" {
+		return lf
+	}
+	rb, rf := g.scan(tried, now, known, func(u *upstream) bool { return u.region != g.region })
+	switch {
+	case rb != nil:
+		return rb
+	case lf != nil:
+		return lf
+	}
+	return rf
+}
+
+// regionLabel is an upstream's region as a metric label.
+func regionLabel(r string) string {
+	if r == "" {
+		return "unspecified"
+	}
+	return r
+}
+
+// scan is the least loaded available upstream (best) and the least loaded
+// untried one (fallback) among those keep accepts (nil: all).
+func (g *group) scan(tried map[*upstream]bool, now time.Time, known bool, keep func(*upstream) bool) (best, fallback *upstream) {
 	for _, u := range g.members() {
-		if tried[u] || u.draining.Load() {
+		if tried[u] || u.draining.Load() || keep != nil && !keep(u) {
 			continue
 		}
 		if known {
@@ -163,10 +209,7 @@ func (g *group) pick(tried map[*upstream]bool, now time.Time, known bool) *upstr
 			best = u
 		}
 	}
-	if best != nil {
-		return best
-	}
-	return fallback
+	return best, fallback
 }
 
 func newUpstream(raw, apiKey string) *upstream {
