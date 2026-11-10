@@ -28,7 +28,7 @@ const uiHTML = `
 <title>{{.Title}} · llmflow</title><link rel="stylesheet" href="/ui/style.css"></head><body>
 <header><strong>llmflow</strong>
 <a href="/ui/">Home</a><a href="/ui/keys">Keys</a><a href="/ui/budgets">Budgets</a><a href="/ui/spend">Spend</a>
-<a href="/ui/reports">Reports</a><a href="/ui/profiles">Profiles</a><a href="/ui/softquotas">Soft quotas</a><a href="/ui/fairshare">Fair share</a><a href="/ui/audit">Audit</a>
+<a href="/ui/reports">Reports</a><a href="/ui/profiles">Profiles</a><a href="/ui/softquotas">Soft quotas</a><a href="/ui/fairshare">Fair share</a><a href="/ui/models">Models</a><a href="/ui/orgs">Teams</a><a href="/ui/audit">Audit</a>
 {{if .User}}<span class="who">{{.User}}
 <form class="inline" method="post" action="/ui/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Sign out</button></form></span>{{end}}
 </header><main><h1>{{.Title}}</h1>
@@ -129,6 +129,17 @@ organisation administrator sees their organisation only.</p>
 {{define "fairshare"}}{{template "head" .}}
 <p>Live state of each pool: reservation, requests in flight, borrowing, level of fair share (LF) and rank. Reload for a new reading.</p>
 {{range .Data}}<h2>{{.Name}}</h2>{{template "table" .Table}}{{end}}
+{{template "foot" .}}{{end}}
+
+{{define "models"}}{{template "head" .}}
+<p>What the gateway serves: its class, context length, price per million tokens (in the unit shown), how many upstreams are up out of those configured, and where they run. What a key may call is <code>GET /v1/models</code>.</p>
+{{template "table" .Data}}
+{{template "foot" .}}{{end}}
+
+{{define "orgs"}}{{template "head" .}}
+<p>The organisations and teams your role can see (read-only: they are managed through the API or SCIM).</p>
+<h2>Organisations</h2>{{template "table" .Data.Orgs}}
+<h2>Teams</h2>{{template "table" .Data.Teams}}
 {{template "foot" .}}{{end}}
 
 {{define "audit"}}{{template "head" .}}

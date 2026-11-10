@@ -176,6 +176,7 @@ func matrixRows() []matrixRow {
 		{"GET /admin/export", "GET", p("/admin/export" + span + "&format=csv"), "", nil, reportOutsiders},
 		{"POST /admin/export", "POST", p("/admin/export" + span + "&format=csv"), "", nil, reportOutsiders},
 		{"GET /admin/fairshare", "GET", p("/admin/fairshare"), "", nil, outsiders},
+		{"GET /admin/models", "GET", p("/admin/models"), "", nil, outsiders},
 		{"GET /admin/audit", "GET", p("/admin/audit"), "", proxyViews, nil},
 		{"POST /admin/audit/verify", "POST", p("/admin/audit/verify"), "", proxyViews, nil},
 		// Workload profiles (#90). The people and capacity listings are
