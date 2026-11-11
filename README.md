@@ -3791,7 +3791,7 @@ end-to-end run of go-llmflow/bench v0.2.0 (same day) confirmed the following:
 | Two replicas, one database | A concurrent first start works (A7); keys are shared; a revocation reaches the other replica after `key_cache_ttl` without an `ha` block (open defect 1), in 3 ms with one (v0.14.0); the audit chain stays one verifiable chain under two concurrent writers. |
 | Upstream killed mid-stream, restarted | The client gets the partial stream; counters return to zero; the next requests are served. |
 | Key rotated with 16 requests in flight | All 16 finish and are charged to the key; the old secret is refused at once and the new one is served. |
-| Clock stepped back 2 h | The audit chain still verifies. |
+| Clock stepped back 2 h | The audit chain still verifies. The fluids report keeps all the energy: each exporter's intervals follow a timeline that never goes back (a step back continues one `interval` after the previous reading), so they are stored when they settle instead of waiting for the wall clock to catch up (#175). |
 | Export target down | The queue drops beyond 256 MiB and alerts (A5). |
 | Clients that stop reading | Released after `max_request_duration` + 5 s (A2). |
 

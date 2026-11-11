@@ -50,6 +50,24 @@ type energyNode struct {
 	preemptAcc  int64
 	preemptBad  bool
 	pending     []pendingInterval // measured, waiting for the accounting to settle
+	// lastAt is the instant of the last reading on the node's own timeline (see
+	// timeline); the timeline never goes back, whatever the wall clock does.
+	lastAt time.Time
+}
+
+// timeline maps the wall clock to the node's own timeline: the same instant
+// while the clock goes forward, and one nominal round after the previous
+// reading when it did not (an NTP correction, the end of daylight saving
+// time). The energy a counter gained is thus always an interval of positive
+// length that follows the previous one, stored without waiting for the wall
+// clock to catch up, and never overlapping a stored one (the store refuses
+// overlaps). skew is how far the timeline is ahead of the wall clock.
+func (n *energyNode) timeline(now time.Time, round time.Duration) (at time.Time, skew time.Duration) {
+	at = now
+	if !n.lastAt.IsZero() && !now.After(n.lastAt) {
+		at = n.lastAt.Add(max(round, time.Second))
+	}
+	return at, at.Sub(now)
 }
 
 // pendingInterval is a measured interval with what was learnt beside the GPUs.
@@ -58,6 +76,9 @@ type pendingInterval struct {
 	overheadMJ int64
 	overheadBy string // "redfish", "factor" or ""
 	preempt    int64  // vLLM preemptions in the interval, -1 unknown
+	// skew is how far the interval's timeline was ahead of the wall clock; the
+	// requests it measures work against are stamped with the wall clock.
+	skew time.Duration
 }
 
 // energyNodes lists the configured exporters. secrets holds the BMC
@@ -237,7 +258,8 @@ func (s *Server) fluidsLoop(ctx context.Context, es store.EnergyStore, nodes []*
 func (s *Server) fluidsRound(ctx context.Context, es store.EnergyStore, nodes []*energyNode) {
 	f := s.cfg.Fluids
 	for _, n := range nodes {
-		now := s.now()
+		wall := s.now()
+		now, skew := n.timeline(wall, f.Interval)
 		sc := energy.Scraper{URL: n.url, Client: s.client, Timeout: s.cfg.Health.Timeout}
 		rd, err := sc.Scrape(ctx, now)
 		if err != nil {
@@ -246,6 +268,7 @@ func (s *Server) fluidsRound(ctx context.Context, es store.EnergyStore, nodes []
 		}
 		// The BMC, at the same instant (an interval is the GPUs' and the node's
 		// over the same time); a failed read leaves the fallback to this interval.
+		n.lastAt = now
 		var bi redfish.Interval
 		var bok bool
 		if n.bmc != nil {
@@ -270,12 +293,12 @@ func (s *Server) fluidsRound(ctx context.Context, es store.EnergyStore, nodes []
 				n.pending = n.pending[1:]
 			}
 			oh, by := s.overhead(n, iv, bi, bok)
-			n.pending = append(n.pending, pendingInterval{iv: iv, overheadMJ: oh, overheadBy: by, preempt: n.takePreemptions()})
+			n.pending = append(n.pending, pendingInterval{iv: iv, overheadMJ: oh, overheadBy: by, preempt: n.takePreemptions(), skew: skew})
 		}
-		cutoff := s.now().Add(-f.Settle)
+		cutoff := now.Add(-f.Settle)
 		for len(n.pending) > 0 && !n.pending[0].iv.End.After(cutoff) {
 			iv := n.pending[0]
-			work, err := es.WorkBetween(ctx, n.labels, iv.iv.Start, iv.iv.End)
+			work, err := es.WorkBetween(ctx, n.labels, iv.iv.Start.Add(-iv.skew), iv.iv.End.Add(-iv.skew))
 			if err != nil {
 				s.log.Error("fluids: reading the work of an interval failed; will retry", "node", n.key, "err", err)
 				break
