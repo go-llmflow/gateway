@@ -562,12 +562,15 @@ func (n *Node) claim(ctx context.Context, ps *poolState) {
 		return
 	case ps.owner && ps.eng != nil && l.Epoch == ps.epoch:
 		ps.validUntil = until
+		ps.eng.adoptOwn(n.cfg.Instance, ps.localWire(), time.Now())
 		ps.mu.Unlock()
 		return
 	case ps.owner && ps.eng != nil && l.Epoch == ps.epoch+1:
 		// This node let the lease lapse and took it back: nobody owned
 		// the pool in between, so its engine is the latest state.
 		ps.epoch, ps.eng.epoch, ps.validUntil = l.Epoch, l.Epoch, until
+		// what this node admitted meanwhile is part of the pool's count at once
+		ps.eng.adoptOwn(n.cfg.Instance, ps.localWire(), time.Now())
 		ps.mu.Unlock()
 		n.cfg.Log.Info("ha: pool ownership resumed", "pool", ps.spec.Name, "epoch", l.Epoch)
 		return
@@ -667,6 +670,7 @@ func (n *Node) heartbeat(ctx context.Context, ps *poolState) {
 			ps.eng.release(n.cfg.Instance, r, now)
 		}
 		ps.pending = nil
+		ps.eng.adoptOwn(n.cfg.Instance, ps.localWire(), now)
 		ps.eng.tick(n.cfg.Instance, now, n.cfg.Now())
 		var rows []store.PoolUsage
 		due := now.Sub(ps.lastSave) >= n.cfg.UsagePersist

@@ -379,8 +379,13 @@ Proofs: `gateway/secaudit3_schac_test.go`, `secaudit3_spareguard_test.go`,
   the pool has room when it is admitted, in one step across replicas (the pool's
   owner decides under one lock; `TestSpareOnlyAdmissionIsOneStepAcrossReplicas`).
   It does not bound the engine's total: owners are never refused (their requests
-  queue by priority at the engine), so owners admitted just after the borrower can
-  bring the number in flight above the pool's capacity (gateway#180).
+  queue by priority at the engine), so the number in flight at the upstream can
+  exceed the pool's capacity because of owners. One case let a borrower in on a
+  stale count, fixed in the release after v0.45.1 (gateway#180): an owner request
+  admitted while no owner could decide (the lease had lapsed, the forward to the
+  owner timed out) was only in its replica's own list; the owner now adopts its
+  own such requests at every heartbeat and when it resumes, and the release of
+  one no longer ends a phantom of a previous owner's.
 - **LOW.** The saturation fallback takes its slot through the same test as the
   first one (a spare-only organisation is not admitted into a pool whose vLLM
   queue is saturated). Fair share counts every choice: the in-flight estimate is

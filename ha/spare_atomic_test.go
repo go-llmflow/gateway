@@ -15,6 +15,11 @@ import (
 // owners are never refused (their requests queue by priority at the engine), so
 // owners admitted after the borrower may bring the total above C.
 //
+// This test is narrower than the chaos scenario: the owners' requests are decided
+// before the barrier, through no proxy and with no forward timeout or lapsed lease.
+// It is not the reproducer of #180 (see unowned_count_test.go); it keeps the
+// atomicity of the borrower's check-and-take across replicas.
+//
 // Two replicas, a start barrier, the pool at its edge (3 of 4 slots busy): of 16
 // borrowers asking at once, from both replicas, exactly one is admitted.
 func TestSpareOnlyAdmissionIsOneStepAcrossReplicas(t *testing.T) {
