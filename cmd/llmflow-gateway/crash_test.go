@@ -166,11 +166,14 @@ store {
 	}
 }
 
-// gatewayStartTimeout bounds the wait for "listening on": a race-instrumented
-// suite on a loaded arm64 runner took more than the 20 s this used to be
-// (gateway#176). It is a ceiling for a start that never comes, not a
-// duration: a start that takes long is reported by startGateway's log line.
-const gatewayStartTimeout = 90 * time.Second
+// gatewayStartTimeout bounds the wait for "listening on". Measured on the
+// ubuntu-24.04-arm runner (gateway#176), with the whole race-instrumented suite
+// running as in ci.yml: 21 starts in 3 runs took 38 ms to 311 ms. The one
+// failure on record took more than 20 s, over 60 times the slowest start seen,
+// so it was a stall, not a slow start, and a longer wait would only delay its
+// report. 30 s is 100 times the measured maximum; what the child printed
+// before it is reported is what names the cause.
+const gatewayStartTimeout = 30 * time.Second
 
 // tailBuffer keeps the last bytes written to it (a child's output, bounded).
 type tailBuffer struct {
