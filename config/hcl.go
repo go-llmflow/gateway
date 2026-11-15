@@ -583,6 +583,9 @@ type limitsHCL struct {
 type fairHCL struct {
 	HalfLife      *string   `hcl:"half_life,optional"`
 	HalfLifeRange hcl.Range `hcl:"half_life,attr_value_range"`
+	// AdmittedHeader: tell the upstream when the pool admitted each request
+	// (X-Llmflow-Admitted-At). A test witness, off by default.
+	AdmittedHeader *bool `hcl:"admitted_header,optional"`
 }
 
 type healthHCL struct {
@@ -1021,6 +1024,7 @@ func build(raw *fileHCL) (*Config, hcl.Diagnostics) {
 	c.FairShare.HalfLife = DefaultHalfLife
 	if f := raw.FairShare; f != nil {
 		c.FairShare.HalfLife = v.dur(f.HalfLife, f.HalfLifeRange, "half_life", DefaultHalfLife)
+		c.FairShare.AdmittedHeader = f.AdmittedHeader != nil && *f.AdmittedHeader
 	}
 
 	c.Health = Health{Interval: DefaultHealthInterval, Timeout: DefaultHealthTimeout, Cooldown: DefaultCooldown, Path: DefaultHealthPath}

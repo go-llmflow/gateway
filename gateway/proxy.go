@@ -632,7 +632,9 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		// A request held on a learned context length goes only to the
 		// upstreams that reported it (review F2 of #87).
 		ctx = withBoundOnly(ctx, func() bool { return adm != nil && adm.hold != nil })
-		ctx = context.WithValue(ctx, admittedKey{}, grant.Admitted)
+		if s.cfg.FairShare.AdmittedHeader {
+			ctx = context.WithValue(ctx, admittedKey{}, grant.Admitted)
+		}
 		defer upSpan.End()
 		var resp *http.Response
 		sendOnce := func() error {
