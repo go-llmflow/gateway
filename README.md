@@ -374,7 +374,13 @@ Proofs: `gateway/secaudit3_schac_test.go`, `secaudit3_spareguard_test.go`,
   check included, is taken before the pre-call guardrails, so a spare-only
   borrower on a full pool is refused 429 without a guard-model call; and a guard
   call runs at the priority of the request it judges (its band), no longer at 0
-  ahead of the owners' work. The slot is held while the guard judges.
+  ahead of the owners' work. The slot is held while the guard judges. What this
+  guarantees, and what it does not: a spare-only borrower takes a slot only if
+  the pool has room when it is admitted, in one step across replicas (the pool's
+  owner decides under one lock; `TestSpareOnlyAdmissionIsOneStepAcrossReplicas`).
+  It does not bound the engine's total: owners are never refused (their requests
+  queue by priority at the engine), so owners admitted just after the borrower can
+  bring the number in flight above the pool's capacity (gateway#180).
 - **LOW.** The saturation fallback takes its slot through the same test as the
   first one (a spare-only organisation is not admitted into a pool whose vLLM
   queue is saturated). Fair share counts every choice: the in-flight estimate is
