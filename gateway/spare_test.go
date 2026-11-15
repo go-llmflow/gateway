@@ -71,6 +71,20 @@ func TestPoolBorrowSpare(t *testing.T) {
 	if err != nil || p != fairshare.BorrowBase+fairshare.RankStep*fairshare.MaxRank {
 		t.Fatalf("priority %d (%v), want the last band %d", p, err, fairshare.BorrowBase+fairshare.RankStep*fairshare.MaxRank)
 	}
+	// The upstream is told when the pool was asked (X-Llmflow-Admitted-At, wall
+	// clock ns), before it received the request: gateway#180.
+	// It is a test witness, off by default: fairshare { admitted_header = true }.
+	if h := up.last().Header.Get("X-Llmflow-Admitted-At"); h != "" {
+		t.Fatalf("X-Llmflow-Admitted-At %q sent with the option off", h)
+	}
+	e.cfg.FairShare.AdmittedHeader = true
+	if resp := e.do("POST", "/v1/chat/completions", keyB, fmt.Sprintf(sparePrompt, "rtxllama", "B1b")); readAll(t, resp) == "" || resp.StatusCode != 200 {
+		t.Fatalf("a third party on a pool with room: %d", resp.StatusCode)
+	}
+	if ns, err := strconv.ParseInt(up.last().Header.Get("X-Llmflow-Admitted-At"), 10, 64); err != nil || ns <= 0 ||
+		ns > time.Now().UnixNano() || time.Since(time.Unix(0, ns)) > time.Minute {
+		t.Fatalf("X-Llmflow-Admitted-At %q (%v)", up.last().Header.Get("X-Llmflow-Admitted-At"), err)
+	}
 	// The other pool (b300, borrow all) is unaffected, and etabB holds a share
 	// of it.
 	if resp := e.do("POST", "/v1/chat/completions", keyB, fmt.Sprintf(sparePrompt, "llama", "B2")); readAll(t, resp) == "" || resp.StatusCode != 200 {

@@ -540,6 +540,12 @@ type FairShare struct {
 	// HalfLife is the decay half-life of past usage (Slurm
 	// PriorityDecayHalfLife). Default 168h (7 days, Slurm's default).
 	HalfLife time.Duration
+	// AdmittedHeader (fairshare { admitted_header = true }) makes every request
+	// sent to vLLM carry X-Llmflow-Admitted-At, the wall-clock nanoseconds at which
+	// the pool was asked. It is a witness for tests (the chaos campaign judges a
+	// borrower at its admission with it) and is off by default: production does
+	// not tell the upstream its internal timing and pays no allocation for it.
+	AdmittedHeader bool
 }
 
 // Health tunes upstream health checking.

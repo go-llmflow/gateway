@@ -379,8 +379,17 @@ Proofs: `gateway/secaudit3_schac_test.go`, `secaudit3_spareguard_test.go`,
   the pool has room when it is admitted, in one step across replicas (the pool's
   owner decides under one lock; `TestSpareOnlyAdmissionIsOneStepAcrossReplicas`).
   It does not bound the engine's total: owners are never refused (their requests
-  queue by priority at the engine), so owners admitted just after the borrower can
-  bring the number in flight above the pool's capacity (gateway#180).
+  queue by priority at the engine), so the number in flight at the upstream can
+  exceed the pool's capacity because of owners. One case let a borrower in on a
+  stale count, fixed in the release after v0.45.1 (gateway#180): an owner request
+  admitted while no owner could decide (the lease had lapsed, the forward to the
+  owner timed out) was only in its replica's own list; the owner now adopts its
+  own such requests at every heartbeat and when it resumes, and the release of
+  one no longer ends a phantom of a previous owner's. With
+  `fairshare { admitted_header = true }` (a test witness, off by default) every
+  request sent to vLLM carries `X-Llmflow-Admitted-At`: when the pool was asked, so
+  that an observer of the upstream can tell what was in flight at the admission
+  from what arrived after it.
 - **LOW.** The saturation fallback takes its slot through the same test as the
   first one (a spare-only organisation is not admitted into a pool whose vLLM
   queue is saturated). Fair share counts every choice: the in-flight estimate is
@@ -679,6 +688,7 @@ model "llama-3.3-70b" {
 | `model "<name>" { … }` | client model name → `upstream_model`, `pool`, `class` (`interactive` / `batch`), `key_file`, `cost { input_per_mtok, output_per_mtok, cached_per_mtok, unit, price_date }` per million tokens, in GPU-hours unless `unit` names a currency (see [Cost units](#cost-units-since-v0120)), and `upstream "<name>" { base_url, key_file }` blocks |
 | `store { … }` | `kind` (`memory` / `postgres`), `dsn_file`, `spool_dir` (required with postgres, see [Durable accounting](#durable-accounting)), `spool_max_bytes` (default 256 MiB), `fail_closed` (default true), `queue_size`, `batch_size` |
 | `fairshare { half_life }` | usage decay half-life (default `"168h"`) |
+| `fairshare { admitted_header }` | `true` makes every request sent to vLLM carry `X-Llmflow-Admitted-At`: when the pool was asked (wall clock, nanoseconds since the epoch). A **test witness** (the chaos campaign judges a spare-only borrower at its admission with it); default `false`, so production tells the upstream nothing of its timing and allocates nothing for it |
 | `limits { … }`, `health { … }` | body and header size, timeouts, maximum request duration and response size; health-check interval, timeout, cooldown, path |
 | `tags { header, allowed }` | the request header clients may tag requests with, and the allowed tags |
 | `cache_isolation`, `cache_salt_key_file` | prefix-cache tenant scope (`org` default, `team`, `key`, `none`) and the file holding the HMAC key (at least 32 bytes, required unless `none`); see Security |

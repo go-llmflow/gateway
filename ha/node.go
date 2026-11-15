@@ -330,6 +330,7 @@ func (n *Node) Acquire(pool, org string, class fairshare.Class, tokens int64, ne
 		return nil, false, errors.New("ha: unknown pool")
 	}
 	id := newID()
+	asked := time.Now()
 	ps.mu.Lock()
 	if ps.valid(time.Now()) {
 		g, ok := ps.eng.decide(n.cfg.Instance, id, org, class, tokens, needRoom, time.Now())
@@ -343,7 +344,7 @@ func (n *Node) Acquire(pool, org string, class fairshare.Class, tokens int64, ne
 		lg := &localGrant{id: id, org: org, class: class, tokens: tokens, priority: g.Priority, borrowing: g.Borrowing, epoch: ps.epoch}
 		ps.local[id] = lg
 		ps.mu.Unlock()
-		return n.grant(ps, lg, g.Saturated), true, nil
+		return n.grant(ps, lg, g.Saturated, asked), true, nil
 	}
 	addr, known := ps.leaseAddr, ps.known
 	remote := ps.leaseLive && ps.leaseOwner != n.cfg.Instance && addr != ""
@@ -371,7 +372,7 @@ func (n *Node) Acquire(pool, org string, class fairshare.Class, tokens int64, ne
 				lg := &localGrant{id: id, org: org, class: class, tokens: tokens, priority: resp.Priority, borrowing: resp.Borrowing, epoch: resp.Epoch}
 				ps.local[id] = lg
 				ps.mu.Unlock()
-				return n.grant(ps, lg, resp.Saturated), true, nil
+				return n.grant(ps, lg, resp.Saturated, asked), true, nil
 			}
 			// A stale owner: its answer is refused (it will drop the grant
 			// when our report does not list it).
@@ -396,13 +397,15 @@ func (n *Node) Acquire(pool, org string, class fairshare.Class, tokens int64, ne
 	ps.mu.Lock()
 	ps.local[id] = lg
 	ps.mu.Unlock()
-	return n.grant(ps, lg, false), true, nil
+	return n.grant(ps, lg, false, asked), true, nil
 }
 
-func (n *Node) grant(ps *poolState, lg *localGrant, saturated bool) *fairshare.Grant {
-	return fairshare.NewRemoteGrant(lg.org, lg.priority, lg.borrowing, saturated, func(consumed float64) {
+func (n *Node) grant(ps *poolState, lg *localGrant, saturated bool, asked time.Time) *fairshare.Grant {
+	g := fairshare.NewRemoteGrant(lg.org, lg.priority, lg.borrowing, saturated, func(consumed float64) {
 		n.release(ps, lg, consumed)
 	})
+	g.Admitted = asked
+	return g
 }
 
 // release ends a local grant: at once when this node owns the pool,
@@ -562,12 +565,15 @@ func (n *Node) claim(ctx context.Context, ps *poolState) {
 		return
 	case ps.owner && ps.eng != nil && l.Epoch == ps.epoch:
 		ps.validUntil = until
+		ps.eng.adoptOwn(n.cfg.Instance, ps.localWire(), time.Now())
 		ps.mu.Unlock()
 		return
 	case ps.owner && ps.eng != nil && l.Epoch == ps.epoch+1:
 		// This node let the lease lapse and took it back: nobody owned
 		// the pool in between, so its engine is the latest state.
 		ps.epoch, ps.eng.epoch, ps.validUntil = l.Epoch, l.Epoch, until
+		// what this node admitted meanwhile is part of the pool's count at once
+		ps.eng.adoptOwn(n.cfg.Instance, ps.localWire(), time.Now())
 		ps.mu.Unlock()
 		n.cfg.Log.Info("ha: pool ownership resumed", "pool", ps.spec.Name, "epoch", l.Epoch)
 		return
@@ -667,6 +673,7 @@ func (n *Node) heartbeat(ctx context.Context, ps *poolState) {
 			ps.eng.release(n.cfg.Instance, r, now)
 		}
 		ps.pending = nil
+		ps.eng.adoptOwn(n.cfg.Instance, ps.localWire(), now)
 		ps.eng.tick(n.cfg.Instance, now, n.cfg.Now())
 		var rows []store.PoolUsage
 		due := now.Sub(ps.lastSave) >= n.cfg.UsagePersist

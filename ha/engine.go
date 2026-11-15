@@ -83,8 +83,28 @@ func (e *engine) release(inst string, r wireRelease, now time.Time) {
 	}
 	e.released[k] = now
 	e.pool.Charge(r.Org, r.Consumed)
-	if r.Epoch < e.epoch {
+	// Epoch 0: admitted while no owner could decide (gateway#180): it was never
+	// part of the in-flight count a previous owner left, so no phantom goes.
+	if r.Epoch > 0 && r.Epoch < e.epoch {
 		e.pool.DropPhantom(r.Org)
+	}
+}
+
+// adoptOwn counts this replica's own grants that the engine does not know: the
+// owner requests it admitted while no owner could decide (the lease had lapsed,
+// a forward timed out). Called on every heartbeat of the owner and when it
+// resumes, so the pool's count is whole as soon as an owner can know.
+func (e *engine) adoptOwn(self string, live []wireGrant, now time.Time) {
+	for _, w := range live {
+		k := gkey(self, w.ID)
+		if e.grants[k] != nil {
+			continue
+		}
+		if _, gone := e.released[k]; gone {
+			continue
+		}
+		g := e.pool.Adopt(w.Org, w.Priority, w.Borrowing, w.Tokens)
+		e.grants[k] = &engGrant{g: g, inst: self, org: w.Org, created: now}
 	}
 }
 
@@ -107,7 +127,7 @@ func (e *engine) report(inst string, live []wireGrant, now time.Time) {
 		}
 		g := e.pool.Adopt(w.Org, w.Priority, w.Borrowing, w.Tokens)
 		e.grants[k] = &engGrant{g: g, inst: inst, org: w.Org, created: now}
-		if w.Epoch < e.epoch {
+		if w.Epoch > 0 && w.Epoch < e.epoch {
 			// Counted in the previous owner's in-flight (a phantom).
 			e.pool.DropPhantom(w.Org)
 		}

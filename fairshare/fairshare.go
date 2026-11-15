@@ -243,6 +243,11 @@ type Grant struct {
 	tokens    int64
 	Priority  int
 	Borrowing bool
+	// Admitted is the instant the pool was asked (for a grant decided by another
+	// replica, when the question was sent: the decision lies between it and the
+	// answer). The gateway tells the upstream (X-Llmflow-Admitted-At) so that an
+	// observer can judge what was in flight when the request was admitted.
+	Admitted time.Time
 	// Saturated: when this request arrived, the pool already had C or more
 	// requests in flight (the gateway's own view of saturation, #58).
 	Saturated bool
@@ -440,7 +445,7 @@ func (p *Pool) acquire(teamName string, class Class, estTokens int64, needRoom b
 	}
 	p.advance()
 	t := p.teamLocked(teamName)
-	g := &Grant{pool: p, team: t, teamName: teamName, tokens: estTokens, Saturated: busy >= p.capacity}
+	g := &Grant{pool: p, team: t, teamName: teamName, tokens: estTokens, Saturated: busy >= p.capacity, Admitted: time.Now()}
 	// The test is on the number of within-share requests in flight, not
 	// on the total: a team that keeps more requests in flight than its
 	// reservation (any closed-loop client pool larger than share × C)

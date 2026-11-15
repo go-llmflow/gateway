@@ -126,7 +126,10 @@ limits {
   max_request_duration = "5s"
   max_response_bytes = 4096
 }
-fairshare { half_life = "1h" }
+fairshare {
+  half_life       = "1h"
+  admitted_header = true
+}
 tags {
   header  = "X-Llmflow-Tags"
   allowed = ["eval", "prod"]
@@ -153,7 +156,7 @@ health {
 		t.Fatal(err)
 	}
 	if c.Retries != 0 || c.FailClosed() || c.Store.Kind != "postgres" || c.Limits.MaxRequestDuration != 5*time.Second ||
-		c.Health.Path != "/ping" || c.FairShare.HalfLife != time.Hour || !c.ExposeOverheadHdr || c.MetricsTokenFile != "/m" ||
+		c.Health.Path != "/ping" || c.FairShare.HalfLife != time.Hour || !c.FairShare.AdmittedHeader || !c.ExposeOverheadHdr || c.MetricsTokenFile != "/m" ||
 		c.Limits.MaxResponseBytes != 4096 || c.Store.BatchSize != 5 || c.KeyCacheTTL != time.Minute ||
 		c.Tags.Header != "X-Llmflow-Tags" || len(c.Tags.Allowed) != 2 || c.Alerts.SMTP == nil || len(c.Alerts.SMTP.To) != 2 ||
 		c.Alerts.WebhookTokenFile != "/hook" || c.Alerts.SMTP.PasswordFile != "/smtp" {
