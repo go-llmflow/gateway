@@ -330,6 +330,7 @@ func (n *Node) Acquire(pool, org string, class fairshare.Class, tokens int64, ne
 		return nil, false, errors.New("ha: unknown pool")
 	}
 	id := newID()
+	asked := time.Now()
 	ps.mu.Lock()
 	if ps.valid(time.Now()) {
 		g, ok := ps.eng.decide(n.cfg.Instance, id, org, class, tokens, needRoom, time.Now())
@@ -343,7 +344,7 @@ func (n *Node) Acquire(pool, org string, class fairshare.Class, tokens int64, ne
 		lg := &localGrant{id: id, org: org, class: class, tokens: tokens, priority: g.Priority, borrowing: g.Borrowing, epoch: ps.epoch}
 		ps.local[id] = lg
 		ps.mu.Unlock()
-		return n.grant(ps, lg, g.Saturated), true, nil
+		return n.grant(ps, lg, g.Saturated, asked), true, nil
 	}
 	addr, known := ps.leaseAddr, ps.known
 	remote := ps.leaseLive && ps.leaseOwner != n.cfg.Instance && addr != ""
@@ -371,7 +372,7 @@ func (n *Node) Acquire(pool, org string, class fairshare.Class, tokens int64, ne
 				lg := &localGrant{id: id, org: org, class: class, tokens: tokens, priority: resp.Priority, borrowing: resp.Borrowing, epoch: resp.Epoch}
 				ps.local[id] = lg
 				ps.mu.Unlock()
-				return n.grant(ps, lg, resp.Saturated), true, nil
+				return n.grant(ps, lg, resp.Saturated, asked), true, nil
 			}
 			// A stale owner: its answer is refused (it will drop the grant
 			// when our report does not list it).
@@ -396,13 +397,15 @@ func (n *Node) Acquire(pool, org string, class fairshare.Class, tokens int64, ne
 	ps.mu.Lock()
 	ps.local[id] = lg
 	ps.mu.Unlock()
-	return n.grant(ps, lg, false), true, nil
+	return n.grant(ps, lg, false, asked), true, nil
 }
 
-func (n *Node) grant(ps *poolState, lg *localGrant, saturated bool) *fairshare.Grant {
-	return fairshare.NewRemoteGrant(lg.org, lg.priority, lg.borrowing, saturated, func(consumed float64) {
+func (n *Node) grant(ps *poolState, lg *localGrant, saturated bool, asked time.Time) *fairshare.Grant {
+	g := fairshare.NewRemoteGrant(lg.org, lg.priority, lg.borrowing, saturated, func(consumed float64) {
 		n.release(ps, lg, consumed)
 	})
+	g.Admitted = asked
+	return g
 }
 
 // release ends a local grant: at once when this node owns the pool,

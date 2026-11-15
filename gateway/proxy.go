@@ -106,6 +106,10 @@ func (s *Server) acquireFor(g *group, org string, est int64, slots int) (grant *
 	return grant, false, nil
 }
 
+// admittedKey carries the instant the pool admitted a request (Grant.Admitted)
+// to the upstream call, which sends it as X-Llmflow-Admitted-At.
+type admittedKey struct{}
+
 // maxSlots bounds the slots one request holds.
 const maxSlots = 64
 
@@ -628,6 +632,7 @@ func (s *Server) proxyFor(ep openai.Endpoint, path string) http.HandlerFunc {
 		// A request held on a learned context length goes only to the
 		// upstreams that reported it (review F2 of #87).
 		ctx = withBoundOnly(ctx, func() bool { return adm != nil && adm.hold != nil })
+		ctx = context.WithValue(ctx, admittedKey{}, grant.Admitted)
 		defer upSpan.End()
 		var resp *http.Response
 		sendOnce := func() error {
@@ -990,6 +995,11 @@ func (s *Server) sendTyped(ctx context.Context, g *group, path string, body []by
 			}
 			req.Header.Set("Authorization", "Bearer "+u.apiKey)
 			req.Header.Set("X-Vllm-Priority", strconv.Itoa(priority))
+			if at, ok := ctx.Value(admittedKey{}).(time.Time); ok && !at.IsZero() {
+				// when the pool was asked (wall clock, ns): lets an observer of
+				// the upstream judge what was in flight at the admission
+				req.Header.Set("X-Llmflow-Admitted-At", strconv.FormatInt(at.UnixNano(), 10))
+			}
 			req.Header.Set("X-Request-Id", rid)
 			// W3C trace context (vLLM reads traceparent/tracestate): built by
 			// the gateway's tracer, never copied from the client.

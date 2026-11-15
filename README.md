@@ -385,7 +385,10 @@ Proofs: `gateway/secaudit3_schac_test.go`, `secaudit3_spareguard_test.go`,
   admitted while no owner could decide (the lease had lapsed, the forward to the
   owner timed out) was only in its replica's own list; the owner now adopts its
   own such requests at every heartbeat and when it resumes, and the release of
-  one no longer ends a phantom of a previous owner's.
+  one no longer ends a phantom of a previous owner's. Every request sent to vLLM
+  carries `X-Llmflow-Admitted-At` (wall clock, nanoseconds since the epoch): when
+  the pool was asked, so that an observer of the upstream can tell what was in
+  flight at the admission from what arrived after it.
 - **LOW.** The saturation fallback takes its slot through the same test as the
   first one (a spare-only organisation is not admitted into a pool whose vLLM
   queue is saturated). Fair share counts every choice: the in-flight estimate is
