@@ -166,34 +166,92 @@ store {
 	}
 }
 
-func startGateway(t *testing.T, bin, cfg string) (*exec.Cmd, string) {
-	t.Helper()
+// gatewayStartTimeout bounds the wait for "listening on": a race-instrumented
+// suite on a loaded arm64 runner took more than the 20 s this used to be
+// (gateway#176). It is a ceiling for a start that never comes, not a
+// duration: a start that takes long is reported by startGateway's log line.
+const gatewayStartTimeout = 90 * time.Second
+
+// tailBuffer keeps the last bytes written to it (a child's output, bounded).
+type tailBuffer struct {
+	mu sync.Mutex
+	b  []byte
+}
+
+const tailBufferMax = 8 << 10
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.b = append(t.b, p...)
+	if len(t.b) > tailBufferMax {
+		t.b = append([]byte(nil), t.b[len(t.b)-tailBufferMax:]...)
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.b)
+}
+
+// launchGateway starts the gateway and waits for "listening on <addr>". It
+// returns early, with the child's output, when the child exits (its stdout
+// closes) instead of waiting out the timeout, and on timeout it reports how
+// long it waited and what the child had printed. The child's stderr and the
+// non-"listening" lines of its stdout are kept (bounded).
+func launchGateway(bin, cfg string, timeout time.Duration) (*exec.Cmd, string, time.Duration, error) {
 	cmd := exec.Command(bin, "serve", "--config", cfg)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
-		t.Fatal(err)
+		return nil, "", 0, err
 	}
-	cmd.Stderr = io.Discard
+	var tail tailBuffer
+	cmd.Stderr = &tail
+	begin := time.Now()
 	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
+		return nil, "", 0, err
 	}
 	lines := make(chan string, 1)
+	exited := make(chan struct{})
 	go func() {
+		defer close(exited)
 		sc := bufio.NewScanner(out)
 		for sc.Scan() {
 			if a, ok := strings.CutPrefix(sc.Text(), "listening on "); ok {
-				lines <- a
+				select {
+				case lines <- a:
+				default:
+				}
+				continue
 			}
+			_, _ = tail.Write([]byte(sc.Text() + "\n"))
 		}
 	}()
 	select {
 	case a := <-lines:
-		return cmd, strings.TrimSpace(a)
-	case <-time.After(20 * time.Second):
+		return cmd, strings.TrimSpace(a), time.Since(begin), nil
+	case <-exited:
 		_ = cmd.Process.Kill()
-		t.Fatal("the gateway did not start")
+		_ = cmd.Wait()
+		return nil, "", time.Since(begin), fmt.Errorf("the gateway exited after %v before listening; its output:\n%s", time.Since(begin).Round(time.Millisecond), tail.String())
+	case <-time.After(timeout):
+		_ = cmd.Process.Kill()
+		<-exited // the pipe is read to its end before Wait closes it
+		_ = cmd.Wait()
+		return nil, "", time.Since(begin), fmt.Errorf("the gateway was not listening after %v; its output so far:\n%s", timeout, tail.String())
 	}
-	return nil, ""
+}
+
+func startGateway(t *testing.T, bin, cfg string) (*exec.Cmd, string) {
+	t.Helper()
+	cmd, addr, took, err := launchGateway(bin, cfg, gatewayStartTimeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("gateway %s listening after %v", filepath.Base(cfg), took.Round(time.Millisecond))
+	return cmd, addr
 }
 
 func createKey(t *testing.T, addr string) string {
