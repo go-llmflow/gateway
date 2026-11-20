@@ -6,7 +6,7 @@ require (
 	github.com/go-authn/oidc v0.7.0
 	github.com/go-authn/rp v0.4.0
 	github.com/go-authn/scim v0.2.1
-	github.com/go-gitsafe/gitsafe v0.50.0
+	github.com/go-gitsafe/gitsafe v0.58.0
 	github.com/go-llmflow/aws v0.1.2
 	github.com/go-llmflow/pii v0.2.2
 	github.com/go-ooxml/ooxml v0.8.0
