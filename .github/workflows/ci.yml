@@ -24,7 +24,7 @@ jobs:
       # A throw-away database with trust authentication: no password
       # exists, so none can leak from the workflow.
       postgres:
-        image: postgres:18@sha256:eb63372c1e05c755f55fa30cbd07aecc443676fc6c0fa90b9002d01537841e1a # multi-arch index of postgres:18 (18.7, PG_MAJOR=18 read from its amd64 config), read 2026-11-15
+        image: postgres:19@sha256:bb6e70add742cd868fb62cb3b2f67d1dd2bdd2b65a521e778420748753687c60 # multi-arch index of postgres:18 (18.7, PG_MAJOR=18 read from its amd64 config), read 2026-11-15
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: llmflow
