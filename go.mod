@@ -3,18 +3,18 @@ module github.com/go-llmflow/gateway
 go 1.27.4
 
 require (
-	github.com/go-authn/oidc v0.7.0
-	github.com/go-authn/rp v0.4.0
-	github.com/go-authn/scim v0.2.1
-	github.com/go-gitsafe/gitsafe v0.50.0
+	github.com/go-authn/oidc v0.8.1
+	github.com/go-authn/rp v0.6.0
+	github.com/go-authn/scim v0.4.0
+	github.com/go-gitsafe/gitsafe v0.70.0
 	github.com/go-llmflow/aws v0.1.2
 	github.com/go-llmflow/pii v0.2.2
 	github.com/go-ooxml/ooxml v0.8.0
 	github.com/go-opentype/fonts v0.14.0
 	github.com/go-pdfkit/html2pdf v0.4.1
-	github.com/go-pdfkit/pdfkit v0.24.0
+	github.com/go-pdfkit/pdfkit v0.27.0
 	github.com/go-plot/plot v0.3.1
-	github.com/go-redfish/redfish v0.15.0
+	github.com/go-redfish/redfish v0.18.0
 	github.com/go-volumes/s3 v0.2.2
 	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/jackc/pgx/v5 v5.13.0
@@ -32,7 +32,7 @@ require (
 
 require (
 	github.com/agext/levenshtein v1.2.1 // indirect
-	github.com/andybalholm/brotli v1.2.7 // indirect
+	github.com/andybalholm/brotli v1.3.0 // indirect
 	github.com/apparentlymart/go-textseg/v15 v15.0.0 // indirect
 	github.com/apparentlymart/go-textseg/v17 v17.0.1 // indirect
 	github.com/breml/rootcerts v0.3.7 // indirect
@@ -42,11 +42,12 @@ require (
 	github.com/dop251/goja v0.0.0-20260926152631-39ec2650adc9 // indirect
 	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
 	github.com/evanw/esbuild v0.28.2 // indirect
+	github.com/go-authn/harden v0.2.0 // indirect
 	github.com/go-browserhttp/browserhttp v0.2.0 // indirect
-	github.com/go-gfx/gfx v0.37.0 // indirect
+	github.com/go-gfx/gfx v0.41.0 // indirect
 	github.com/go-gfx/oksvg v0.2.0 // indirect
 	github.com/go-images/gif v0.2.0 // indirect
-	github.com/go-images/images v0.1.1-0.20261026203936-4ac989d310a1 // indirect
+	github.com/go-images/images v0.3.0 // indirect
 	github.com/go-images/jpeg v0.3.0 // indirect
 	github.com/go-images/jpeg2000 v0.14.0 // indirect
 	github.com/go-images/png v0.2.0 // indirect
@@ -54,13 +55,14 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ndarray/ndarray v0.28.0 // indirect
 	github.com/go-ooxml/opc v0.2.1 // indirect
-	github.com/go-opentype/opentype v0.16.2-0.20261027113239-5e69589e9a5e // indirect
+	github.com/go-opentype/opentype v0.22.0 // indirect
+	github.com/go-pdfkit/reader v0.17.0 // indirect
 	github.com/go-simd/highway v0.0.14 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.4+incompatible // indirect
 	github.com/go-tex/math v0.50.0 // indirect
 	github.com/go-webengine/engine v0.18.1 // indirect
 	github.com/go-webengine/esbuildsandbox v0.1.0 // indirect
-	github.com/go-widgets/painter v0.16.0 // indirect
+	github.com/go-widgets/painter v0.17.1 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/pprof v0.0.0-20240727154555-813a5fbdbec8 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -78,14 +80,14 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/log v1.47.0 // indirect
 	go.opentelemetry.io/otel/metric v1.47.0 // indirect
-	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/crypto v0.59.0 // indirect
 	golang.org/x/image v0.47.0 // indirect
-	golang.org/x/mod v0.41.0 // indirect
+	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/net v0.62.0 // indirect
-	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
-	golang.org/x/tools v0.51.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
+	golang.org/x/tools v0.52.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260928230214-8a89bd6388cc // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260928230214-8a89bd6388cc // indirect
 	google.golang.org/grpc v1.84.0 // indirect
